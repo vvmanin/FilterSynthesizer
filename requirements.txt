@@ -1,0 +1,10 @@
+streamlit
+numpy
+scipy
+sympy
+plotly
+mpmath
+pandas
+reportlab
+matplotlib
+cairosvg
