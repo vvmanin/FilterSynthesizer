@@ -23,6 +23,16 @@ What this script does, in order:
 import multiprocessing
 multiprocessing.freeze_support()        # no-op in dev, critical in the EXE
 
+# CPython imports _pylong lazily FROM C for large-int divmod / str conversion,
+# so PyInstaller's static analysis never sees it and leaves it out of the
+# bundle. SymPy's heugcd hits that path on big polynomial coefficients and the
+# EXE dies with ModuleNotFoundError. Import it here so it gets collected.
+# 3.12+ only; harmless to skip on 3.11, which has no such module.
+try:
+    import _pylong  # noqa: F401
+except ImportError:
+    pass
+
 # --- standard imports -------------------------------------------------------
 import os
 import sys

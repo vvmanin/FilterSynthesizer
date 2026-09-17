@@ -354,9 +354,10 @@ def render_response_tab():
     if missing:
         st.info("Pick a BOM for every section in the **Topology** tab to see the "
                 f"cascade response (still pending: section {', '.join(map(str, missing))}).")
-        st.caption(f"(diag) bom_picks: {sorted(st.session_state.get('bom_picks', {}))} · "
-                   f"_PICKS: {sorted(_PICKS)} · "
-                   f"hw_picked: {sorted(st.session_state.get('hw_picked', {}))} · "
+        if st.session_state.get("_debug_picks"):
+            st.caption(f"(diag) bom_picks: {sorted(st.session_state.get('bom_picks', {}))} · "
+                       f"_PICKS: {sorted(_PICKS)} · "
+                       f"hw_picked: {sorted(st.session_state.get('hw_picked', {}))} · "
                    f"stages: {[s['stage_num'] for s in realizable]}")
         report_ui.render_blocked(
             "section " + ", ".join(map(str, missing)) + " still "

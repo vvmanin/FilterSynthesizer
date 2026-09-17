@@ -7,6 +7,11 @@ os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
 os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 
+# Must run before any process pool is built. Streamlit installs a fresh
+# __main__ whose __spec__ is None and whose __file__ is app.py, which makes
+# multiprocessing order every spawned worker to re-execute this whole file.
+import mp_fix
+mp_fix.neutralize_main()
 import streamlit as st
 import concurrent.futures
 import numpy as np
@@ -30,11 +35,8 @@ from ui_components import (
     validate_filter_specs
 )
 
-@st.cache_resource
-def get_process_pool():
-    return concurrent.futures.ProcessPoolExecutor(max_workers=2)
-    
-executor = get_process_pool()
+
+from pool_utils import run_in_pool, format_exc_for_ui, env_summary
 
 
 # ============================================================
@@ -258,14 +260,14 @@ import time
 @st.cache_data(max_entries=50, show_spinner=False)
 def run_lowpass_in_background(response, order, fc_hz, alpha_max, as_db, manual_notches_hz, pb_even_mod, sb_rolloff):
     time.sleep(0.85) # <-- The Debounce Timer!
-    future = executor.submit(synthesize_lowpass, response, order, fc_hz, alpha_max, as_db, manual_notches_hz, pb_even_mod, sb_rolloff)
-    return future.result()
+    return run_in_pool(synthesize_lowpass, response, order, fc_hz, alpha_max, as_db, manual_notches_hz, pb_even_mod, sb_rolloff)
+    
 
 @st.cache_data(max_entries=50, show_spinner=False)
 def run_highpass_in_background(response, order, fc_hz, alpha_max, as_db, manual_notches_hz, pb_even_mod, sb_rolloff):
     time.sleep(0.85) # <-- The Debounce Timer!
-    future = executor.submit(synthesize_highpass, response, order, fc_hz, alpha_max, as_db, manual_notches_hz, pb_even_mod, sb_rolloff)
-    return future.result()
+    return run_in_pool(synthesize_highpass, response, order, fc_hz, alpha_max, as_db, manual_notches_hz, pb_even_mod, sb_rolloff)
+
 
 @st.cache_data(max_entries=50, show_spinner=False)
 def run_bandpass_in_background(
@@ -274,13 +276,13 @@ def run_bandpass_in_background(
     sb_rolloff_hp, sb_rolloff_lp
 ):
     time.sleep(0.05) # <-- The Debounce Timer!
-    future = executor.submit(
+    return run_in_pool(
         synthesize_bandpass, 
         response, order_hp, order_lp, f1_hz, f2_hz, alpha_max, as_hp_db, as_lp_db, 
         manual_notches_hp_hz, manual_notches_lp_hz, pb_even_mod_hp, pb_even_mod_lp, 
         sb_rolloff_hp, sb_rolloff_lp
     )
-    return future.result()
+
 
 @st.cache_data(max_entries=50, show_spinner=False)
 def run_bandreject_in_background(
@@ -288,12 +290,12 @@ def run_bandreject_in_background(
     manual_notches_hz, pb_even_mod_lp, pb_even_mod_hp, sb_rolloff
 ):
     time.sleep(0.85) # <-- The Debounce Timer!
-    future = executor.submit(
+    return run_in_pool(
         synthesize_bandreject,
         response, order_lp, order_hp, f1_hz, f2_hz, alpha_max, as_db, 
         manual_notches_hz, pb_even_mod_lp, pb_even_mod_hp, sb_rolloff
     )
-    return future.result()
+
 
 if filter_type == "Lowpass":
     P = final_lp_order // 2
@@ -322,7 +324,10 @@ if filter_type == "Lowpass":
                 pb_even_mod=pb_mod_lp, sb_rolloff=sb_roll_lp
             )
     except Exception as e:
-        st.error(f"**Engine Error:** {e}")
+        st.error(f"**Engine Error:** {type(e).__name__}: {e}")
+        with st.expander("Details (paste this into a bug report)"):
+            st.code(format_exc_for_ui(e))
+            st.code(env_summary())
 
 elif filter_type == "Highpass":
     P = final_hp_order // 2
@@ -350,7 +355,10 @@ elif filter_type == "Highpass":
                 pb_even_mod=pb_mod_hp, sb_rolloff=sb_roll_hp
             )
     except Exception as e:
-        st.error(f"**Engine Error:** {e}")
+        st.error(f"**Engine Error:** {type(e).__name__}: {e}")
+        with st.expander("Details (paste this into a bug report)"):
+            st.code(format_exc_for_ui(e))
+            st.code(env_summary())
 
 elif filter_type == "Bandpass":
     P_hp = final_hp_order // 2
@@ -405,7 +413,10 @@ elif filter_type == "Bandpass":
                 sb_rolloff_lp=sb_roll_lp
             )
     except Exception as e:
-        st.error(f"**Engine Error:** {e}")
+        st.error(f"**Engine Error:** {type(e).__name__}: {e}")
+        with st.expander("Details (paste this into a bug report)"):
+            st.code(format_exc_for_ui(e))
+            st.code(env_summary())
 
 elif filter_type == "Band-Reject":
     P_tot = (final_lp_order + final_hp_order) // 2
@@ -443,7 +454,10 @@ elif filter_type == "Band-Reject":
                 sb_rolloff=sb_roll_lp # <--- Coincident Notches toggle still passes safely!
             )
     except Exception as e:
-        st.error(f"**Engine Error:** {e}")
+        st.error(f"**Engine Error:** {type(e).__name__}: {e}")
+        with st.expander("Details (paste this into a bug report)"):
+            st.code(format_exc_for_ui(e))
+            st.code(env_summary())
         
 # ------------------------------------------------------------
 # 2. RENDER TAB: PLOTS & NOTCH GRID

@@ -311,7 +311,11 @@ def _submit(sig, cfg, opamp, topos, conv, dc_override, gen):
 
 
 def _drain_finished():
+    """True if at least one job completed on this tick (the Response tab, which
+    lives outside this fragment, then needs an app-wide rerun)."""
+    import traceback
     cur = st.session_state.get("hw_gen")
+    drained = False
     for sig, job in list(st.session_state.hw_jobs.items()):
         fut = job["future"]
         if not fut.done():
@@ -319,10 +323,13 @@ def _drain_finished():
         try:
             result = fut.result()
         except Exception as exc:
-            result = {"__error__": str(exc)}
+            result = {"__error__": f"{type(exc).__name__}: {exc}",
+                      "__traceback__": traceback.format_exc()}
         if job["gen"] == cur:
             st.session_state.hw_results[sig] = result
         st.session_state.hw_jobs.pop(sig, None)
+        drained = True
+    return drained
 
 
 # =====================================================================
@@ -1065,7 +1072,7 @@ def _render_no_realization(cfg, topos, dc_gain):
 
 def _render_results(res, n, opamp, cfg=None, topos=None, dc_gain=None):
     if "__error__" in res:
-        st.error(f"Solver error: {res['__error__']}")
+        st.error(f"Solver error: {res.get("__traceback__")}")
         return
     snapped = res.get("snapped") or []
     if not snapped:
@@ -1161,6 +1168,16 @@ def _render_results(res, n, opamp, cfg=None, topos=None, dc_gain=None):
         store[n] = _PICKS[n] = s_row              # durable copies
         cstore[n] = c_row                         # ideal (continuous) twin
 
+        # Flag a genuinely NEW pick. The comparison matters: run_every fires
+        # every 2 s and the sticky-pick logic re-writes the same row each tick,
+        # so an unguarded flag would rerun the app forever.
+        _sig = (pick_idx, str(s_row.get("topology")),
+                round(float(s_row.get("sens_score") or 0.0), 6),
+                round(float(s_row.get("snap_cost") or 0.0), 6))
+        if st.session_state.get(f"_pick_sig_{n}") != _sig:
+            st.session_state[f"_pick_sig_{n}"] = _sig
+            st.session_state["_picks_dirty"] = True
+        
         st.session_state.hw_picked[n] = s_row     # persist for the overall-gain readout
         _topo = s_row.get("topology")
         st.session_state.hw_picked_meta[n] = {
@@ -1985,7 +2002,8 @@ def render_topology_tab():
         st.session_state.bom_picks_cont = {
             k: v for k, v in st.session_state.get("bom_picks_cont", {}).items()
             if k in valid}
-    _drain_finished()
+    if _drain_finished():
+        st.session_state["_picks_dirty"] = True
 
     conv = _convergence_inputs()
     # Op-amp is now per-section (in each section's settings expander).
@@ -2000,3 +2018,10 @@ def render_topology_tab():
         _render_section(sec, conv, gen)
 
     _render_overall(sections)
+
+    # A row click reruns this fragment only, so the Response tab (rendered
+    # outside it, in app.py) would keep its stale placeholder until the user
+    # pressed R. Ask for one app-wide rerun; the flag is popped first, so this
+    # cannot loop against run_every.
+    if st.session_state.pop("_picks_dirty", False):
+        st.rerun(scope="app")

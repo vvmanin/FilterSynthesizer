@@ -25,11 +25,8 @@ call build_venv\Scripts\activate.bat
 REM --- 3) install pinned build-time deps + the app's runtime deps ----------
 echo [info] installing dependencies ...
 python -m pip install --upgrade pip
-python -m pip install ^
-    pyinstaller==6.* ^
-    streamlit ^
-    numpy scipy sympy plotly pandas ^
-    reportlab matplotlib cairosvg svglib
+python -m pip install pyinstaller==6.*
+python -m pip install -r requirements.txt
 
 REM --- 4) clean any previous build artifacts ------------------------------
 if exist build  rmdir /s /q build

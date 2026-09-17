@@ -1,10 +1,25 @@
-streamlit
-numpy
-scipy
-sympy
-plotly
-mpmath
-pandas
-reportlab
-matplotlib
-cairosvg
+# FilterSynthesizer runtime dependencies.
+#
+# Everything is bounded on purpose. The previous file was fully unpinned, so a
+# fresh install picked up whatever was current that day while the dev machine
+# kept an older resolution -- which is why the reported failures were not
+# reproducible locally.
+#
+# numpy < 2.4 is the important one. NumPy 2.4 (numpy/numpy#29030) added a
+# process-wide guard in numpy._core._multiarray_umath that raises
+#   ImportError: cannot load module more than once per process
+# if the extension is initialised twice in one process. mp_fix.py removes the
+# code path that did that, so this cap can be lifted once a build has been
+# smoke-tested against numpy >= 2.4 on Windows (both `streamlit run app.py` and
+# the PyInstaller EXE). Raise it deliberately, not by deleting the bound.
+
+streamlit>=1.37,<2          # st.fragment(run_every=...), st.dataframe(on_select=...), st.rerun(scope=...)
+numpy>=2.1,<2.4
+scipy>=1.13,<2
+sympy>=1.12,<2
+mpmath>=1.3,<2
+pandas>=2.2,<3
+plotly>=5.22,<7
+reportlab>=4.2,<5
+matplotlib>=3.8,<4
+cairosvg>=2.7,<3
