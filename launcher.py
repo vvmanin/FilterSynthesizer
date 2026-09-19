@@ -11,12 +11,15 @@ What this script does, in order:
      task without re-booting the whole Streamlit server (otherwise each of
      the 32 workers would spawn its own Streamlit, fork-bombing the machine).
   2) Resolve writable paths: the EXE may sit in Program Files (read-only); the
-     tf_cache_v3.json cache and any orphaned temp files need a writable home,
-     and the user-editable SVG folder needs to live NEXT TO the EXE.
+     tf_cache cache and any orphaned temp files need a writable home, and the
+     user-editable SVG folder needs to live NEXT TO the EXE.
   3) Boot Streamlit programmatically: Streamlit doesn't expose a clean
      library API for "start a server", so we invoke its CLI through
      streamlit.web.cli with a constructed argv. This is the documented
      pattern (and what `streamlit run` does internally).
+
+Also provides  FilterSynthesizer.exe --selftest , which writes a diagnostic
+report and exits without starting the server.
 """
 
 # --- 1) freeze_support MUST come first --------------------------------------
@@ -41,7 +44,6 @@ import threading
 import webbrowser
 from pathlib import Path
 from _version import APP_SLUG
-
 
 
 APP_ENTRY = "app.py"        # <-- your Streamlit app's main file
@@ -90,6 +92,71 @@ def find_free_port(preferred):
         return s.getsockname()[1]
 
 
+# ---------------------------------------------------------------------------
+#  Console / browser helpers
+# ---------------------------------------------------------------------------
+def enable_ansi():
+    """Let the console interpret ANSI colour codes, so Streamlit's startup
+    banner reads as text instead of  <-[34m <-[1m  noise. No-op off Windows."""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        for handle in (-11, -12):            # STDOUT, STDERR
+            h = k32.GetStdHandle(handle)
+            mode = ctypes.c_uint32()
+            if k32.GetConsoleMode(h, ctypes.byref(mode)):
+                k32.SetConsoleMode(h, mode.value | 0x0004)  # VT processing
+    except Exception:
+        pass
+
+
+def _has_http_handler():
+    """True if Windows has a program registered for http:// links.
+
+    os.startfile() SUCCEEDS even when nothing is registered: the shell puts up
+    its own "We can't open this 'http' link" dialog and reports no error, so
+    webbrowser.open_new_tab() returns True and cannot be used to detect this.
+    Ask the registry instead and skip the call -- otherwise the user gets a
+    blocking modal on every launch (Windows Sandbox, locked-down or freshly
+    imaged machines)."""
+    if os.name != "nt":
+        return True
+    import winreg
+    # Per-user default browser wins when present.
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                            r"Software\Microsoft\Windows\Shell\Associations"
+                            r"\UrlAssociations\http\UserChoice") as k:
+            if winreg.QueryValueEx(k, "ProgId")[0]:
+                return True
+    except OSError:
+        pass
+    # Machine-wide handler.
+    try:
+        with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT,
+                            r"http\shell\open\command") as k:
+            return bool(winreg.QueryValueEx(k, "")[0])
+    except OSError:
+        return False
+
+
+def _banner(url, opened):
+    """Always shown once the server is up, whether or not a browser opened."""
+    line = "=" * 62
+    print("\n" + line)
+    if opened:
+        print("  FilterSynthesizer is running.")
+        print(f"  If no browser opened, go to:   {url}")
+    else:
+        print("  FilterSynthesizer is running, but no web browser is")
+        print("  registered on this machine, so one could not be opened.")
+        print(f"  Open this address manually:    {url}")
+    print("  Keep this window open while you use the program.")
+    print(line + "\n", flush=True)
+
+
 def open_browser_when_ready(port):
     """Poll until Streamlit's TCP port accepts connections, then open the
     default browser. Background thread so it doesn't block the server boot."""
@@ -100,16 +167,50 @@ def open_browser_when_ready(port):
             s.settimeout(0.5)
             try:
                 s.connect(("127.0.0.1", port))
-                webbrowser.open_new_tab(f"http://localhost:{port}")
-                return
             except OSError:
                 time.sleep(0.2)
+                continue                     # not up yet -- keep polling
+        # Port is up. Open the browser OUTSIDE the socket block so a slow
+        # shell call doesn't hold the probe socket open.
+        url = f"http://localhost:{port}"
+        opened = False
+        if _has_http_handler():
+            try:
+                opened = bool(webbrowser.open_new_tab(url))
+            except Exception:
+                opened = False
+        # ALWAYS print: the return value above is unreliable on Windows, and
+        # Streamlit's own URL line is buried in ANSI escapes.
+        _banner(url, opened)
+        return
+    print(f"\n  Server did not start within 30 s. Try http://localhost:{port}\n",
+          flush=True)
+
+
+# ---------------------------------------------------------------------------
+def _run_selftest():
+    """--selftest: write a diagnostic report and exit, without the server."""
+    try:
+        import diagnostics
+    except Exception as exc:
+        print(f"diagnostics module unavailable: {type(exc).__name__}: {exc}")
+        input("Press Enter to close...")
+        return
+    path, text = diagnostics.write_report()
+    print(text)
+    print("\n" + "=" * 62)
+    print("  Report saved to:")
+    print(f"    {path}")
+    print("  Please send that file.")
+    print("=" * 62 + "\n")
+    input("Press Enter to close...")
 
 
 def main():
     # Worker processes spawned by the solver: freeze_support() above has
     # already short-circuited them, so we never reach this point in workers.
     # The main process continues here.
+    enable_ansi()
 
     # cache + temp files need a writable cwd
     data_dir = writable_app_data()
@@ -126,6 +227,12 @@ def main():
         bundled = resource_path("Section_Schematic_Diagrams")
         if os.path.isdir(bundled):
             os.environ["FILTERSYNTHESIZER_SVG_DIR"] = bundled
+
+    # Diagnostics mode: everything above has run (so the report sees the real
+    # runtime state), but the server never starts.
+    if "--selftest" in sys.argv:
+        _run_selftest()
+        return
 
     # pick the port, kick the browser opener BEFORE boot so it races nicely
     port = find_free_port(DEFAULT_PORT)
