@@ -44,6 +44,7 @@ if errorlevel 1 (
 REM --- 6) drop a user-editable SVG folder NEXT TO the EXE ------------------
 REM      (the launcher prefers this copy over the bundled fallback)
 xcopy /E /I /Y "Section_Schematic_Diagrams" "dist\FilterSynthesizer\Section_Schematic_Diagrams" >nul
+copy /Y "diagnose.bat" "dist\FilterSynthesizer\" >nul
 
 echo.
 echo [ok]   build finished.

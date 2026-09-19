@@ -37,7 +37,7 @@ from ui_components import (
 
 
 from pool_utils import run_in_pool, format_exc_for_ui, env_summary
-
+import diagnostics
 
 # ============================================================
 # BAND-REJECT "EQUALIZE DC AND HF GAINS" GAIN DISTRIBUTION
@@ -327,7 +327,7 @@ if filter_type == "Lowpass":
         st.error(f"**Engine Error:** {type(e).__name__}: {e}")
         with st.expander("Details (paste this into a bug report)"):
             st.code(format_exc_for_ui(e))
-            st.code(env_summary())
+            st.code(diagnostics.collect(deep=False))
 
 elif filter_type == "Highpass":
     P = final_hp_order // 2
@@ -358,7 +358,7 @@ elif filter_type == "Highpass":
         st.error(f"**Engine Error:** {type(e).__name__}: {e}")
         with st.expander("Details (paste this into a bug report)"):
             st.code(format_exc_for_ui(e))
-            st.code(env_summary())
+            st.code(diagnostics.collect(deep=False))
 
 elif filter_type == "Bandpass":
     P_hp = final_hp_order // 2
@@ -416,7 +416,7 @@ elif filter_type == "Bandpass":
         st.error(f"**Engine Error:** {type(e).__name__}: {e}")
         with st.expander("Details (paste this into a bug report)"):
             st.code(format_exc_for_ui(e))
-            st.code(env_summary())
+            st.code(diagnostics.collect(deep=False))
 
 elif filter_type == "Band-Reject":
     P_tot = (final_lp_order + final_hp_order) // 2
@@ -457,7 +457,7 @@ elif filter_type == "Band-Reject":
         st.error(f"**Engine Error:** {type(e).__name__}: {e}")
         with st.expander("Details (paste this into a bug report)"):
             st.code(format_exc_for_ui(e))
-            st.code(env_summary())
+            st.code(diagnostics.collect(deep=False))
         
 # ------------------------------------------------------------
 # 2. RENDER TAB: PLOTS & NOTCH GRID
