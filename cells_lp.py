@@ -194,7 +194,14 @@ def build_nonideal(topo):
     A_s = A_ol*wc / (wc + s*A_ol)
 
     if G["order"] == 3:
-        eq1 = V1/R1 - Va*(1/R1 + g4 + s*C1 + c2 + 1/R2) + Vb/R2 + Vc*(g4 + c2)
+        # R4 runs node a -> the op-amp (-) node Vm, so its node-a current must
+        # reference Vm, NOT Vc. The two coincide only under the ideal virtual
+        # short; once A(s) is finite they part company and the cell's Q is
+        # mis-predicted. cells_hp.build_nonideal already splits them this way
+        # ("R4 connects node a to the op-amp (-) node Vm, kept separate here") --
+        # the LP module kept build_ideal's fused Vc*(g4 + c2) form.
+        eq1 = (V1/R1 - Va*(1/R1 + g4 + s*C1 + c2 + 1/R2) + Vb/R2
+               + Vc*c2 + Vm*g4)
         unk = [Va, Vb, Vc, Vm, V2]; vin = False
     else:
         unk = [Vb, Vc, Vm, V2]; vin = True
@@ -203,11 +210,21 @@ def build_nonideal(topo):
 
     if G["shorted_r5"]:
         eq_vm = Vm - V2                                       # R5 short
-        eq5 = (V2 - A_s*(Vc - Vm)) / Ro
+        # Output-node KCL: the Thevenin source behind Ro AND the C4 feedback
+        # current (C4 ties node b to the output -- see eq2's +V2*s*C4).
+        # WITHOUT the C4 term this equation is just (V2 - A_s*(Vc-Vm))/Ro = 0,
+        # from which Ro DIVIDES OUT: the follower is then modelled as an ideal
+        # zero-output-impedance VCVS, C4's current is supplied for free, and the
+        # cell can never show the finite-Ro stopband feedthrough that a real
+        # Sallen-Key has. (Contrast cells_first_order's unity follower, where Ro
+        # legitimately cancels because nothing is connected to its output node.)
+        eq5 = (V2 - A_s*(Vc - Vm))/Ro + (V2 - Vb)*s*C4
     else:
         g5 = 1/R5
         eq_vm = Va*g4 - Vm*(g5 + g4 + g6) + V2*g5             # inverting node
-        eq5 = (V2 - A_s*(Vc - Vm))/Ro + (V2 - Vc)*g5 + (V2 - Vb)*s*C4
+        # R5 runs V2 <-> Vm (see eq_vm), not V2 <-> Vc -- same finite-gain
+        # distinction as eq1 above. cells_hp / cells_notch already use Vm here.
+        eq5 = (V2 - A_s*(Vc - Vm))/Ro + (V2 - Vm)*g5 + (V2 - Vb)*s*C4
 
     base = [eq1, eq2, eq3] if not vin else [eq2, eq3]
     eqs = base + [eq_vm, eq5]

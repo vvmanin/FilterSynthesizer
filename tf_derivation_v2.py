@@ -74,12 +74,18 @@ REGISTRY = {
     cells_am_notch.FAMILY: cells_am_notch,
 }
 
-CACHE_PATH_V2 = "tf_cache_v5.json"     # bumped v4->v5: AM non-ideal cases are now
-                                       # lightweight (MNA, no giant symbolic TF), so
-                                       # any stale v4 entry holding a ~10 MB non-ideal
-                                       # srepr must not be loaded and re-sympified.
-                                       # (v3->v4 had added the per-cell structural
-                                       # signature to _ni_key.)
+CACHE_PATH_V2 = "tf_cache_v6.json"     # bumped v5->v6: the LP non-ideal nodal
+                                       # model changed (output-node KCL fixes),
+                                       # so every v5 non-ideal entry is stale.
+
+# Revision of the NON-IDEAL nodal models. Bump this whenever a cell module's
+# build_nonideal changes shape WITHOUT changing var_list. _cell_struct_sig is
+# md5(var_list), so a model-only fix is invisible to it and every name-keyed
+# cache above would keep serving the OLD transfer function -- silently, because
+# the component interface still matches so nothing raises.
+# rev 2: cells_lp.build_nonideal -- C4 current at the output node; R4/R5
+#        referenced to Vm rather than Vc.
+NONIDEAL_MODEL_REV = 2
 
 
 # =====================================================================
@@ -157,16 +163,17 @@ def topo_for_name(name):
 
 
 def _cell_struct_sig(topo):
-    """Short hash of a cell's component set (its var_list), so a cell whose
-    TOPOLOGY changes under the SAME name gets a DIFFERENT non-ideal cache key.
-    A stale non-ideal TF (e.g. one derived before a component like C3/R5 was
-    added to the cell) then can never be served. Design-independent, like the
-    non-ideal TF itself."""
+    """Short hash of a cell's component set (its var_list) plus the non-ideal
+    model revision, so a cell whose TOPOLOGY *or* whose non-ideal nodal model
+    changes under the SAME name gets a DIFFERENT cache key. A stale non-ideal TF
+    (one derived before a component was added, or before a model fix) then can
+    never be served. Design-independent, like the non-ideal TF itself."""
     try:
         comps = sorted(str(v) for v in _module_for(topo).var_list(topo))
     except Exception:
         comps = []
-    return hashlib.md5("|".join(comps).encode()).hexdigest()[:10]
+    key = f"rev{NONIDEAL_MODEL_REV}|" + "|".join(comps)
+    return hashlib.md5(key.encode()).hexdigest()[:10]
 
 
 def _ni_key(name, topo):

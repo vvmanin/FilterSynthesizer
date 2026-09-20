@@ -263,7 +263,9 @@ def monte_carlo(sections, w, n_runs=200, c_tol_pct=5.0, r_bands=None,
         cd0 = comp_dict(sd["row"], sd["names"], sd["eval_opamp"])
         tol = {}
         for nm, val in cd0.items():
-            if nm.startswith("R"):
+            if nm in ("Ro", "A_ol", "GBWP_hz"):
+                tol[nm] = 0.0                 # op-amp parameters: fixed
+            elif nm.startswith("R"):
                 tol[nm] = _r_tol_frac(val, r_bands, default_r_tol_pct)
             elif nm.startswith("C"):
                 tol[nm] = c_tol_pct / 100.0
