@@ -718,35 +718,55 @@ def _render_choice(s, cont, idx):
 # =====================================================================
 
 
+# Regularization weight for the non-ideal pre-distortion solve. Fixed at the
+# former UI default — a solver-internal knob with no user-facing meaning, and
+# ignored entirely in ideal mode. Still visible (read-only) in each section's
+# "exact solver call" expander, since it rides in cfg.
+REG_WEIGHT = 0.02
+
+
 def _convergence_inputs():
+    """Global search settings.
+
+    The two tolerances are ENTERED AS PERCENT and RETURNED AS FRACTIONS: the
+    user reads 1.00, the solver gets 0.01. The widget keys carry a `_pct`
+    suffix so a value left over under the old fraction-based keys can never be
+    re-read as a percent — 0.01 would silently become a 100x tighter gate.
+    """
     with st.expander("Convergence Settings", expanded=False):
         level = st.select_slider(
             "Search thoroughness", options=list(SEARCH_PRESETS.keys()),
             value="Balanced", key="hw_effort",
             help="Breadth of the brute-force search (multistarts, minima kept, hints). "
                  "Higher finds more candidate BOMs but is slower.")
-        c = st.columns(3)
+        c = st.columns(2)
         with c[0]:
-            pole_tol = st.number_input(
-                "pole_tol", value=0.01, min_value=0.0, step=0.001, format="%.4f",
-                key="hw_pole_tol", help="Pole/notch tolerance for the parallel-C2 (notch) path.")
+            pole_tol_pct = st.number_input(
+                "Pole & notch frequency tolerance (%)", value=1.0,
+                min_value=0.0, max_value=100.0, step=0.1, format="%.2f",
+                key="hw_pole_tol_pct",
+                help="How far a candidate's realized pole frequency f₀ — and, on a notch "
+                     "section, its notch frequency f_z — may sit from the target. "
+                     "1.00 means ±1 %. Applies to the parallel-C2 (notch) search path. "
+                     "Q is not constrained by this.")
         with c[1]:
-            gain_tol = st.number_input(
-                "gain_tol", value=0.005, min_value=0.0, step=0.001, format="%.4f",
-                key="hw_gain_tol", help="DC-gain tolerance for the parallel-C2 (notch) path.")
-        with c[2]:
-            reg_w = st.number_input(
-                "reg_weight", value=0.02, min_value=0.0, step=0.005, format="%.3f",
-                key="hw_reg", help="Regularization for non-ideal pre-distortion "
-                                    "(ignored in ideal mode).")
+            gain_tol_pct = st.number_input(
+                "Passband gain tolerance (%)", value=0.5,
+                min_value=0.0, max_value=100.0, step=0.1, format="%.2f",
+                key="hw_gain_tol_pct",
+                help="How far a candidate's realized passband gain may sit from the "
+                     "target. 0.50 means ±0.5 %. DC gain for low-pass and notch cells, "
+                     "HF gain for high-pass.")
         top_k = st.number_input(
             "Max candidates to refine", min_value=1, max_value=500, value=30, step=5,
             key="hw_topk",
             help="Only the best N ideal solutions (by sensitivity) are op-amp pre-distorted "
                  "and snapped — the dominant cost for gained/notch cells. Lower = much faster, "
                  "fewer BOMs listed.")
-    return dict(SEARCH_PRESETS[level], pole_tol=pole_tol, gain_tol=gain_tol,
-                reg_weight=reg_w, top_k=top_k)
+    return dict(SEARCH_PRESETS[level],
+                pole_tol=pole_tol_pct / 100.0,
+                gain_tol=gain_tol_pct / 100.0,
+                reg_weight=REG_WEIGHT, top_k=top_k)
 
 
 # =====================================================================

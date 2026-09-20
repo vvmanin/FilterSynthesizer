@@ -19,7 +19,7 @@ import pandas as pd
 
 from filter_engine import synthesize_lowpass, synthesize_highpass, synthesize_bandpass, synthesize_bandreject
 from plot_utils import plot_main_magnitude, plot_passband_magnitude, plot_phase_delay, evaluate_h_complex, plot_pole_zero_map, plot_mnemoscheme_map
-from tf_utils import clean_roots, poly_to_latex, roots_to_biquad_latex, build_coeff_table, format_val, format_latex_val
+from tf_utils import clean_roots, poly_to_latex, roots_to_biquad_latex, build_coeff_table, format_val, format_latex_val, poly_to_latex_lines, roots_to_biquad_lines, tf_latex
 from pairing_utils import build_stage_bricks, auto_pair_stages, find_clicked_brick, compute_stage_gains
 from topology_tab import render_topology_tab
 from response_tab import render_response_tab
@@ -188,6 +188,31 @@ st.markdown("""
     /* 5. Tweak number input container margins */
     div[data-testid="stNumberInput"] {
         margin-bottom: -0.2rem !important;
+    }
+
+    /* 6. Wide screens: forms should not stretch with the plots. Panels get a
+          readable cap; tables, schematics and Bode plots live outside
+          expanders and stay full width. Long transfer functions now WRAP
+          (tf_utils.pack_terms), so Tab 2 needs no exemption — the overflow
+          rule below is only a safety net for a single pathological term. */
+    [data-testid="stExpander"] {
+        max-width: 1100px;
+    }
+    [data-testid="stExpander"] .katex-display {
+        overflow-x: auto;
+        overflow-y: hidden;
+        padding-bottom: 0.4rem;
+    }
+    /* Cap the input BOX, not the whole widget — capping the widget would
+       force a long label such as "Pole & notch frequency tolerance (%)"
+       to wrap onto two lines. */
+    div[data-testid="stNumberInput"] div[data-baseweb="input"] {
+        max-width: 280px;
+    }
+    /* The sidebar keeps its own width. */
+    [data-testid="stSidebar"] [data-testid="stExpander"],
+    [data-testid="stSidebar"] div[data-testid="stNumberInput"] div[data-baseweb="input"] {
+        max-width: none;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -1073,7 +1098,9 @@ with tab_roots:
             den_latex_1 = poly_to_latex(den_monic, scale_type)
             
             tf_1 = f"H(s) = {k_latex} \\cdot \\frac{{{num_latex_1}}}{{{den_latex_1}}}"
-            st.latex(tf_1)
+            st.latex(tf_latex(poly_to_latex_lines(num_monic, scale_type),
+                              poly_to_latex_lines(den_monic, scale_type),
+                              k_latex=k_latex))
             st.code(tf_1, language="latex")
             
             st.dataframe(build_coeff_table(num_monic, den_monic, k_disp, scale_type, include_k=True), use_container_width=True)
@@ -1084,7 +1111,8 @@ with tab_roots:
             num_latex_2 = poly_to_latex(num_dist, scale_type)
             
             tf_2 = f"H(s) = \\frac{{{num_latex_2}}}{{{den_latex_1}}}"
-            st.latex(tf_2)
+            st.latex(tf_latex(poly_to_latex_lines(num_dist, scale_type),
+                              poly_to_latex_lines(den_monic, scale_type)))
             st.code(tf_2, language="latex")
             
             st.dataframe(build_coeff_table(num_dist, den_monic, k_disp, scale_type, include_k=False), use_container_width=True)
@@ -1095,7 +1123,9 @@ with tab_roots:
             den_factored = roots_to_biquad_latex(clean_p, scale_type)
             
             tf_3 = f"H(s) = {k_latex} \\cdot \\frac{{{num_factored}}}{{{den_factored}}}"
-            st.latex(tf_3)
+            st.latex(tf_latex(roots_to_biquad_lines(clean_z, scale_type),
+                              roots_to_biquad_lines(clean_p, scale_type),
+                              k_latex=k_latex))
             st.code(tf_3, language="latex")
             
             # Reusing the Form 1 Monic table for reference

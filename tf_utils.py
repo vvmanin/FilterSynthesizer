@@ -183,3 +183,90 @@ def build_coeff_table(num_coeffs, den_coeffs, k_val, scale_type, include_k):
         df = pd.concat([df, k_df])
         
     return df
+
+import re   # if not already imported at the top
+
+
+# =====================================================================
+#  LINE WRAPPING  (shared vocabulary with the PDF report)
+#
+#  report_pdf.py packs poly_to_terms() into lines so a long transfer
+#  function wraps at +/- boundaries instead of running off the page. The
+#  screen had no equivalent: poly_to_latex() joins every term into one
+#  unbreakable line, so an 11th-order denominator is simply clipped at the
+#  container edge. These helpers give st.latex() the same treatment.
+#
+#  A term is NEVER split, so a wrapped expression can never hide part of
+#  itself — the same rule the report follows.
+# =====================================================================
+_CMD = re.compile(r"\\[a-zA-Z]+")
+_SUP = re.compile(r"\^\{([^}]*)\}")
+
+
+def term_width(term):
+    """Rough rendered width of one LaTeX term, in character widths.
+
+    KaTeX metrics are not reachable from Python, so this is a proxy: a
+    control sequence collapses to one glyph, a superscript counts at 70 %
+    (it is drawn small), braces cost nothing. It never has to be exact —
+    terms are atomic, so a bad estimate costs a slightly uneven line break
+    and nothing else.
+    """
+    t = _SUP.sub(lambda m: "x" * max(1, round(len(m.group(1)) * 0.7)), term)
+    t = _CMD.sub("·", t)
+    return len(t.replace("{", "").replace("}", "").replace(" ", ""))
+
+
+def pack_terms(terms, max_width=72, sep=" "):
+    """Group terms into lines of about `max_width`, never splitting a term.
+
+    A single term wider than the budget gets a line of its own rather than
+    being broken. Continuation lines start with the term's own +/- sign,
+    because poly_to_terms() already carries it.
+
+    `sep` must match how the flat form joins the same terms — " " for
+    poly_to_latex(), "" for roots_to_biquad_latex(), which concatenates.
+    That is what makes re-joining the lines reproduce the flat string
+    character for character; see the round-trip test in verify.py.
+    """
+    lines, cur, w = [], [], 0
+    for t in terms:
+        tw = term_width(t)
+        if cur and w + tw > max_width:
+            lines.append(sep.join(cur))
+            cur, w = [t], tw
+        else:
+            cur.append(t)
+            w += tw
+    if cur:
+        lines.append(sep.join(cur))
+    return lines or ["0"]
+
+
+def poly_to_latex_lines(poly_array, scale_type="Normalized", max_width=72):
+    """The polynomial as wrapped LaTeX rows (one row when it already fits)."""
+    return pack_terms(poly_to_terms(poly_array, scale_type), max_width, sep=" ")
+
+
+def roots_to_biquad_lines(roots, scale_type="Normalized", max_width=72):
+    """The factored form as wrapped rows, breaking between whole factors."""
+    return pack_terms(roots_to_biquad_factors(roots, scale_type), max_width, sep="")
+
+
+def stack_lines(lines):
+    """Rows -> one centred KaTeX block. A single row is returned unchanged,
+    so anything that already fits renders exactly as it does today.
+
+    `array` rather than `gathered`: it is the most widely supported
+    environment in KaTeX, and a parse failure here would replace the whole
+    transfer function with a red error box.
+    """
+    if len(lines) <= 1:
+        return lines[0] if lines else "0"
+    return r"\begin{array}{c}" + r" \\ ".join(lines) + r"\end{array}"
+
+
+def tf_latex(num_lines, den_lines, k_latex=None, lhs="H(s)"):
+    """Assemble a (wrapped) transfer function for st.latex()."""
+    head = f"{lhs} = " + (f"{k_latex} \\cdot " if k_latex else "")
+    return head + r"\frac{" + stack_lines(num_lines) + "}{" + stack_lines(den_lines) + "}"

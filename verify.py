@@ -142,3 +142,29 @@ for fam in ['LP', 'HP']:
             print(f"  {fam}-{real}-{gn:7s} G={G:<5} | gain={ref:.5f} (err {gain_err:.1e}) "
                   f"| -3dB@f0 err {pole_err:.1e}  {'OK' if good else 'FAIL'}")
 print(f"\n  realizer all-pass = {ok_all}")
+
+def test_wrapping_is_presentation_only():
+    """Wrapped display lines must re-join into the exact copy-paste string.
+
+    The user reads a wrapped H(s) but copies a flat one; those two must never
+    be allowed to drift apart. `sep` is what makes this exact — poly_to_latex
+    joins terms with a space, roots_to_biquad_latex concatenates them.
+    """
+    import numpy as np
+    from tf_utils import (poly_to_latex, poly_to_latex_lines,
+                          roots_to_biquad_latex, roots_to_biquad_lines)
+
+    polys = [
+        np.array([1.0]),                                   # constant
+        np.array([1.0, 1.0]),                              # 1st order
+        np.array([1.0, 1.414214, 1.0]),                    # 2nd order
+        np.array([1.0, -2.5, 3.0, -0.125]),                # negative coeffs
+        np.array([1.0, 1.2e-6, 3.4e5, 9.9e9]),             # scientific notation
+        np.array([1.0, 0.0, 0.0, 5.0]),                    # pruned interior zeros
+        np.concatenate([[1.0], np.linspace(0.5, 9.5, 20)]),  # 20th order
+    ]
+    for p in polys:
+        assert " ".join(poly_to_latex_lines(p)) == poly_to_latex(p), p
+
+    roots = [-0.2+0.97j, -0.2-0.97j, -0.55+0.7j, -0.55-0.7j, -0.9+0j]
+    assert "".join(roots_to_biquad_lines(roots)) == roots_to_biquad_latex(roots)
