@@ -93,6 +93,12 @@ def opamp_label(n):
 # Hardcoded for the web demo. Expose a control only for local/desktop use.
 N_CORES = 32
 
+# Developer-only UI: the per-section "exact solver call" view. Hidden by
+# default. Set FILTERSYNTHESIZER_DEBUG=1 before launch to show it for that
+# session — no code edit or rebuild needed, works for the EXE too — or
+# replace the right-hand side with True to restore it permanently.
+DEBUG_UI = os.environ.get("FILTERSYNTHESIZER_DEBUG") == "1"
+
 # Ro in MOhm (1.0e-3 MOhm = 1 kohm). Extend with real parts over time.
 OPAMP_LIBRARY = {
     "Ideal (no op-amp limits)": None,
@@ -720,8 +726,8 @@ def _render_choice(s, cont, idx):
 
 # Regularization weight for the non-ideal pre-distortion solve. Fixed at the
 # former UI default — a solver-internal knob with no user-facing meaning, and
-# ignored entirely in ideal mode. Still visible (read-only) in each section's
-# "exact solver call" expander, since it rides in cfg.
+# ignored entirely in ideal mode. It rides in cfg, so it shows in the
+# developer solver-call view when DEBUG_UI is on.
 REG_WEIGHT = 0.02
 
 
@@ -1092,7 +1098,9 @@ def _render_no_realization(cfg, topos, dc_gain):
 
 def _render_results(res, n, opamp, cfg=None, topos=None, dc_gain=None):
     if "__error__" in res:
-        st.error(f"Solver error: {res.get("__traceback__")}")
+        st.error(f"**Solver error:** {res['__error__']}")
+        with st.expander("Details (paste this into a bug report)"):
+            st.code(res.get("__traceback__") or "", language="text")
         return
     snapped = res.get("snapped") or []
     if not snapped:
@@ -1808,18 +1816,19 @@ def _render_section(sec, conv, gen):
     running = sig in st.session_state.hw_jobs
     have = sig in st.session_state.hw_results
 
-    with st.expander(f"🔧 Section {n} — exact solver call", expanded=False):
-        st.caption("Arguments sent to synthesize(); diff against your isolated cfg. "
-                   "MAX_R_RATIO, C_max and C_series are the usual count-changing mismatches.")
-        st.json({
-            "cfg": _build_cfg(sec, env, conv, cfg_k_override),
-            "topologies": topos,
-            "dc_gain": dc_target,
-            "n_cores": N_CORES,
-            "search": {k: conv[k] for k in ("ratio_starts", "anchored_starts",
-                                            "max_valleys", "hints_per_combo",
-                                            "pole_tol", "gain_tol", "top_k")},
-        })
+    if DEBUG_UI:
+        with st.expander(f"🔧 Section {n} — exact solver call", expanded=False):
+            st.caption("Arguments sent to synthesize(); diff against your isolated cfg. "
+                       "MAX_R_RATIO, C_max and C_series are the usual count-changing mismatches.")
+            st.json({
+                "cfg": _build_cfg(sec, env, conv, cfg_k_override),
+                "topologies": topos,
+                "dc_gain": dc_target,
+                "n_cores": N_CORES,
+                "search": {k: conv[k] for k in ("ratio_starts", "anchored_starts",
+                                                "max_valleys", "hints_per_combo",
+                                                "pole_tol", "gain_tol", "top_k")},
+            })
 
     atten_blocked = (mode == "atten") and not ATTEN_AVAILABLE
     # MFB now covers EVERY section kind: LP/LPn, HP/HPn, band-pass (2BP-MFB / -QE)
