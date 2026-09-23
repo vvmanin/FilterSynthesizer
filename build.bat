@@ -44,7 +44,22 @@ if errorlevel 1 (
 REM --- 6) drop a user-editable SVG folder NEXT TO the EXE ------------------
 REM      (the launcher prefers this copy over the bundled fallback)
 xcopy /E /I /Y "Section_Schematic_Diagrams" "dist\FilterSynthesizer\Section_Schematic_Diagrams" >nul
-copy /Y "diagnose.bat" "dist\FilterSynthesizer\" >nul
+
+REM --- 7) user documents NEXT TO the EXE -----------------------------------
+REM      Committed PDFs only -- they are built at release time with
+REM      python docs\manual\tools\build_pdf.py, never here.
+set "DOCS_MISSING="
+for %%F in (Quick_Start.pdf User_Manual.pdf) do (
+    if exist "docs\%%F" (
+        copy /Y "docs\%%F" "dist\FilterSynthesizer\" >nul
+    ) else (
+        echo [warn] docs\%%F not found -- the bundle ships without it.
+        set "DOCS_MISSING=1"
+    )
+)
+if defined DOCS_MISSING (
+    echo [warn] Build the manuals with:  python docs\manual\tools\build_pdf.py
+)
 
 echo.
 echo [ok]   build finished.

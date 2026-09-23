@@ -57,6 +57,19 @@ CONTAINERS = {"expander", "tabs", "popover", "form", "dialog", "status"}
 NO_LABEL_FIRST = {"tabs"}
 
 
+def find_root(start=None) -> Path:
+    """The app folder: the first directory at or above this script holding app.py.
+
+    Lets the tooling live anywhere — it ships under docs/manual/tools/ — and
+    still be run from any working directory without --root.
+    """
+    p = Path(start or __file__).resolve()
+    for cand in [p] + list(p.parents):
+        if (cand / "app.py").exists():
+            return cand
+    return Path.cwd()
+
+
 def _src(node) -> str | None:
     """Best-effort source text of an AST node, for defaults and limits."""
     if node is None:
@@ -334,13 +347,14 @@ def as_markdown(records):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
-    ap.add_argument("--root", default=".", help="app source folder (holds app.py)")
+    ap.add_argument("--root", default=None,
+                    help="app source folder (holds app.py); auto-detected by default")
     ap.add_argument("--out", default="docs/manual/ui_inventory.json")
     ap.add_argument("--print", dest="show", action="store_true")
     ap.add_argument("--markdown", action="store_true")
     a = ap.parse_args(argv)
 
-    root = Path(a.root).resolve()
+    root = Path(a.root).resolve() if a.root else find_root()
     records, missing = build(root)
     for m in missing:
         print(f"  ! listed UI file not found: {m}", file=sys.stderr)
@@ -365,6 +379,8 @@ def main(argv=None):
         "controls": records,
     }
     out = Path(a.out)
+    if not out.is_absolute():                 # relative paths resolve against
+        out = root / out                      # the app folder, not the CWD
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(payload, indent=1, ensure_ascii=False), encoding="utf-8")
     n = sum(1 for r in records if r["kind"] == "control")

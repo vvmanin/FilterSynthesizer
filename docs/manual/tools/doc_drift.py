@@ -7,17 +7,17 @@ Compares three things:
 
   1. the LIVE UI, re-extracted from the source right now (ui_inventory.py)
   2. the SNAPSHOT the manual was written against (docs/manual/ui_inventory.json)
-  3. the DOCS themselves — quick_start.md, user_manual.md, shots.yaml
+  3. the DOCS themselves — quick_start.md, user_manual.md, SCREENSHOTS.md
 
 and reports, per control:
 
   REMOVED   documented but no longer in the source   -> delete those paragraphs
   ADDED     in the source but documented nowhere     -> write them up
   CHANGED   label / default / range / help moved     -> re-read that paragraph
-  STALE FIG a figure shows a control that changed    -> re-capture that figure
+  STALE FIG a figure shows a control that changed    -> retake that screenshot
 
-    python tools/doc_drift.py                 # report; exit 1 if anything drifted
-    python tools/doc_drift.py --accept        # adopt the live UI as the new snapshot
+    python docs/manual/tools/doc_drift.py                 # report; exit 1 if anything drifted
+    python docs/manual/tools/doc_drift.py --accept        # adopt the live UI as the new snapshot
 
 A control counts as "documented" when its session-state key appears inside
 backticks in one of the markdown sources — `hw_topk`. That is the whole
@@ -38,7 +38,7 @@ import ui_inventory as INV                                    # noqa: E402
 
 DOCS = ["docs/manual/quick_start.md", "docs/manual/user_manual.md"]
 SNAPSHOT = "docs/manual/ui_inventory.json"
-SHOTS = "docs/manual/shots.yaml"
+SHOTS = "docs/manual/SCREENSHOTS.md"
 
 # Fields whose change means a human must re-read the prose around the control.
 WATCH = ("label", "default", "min", "max", "options", "help", "panel", "widget")
@@ -73,44 +73,31 @@ def _documented(root: Path):
     return found
 
 
-def _figures(root: Path):
-    """figure id -> [control keys it shows], parsed from shots.yaml.
+_FIG_HEAD = re.compile(r"^#{2,4}\s+(\d\d[a-z]?-[A-Za-z0-9-]+)\.png\b")
+_FIG_CTL = re.compile(r"^\W*Controls\W", re.I)
+_TICKED = re.compile(r"`([^`]+)`")
 
-    Uses PyYAML when present and falls back to a small line parser, so the
-    drift check never fails just because a dependency is missing.
+
+def _figures(root: Path):
+    """figure id -> [controls it shows], parsed from SCREENSHOTS.md.
+
+    Each figure there is a heading naming its file, and a line starting
+    "Controls:" with the controls in backticks:
+
+        ### 08-convergence.png
+        Controls: `hw_effort` `hw_pole_tol_pct` `hw_gain_tol_pct` `hw_topk`
     """
     p = root / SHOTS
     if not p.exists():
         return {}
-    text = p.read_text(encoding="utf-8", errors="replace")
-    try:
-        import yaml                                            # type: ignore
-        data = yaml.safe_load(text) or {}
-        return {s["id"]: list(s.get("controls") or [])
-                for s in data.get("shots", []) if s.get("id")}
-    except Exception:
-        pass
-    out, cur, in_ctl = {}, None, False
-    for raw in text.splitlines():
-        line = raw.rstrip()
-        m = re.match(r"\s*-?\s*id:\s*(\S+)", line)
+    out, cur = {}, None
+    for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
+        m = _FIG_HEAD.match(line.strip())
         if m:
-            cur, in_ctl = m.group(1).strip("\"'"), False
+            cur = m.group(1)
             out.setdefault(cur, [])
-            continue
-        if re.match(r"\s*controls:", line):
-            in_ctl = True
-            inline = line.split(":", 1)[1].strip()
-            if inline.startswith("["):
-                out[cur] = [x.strip(" \"'") for x in inline.strip("[]").split(",") if x.strip()]
-                in_ctl = False
-            continue
-        if in_ctl and cur:
-            m = re.match(r"\s*-\s*(\S+)", line)
-            if m:
-                out[cur].append(m.group(1).strip("\"'"))
-            elif line.strip():
-                in_ctl = False
+        elif cur and _FIG_CTL.match(line.strip()):
+            out[cur] += [t for t in _TICKED.findall(line) if t.lower() != "none"]
     return out
 
 
@@ -164,7 +151,7 @@ def report(root: Path, accept=False):
             w(f"      documented in: {', '.join(where) if where else 'nowhere (nothing to do)'}\n")
             figs = [f for f, c in figures.items() if k in c]
             if figs:
-                w(f"      shown in figures: {', '.join(figs)} — re-capture\n")
+                w(f"      shown in figures: {', '.join(figs)} — retake it\n")
 
     if added:
         w(f"\nADDED — {len(added)} new control(s):\n")
@@ -186,10 +173,10 @@ def report(root: Path, accept=False):
                 w(f"      re-read: {', '.join(where)}\n")
 
     if stale_figs:
-        w(f"\nSTALE FIGURES — {len(stale_figs)} need re-capture:\n")
+        w(f"\nSTALE FIGURES — {len(stale_figs)} need retaking:\n")
         for fid, ctl in sorted(stale_figs.items()):
             w(f"  * {fid}  (shows {', '.join('`%s`' % c for c in ctl)})\n")
-            w(f"      python tools/capture_shots.py --only {fid}\n")
+            w("      retake it by hand — see SCREENSHOTS.md\n")
 
     if undocumented:
         w(f"\nUNDOCUMENTED — {len(undocumented)} control(s) with no key in the docs:\n")
@@ -216,11 +203,11 @@ def report(root: Path, accept=False):
     if orphan:
         w("\nORPHAN FIGURES — captured but shown in no document:\n")
         for f in orphan:
-            w(f"  o {f}  (use it, or drop it from shots.yaml)\n")
+            w(f"  o {f}  (use it, or drop it from SCREENSHOTS.md)\n")
     if unlisted:
-        w("\nUNLISTED FIGURES — referenced by a document but not in shots.yaml:\n")
+        w("\nUNLISTED FIGURES — referenced by a document but not in SCREENSHOTS.md:\n")
         for f in unlisted:
-            w(f"  ! {f}  (nothing will ever capture it)\n")
+            w(f"  ! {f}  (add it to SCREENSHOTS.md)\n")
 
     # A CSS-only edit changes no control, so nothing above would fire — but it
     # restyles every screenshot. The style hash is the only thing that notices.
@@ -230,7 +217,7 @@ def report(root: Path, accept=False):
     if restyled:
         w("\nAPP CSS CHANGED — no control moved, but the layout did:\n")
         w(f"  style_hash {snap_style} -> {live_style}\n")
-        w("  Every figure may need re-capture:  python tools/capture_shots.py\n")
+        w("  Layout changed — check every screenshot against the app\n")
     elif snap_style is None:
         w("\n  (snapshot predates style hashing — run --accept to start tracking CSS)\n")
 
@@ -253,11 +240,13 @@ def report(root: Path, accept=False):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
-    ap.add_argument("--root", default=".", help="app source folder (holds app.py)")
+    ap.add_argument("--root", default=None,
+                    help="app source folder (holds app.py); auto-detected by default")
     ap.add_argument("--accept", action="store_true",
                     help="adopt the live UI as the new snapshot (do this WITH the doc edits)")
     a = ap.parse_args(argv)
-    return report(Path(a.root).resolve(), accept=a.accept)
+    root = Path(a.root).resolve() if a.root else INV.find_root()
+    return report(root, accept=a.accept)
 
 
 if __name__ == "__main__":

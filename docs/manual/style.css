@@ -1,0 +1,105 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later
+   style.css — print stylesheet for the FilterSynthesizer documents.
+   Consumed by tools/build_pdf.py (Chromium print-to-PDF, A4).
+   Page margins live in build_pdf.py, not here. */
+
+:root{
+  --ink:#16191d; --muted:#5b636d; --rule:#d8dde3; --accent:#1f5fa8;
+  --code-bg:#f4f6f8; --figure-bg:#fbfcfd;
+  --body: "Segoe UI", -apple-system, Roboto, Helvetica, Arial, sans-serif;
+  --mono: "Cascadia Mono", Consolas, "DejaVu Sans Mono", monospace;
+}
+
+html{ font-size:10.5pt; }
+body{ font-family:var(--body); color:var(--ink); line-height:1.5; margin:0; }
+main{ max-width:none; }
+
+/* ---------------------------------------------------------- cover ------ */
+.cover{ height:238mm; display:flex; flex-direction:column;
+        justify-content:center; break-after:page; }
+.cover-kicker{ font-size:11pt; letter-spacing:.14em; text-transform:uppercase;
+               color:var(--accent); font-weight:600; }
+.cover-title{ font-size:34pt; line-height:1.1; margin:.25em 0 .1em;
+              border:0; padding:0; break-before:avoid; }
+.cover-sub{ font-size:13pt; color:var(--muted); margin:0 0 2.2em; max-width:118mm; }
+.cover-meta{ font-size:9.5pt; color:var(--muted); margin:0; }
+
+/* ------------------------------------------------------- headings ------ */
+h1,h2,h3,h4{ line-height:1.22; break-after:avoid; }
+main>h1{ font-size:20pt; margin:0 0 .7em; padding-bottom:.28em;
+         border-bottom:2px solid var(--accent); break-before:page; }
+main>h1:first-child{ break-before:avoid; }
+h2{ font-size:14pt; margin:1.7em 0 .5em; }
+h3{ font-size:11.5pt; margin:1.25em 0 .35em; color:#2b3138; }
+h4{ font-size:10.5pt; margin:1em 0 .3em; color:var(--muted);
+    text-transform:uppercase; letter-spacing:.05em; }
+
+p{ margin:.55em 0; orphans:3; widows:3; }
+ul,ol{ margin:.5em 0 .5em 1.1em; padding-left:.5em; }
+li{ margin:.2em 0; }
+a{ color:var(--accent); text-decoration:none; }
+hr{ border:0; border-top:1px solid var(--rule); margin:1.6em 0; }
+
+/* ---------------------------------------------------------- code ------- */
+code{ font-family:var(--mono); font-size:.88em; background:var(--code-bg);
+      padding:.08em .32em; border-radius:3px; }
+pre{ background:var(--code-bg); border:1px solid var(--rule); border-radius:4px;
+     padding:.7em .9em; overflow:hidden; break-inside:avoid; }
+pre code{ background:none; padding:0; font-size:.84em; line-height:1.42; }
+
+/* --------------------------------------------------------- figures ----- */
+figure{ margin:1.1em 0 1.3em; break-inside:avoid; text-align:center; }
+/* inline-block so the frame hugs the image instead of stretching to the
+   text column — narrow crops (the sidebar) would otherwise sit in a wide
+   empty box. */
+.shot{ display:inline-block; max-width:100%;
+       background:var(--figure-bg); border:1px solid var(--rule);
+       border-radius:5px; padding:6px; }
+/* Default: build_pdf.py gives every image an inline width at ONE uniform
+   scale (MM_PER_CSS_PX), so UI text is the same size in every figure; only
+   a crop wider than the column is shrunk. */
+.shot img{ display:block; max-width:100%; height:auto; }
+/* Overrides, written on the image in Markdown — ![cap](img/x.png){.half} —
+   and moved onto the frame by build_pdf.py. Rarely needed now. */
+.shot.narrow{ width:58%; }
+.shot.half{ width:74%; }
+.shot.narrow img, .shot.half img{ width:100%; }
+.shot.tall{ width:auto; }
+.shot.tall img{ width:auto; height:170mm; max-width:100%; }
+figcaption{ font-size:8.8pt; color:var(--muted); margin-top:.45em;
+            line-height:1.4; text-align:left; }
+/* A row: several crops side by side under one caption — write the images on
+   one line in Markdown. Each frame gets at most half the column; tall crops
+   are capped by height so a pair of sidebar halves fits on one A4 page. */
+figure.row{ display:flex; flex-wrap:wrap; justify-content:center;
+            align-items:flex-start; gap:5mm; }
+figure.row > .shot{ flex:0 1 auto; max-width:47%; }
+figure.row > .shot img{ max-width:100%; height:auto; max-height:212mm;
+                        object-fit:contain; }
+figure.row > figcaption{ flex-basis:100%; }
+figcaption b{ color:var(--ink); }
+
+/* ---------------------------------------------------------- tables ----- */
+table{ border-collapse:collapse; width:100%; margin:.9em 0; font-size:9.2pt;
+       break-inside:auto; }
+thead{ display:table-header-group; }          /* repeat header across pages */
+tr{ break-inside:avoid; }
+th,td{ border:1px solid var(--rule); padding:.34em .55em; text-align:left;
+       vertical-align:top; }
+th{ background:#eef2f6; font-weight:600; }
+td code{ white-space:nowrap; }
+
+/* -------------------------------------------------------- callouts ----- */
+blockquote{ margin:.9em 0; padding:.6em .9em; border-left:3px solid var(--accent);
+            background:#f5f8fc; break-inside:avoid; }
+blockquote p{ margin:.2em 0; }
+blockquote.callout.warning{ border-left-color:#c77700; background:#fff8ee; }
+blockquote.callout.danger { border-left-color:#b3261e; background:#fdf1f0; }
+blockquote.callout.tip    { border-left-color:#1e7a4b; background:#f0f9f4; }
+
+/* ---------------------------------------------------------- misc ------- */
+.page-break{ break-before:page; }
+kbd{ font-family:var(--mono); font-size:.84em; border:1px solid #c3cad2;
+     border-bottom-width:2px; border-radius:3px; padding:.05em .35em;
+     background:#fff; }
+.small{ font-size:9pt; color:var(--muted); }

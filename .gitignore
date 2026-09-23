@@ -221,9 +221,28 @@ FilterSynthesizer-diagnostic-*.txt
 
 
 # derived TF caches (regenerated at runtime)
-tf_cache_v2.json
-tf_cache_v3.json
-tf_cache_v4.json
-tf_cache_v5.json
-tf_cache_v6.json
 tf_cache*.json
+
+# --- user documents ---------------------------------------------------
+# Intermediate HTML from build_pdf.py (deleted after a normal build,
+# left behind by --html or a crash)
+docs/manual/_build_*.html
+
+
+# --- app outputs saved into the repo by accident ----------------------
+FilterReport_*.pdf
+*_schematic*.svg
+*_schematic*.png
+
+# --- delivery archives unpacked in place ------------------------------
+/*.zip
+
+# --- Streamlit local config / secrets ---------------------------------
+.streamlit/secrets.toml
+
+# --- OS / editor junk -------------------------------------------------
+Thumbs.db
+desktop.ini
+.DS_Store
+.vscode/
+.idea/
