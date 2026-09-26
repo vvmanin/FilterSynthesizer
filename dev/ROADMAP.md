@@ -130,7 +130,6 @@ first.
 | FS-002 | Response Plots: phase/GD on main plot, compact sections | P2 *(s)* | PROPOSED | medium | FS-001 (soft) |
 | FS-003 | Fold "Roots & Transfer Function" tab into Response Plots | P2 *(s)* | PROPOSED | medium | FS-002 (hard) |
 | FS-004 | Biquad Pairing tab: compact layout, rad/s note font | P2 *(s)* | PROPOSED | medium | FS-001 (soft) |
-| FS-005 | Op-amp library as a separate module/data file | P2 *(s)* | VALIDATING | medium | — |
 | FS-006 | Bessel and equiripple-delay responses | P1 | PROPOSED | xhigh | — |
 | FS-007 | Custom filter design (coefficients or poles/zeros) | P1 | PROPOSED | plan xhigh / build high | FS-003 (soft), FS-006 (soft) |
 | FS-008 | LTspice export with Monte Carlo presets | P1 | PROPOSED | plan xhigh / build high | FS-005 (hard) |
@@ -146,8 +145,8 @@ first.
 
 *(s)* = suggested priority, awaiting maintainer confirmation.
 
-Suggested order: FS-005 → FS-006 → FS-008 (the P1 track, FS-005 as its small
-prerequisite), FS-007 in parallel planning; UI polish FS-001 → FS-002 → FS-003
+Suggested order: FS-006 → FS-008 (the P1 track; its prerequisite FS-005 is
+done), FS-007 in parallel planning; UI polish FS-001 → FS-002 → FS-003
 → FS-004 can be interleaved as low-risk medium-effort sessions.
 
 Defect items FS-015/016/017 have no hard dependencies and block nothing; slot
@@ -215,20 +214,6 @@ stage assignments); FS-016 before FS-007 build (custom designs reuse pairing).
 - **Validation:** Visual check with an odd-order design (3rd-order sections on and off); all controls still work; stage assignments unchanged vs baseline.
 - **Updated:** 2026-09-26
 
-### FS-005 — Op-amp library as a separate module/data file
-- **State:** VALIDATING
-- **Priority:** P2 (suggested; small prerequisite for FS-008)
-- **Effort:** medium
-- **Tiers:** C, D
-- **Depends on:** —
-- **Contracts:** —
-- **Files:** new `opamp_library.py` + `opamp_library.json`; `topology_tab.py` (picker, `opamp_label`), `response_tab.py` (`_eval_opamp`), `scoring.py` / `nonideal_solver.py` (name lookup), `filter_synthesis.py` (`IDEAL_OPAMP` alias), `launcher.py`, `FilterSynthesizer.spec`, `build.bat`
-- **Goal:** One source of op-amp parameters, editable without touching `topology_tab.py`.
-- **Scope:** In — the two tables merged into `opamp_library.json` (8 parts); per-user overlay file `%LOCALAPPDATA%\FilterSynthesizer\opamp_library_user.json` written by the UI; Custom… → "Save to library" under a new, conflict-checked name; ✎ Edit popover on any part (save / save-as-new-name / revert edited built-in / delete user part); fields reserved for FS-008/009 (`spice_model`, `en_nV_rtHz`, `in_pA_rtHz`). Out — new parts beyond the merged set; editing the reserved fields in the UI (file only for now).
-- **Validation:** Scratch check of `opamp_library` (8 parts; solver params `==` the old dict literals, so `_job_sig` and baselines are unchanged; name conflicts incl. case/whitespace/reserved; override/revert/delete; malformed file and duplicate keys reported, no crash; hand edits picked up by mtime). App run: dropdown lists Ideal + 8 + Custom; save Custom as a part (clashing name rejected), edit TL072 → "built-in · edited" and re-solve, revert, delete → section falls back to Ideal; VCVS LP section solved with a library part. `verify.py` passes. `build.bat` bundle not yet exercised.
-- **Notes:** Decisions — JSON (open standard, stdlib read+write, no new dependency; TOML needs a writer dep, CSV breaks under locale decimal separators, `.py` would execute code). Two files merged by name so upgrades never overwrite user parts/edits and the exe folder need not be writable; shipped parts stay editable (datasheet values are typical — users need worst-case/measured values) via overrides, and Revert restores the shipped values. Names compare trimmed / whitespace-collapsed / casefolded; `Ideal…`/`Custom…` reserved. The scoring parts (TL072/LM358/OPA1656/NE5532) now appear in the dropdown; both old tables used MOhm (the Ro difference was just different parts). `MAX9636/MAX9637/ MAX9638` label tidied to `MAX9636 / MAX9637 / MAX9638`. Unified Custom defaults (1e5, 1 MHz, 1200 Ω) — the Response tab / schematic label fallbacks used 0.95e5 Hz / 1000 Ω. FS-008 should store only the SPICE *model name* (vendor model files carry their own licences). The Topology tab is a `run_every=2` fragment, so library notes are kept in state for 10 s instead of popped.
-- **Updated:** 2026-09-27
-
 ### FS-006 — Bessel and equiripple-delay responses
 - **State:** PROPOSED
 - **Priority:** P1
@@ -269,7 +254,8 @@ stage assignments); FS-016 before FS-007 build (custom designs reuse pairing).
 - **Scope:** In — netlist per cell family (VCVS/MFB/AM, 1st-order), snapped E-series values, op-amp as a parametrized behavioural/universal model from the library, `.ac` sweep matching the tool's range, MC via tolerance functions + `.step`. Out — noise (FS-009), QSpice (FS-010).
 - **Validation:** For one design per family: LTspice AC result overlays the tool's "realized" Bode within plotting tolerance; MC spread comparable to the tool's MC band; file opens with no errors in current LTspice.
 - **Open questions:** The draft says "import" — confirmed that this means *export from the tool, opened in LTspice*? Netlist (`.cir`, simpler) or schematic (`.asc`, needs per-cell layout coordinates), or netlist first then `.asc`? Specific op-amp vendor models, or a generic GBW/Aol model?
-- **Updated:** 2026-09-26
+- **Notes:** Op-amp data comes from `opamp_library` (FS-005): use the `spice_model` field and store only the model *name* — vendor model files carry their own licences, so never embed their text.
+- **Updated:** 2026-09-27
 
 ### FS-009 — Noise analysis in LTspice output
 - **State:** PROPOSED
@@ -403,4 +389,4 @@ stage assignments); FS-016 before FS-007 build (custom designs reuse pairing).
 
 One line per item: `FS-NNN — title — DONE|DROPPED YYYY-MM-DD — commit/reason`.
 
-_Empty._
+FS-005 — Op-amp library as a separate module/data file — DONE 2026-09-27 — 6f17ca2
