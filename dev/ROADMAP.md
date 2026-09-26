@@ -142,6 +142,8 @@ first.
 | FS-015 | Topology tab Overall filter: BP values off (validate BR) | P2 *(s)* | PROPOSED | plan high / build medium | — |
 | FS-016 | Auto-pairing review: all types, esp. BP/BR; Q < 0.5 pairs | P2 *(s)* | PROPOSED | plan xhigh / build high | — |
 | FS-017 | Manual pairing override: unreliable clicks | P2 *(s)* | PROPOSED | medium | — |
+| FS-018 | Op-amp data: provenance field + review of shipped parts | P2 *(s)* | PROPOSED | medium | — |
+| FS-019 | Wider op-amp library: first batch + standing process | P3 *(s)* | PROPOSED | low | FS-018 (hard) |
 
 *(s)* = suggested priority, awaiting maintainer confirmation.
 
@@ -154,6 +156,9 @@ them between feature items. File-overlap notes (to avoid rework, not
 blockers): FS-017 before FS-004 (same Biquad Pairing tab region in `app.py`);
 FS-016 before taking BOM baselines for other items' validation (it can change
 stage assignments); FS-016 before FS-007 build (custom designs reuse pairing).
+
+Op-amp data items: FS-018 before FS-009 (it defines how the noise fields are
+sourced) and before FS-019 (additions follow its curation rule).
 
 ---
 
@@ -382,6 +387,36 @@ stage assignments); FS-016 before FS-007 build (custom designs reuse pairing).
 - **Open questions:** Does it fail on the first click after entering manual mode, on re-clicking the same element, or randomly?
 - **Notes:** Likely suspects to check first: Plotly selection state persisting across reruns (clicking an already-selected point emits no new event), and `manual_routing_active` being reset on the rerun the click triggers.
 - **Updated:** 2026-09-26
+
+### FS-018 — Op-amp data: provenance field + review of shipped parts
+- **State:** PROPOSED
+- **Priority:** P2 (suggested — P1 if a shipped value is known to be wrong)
+- **Effort:** medium
+- **Tiers:** C (data the non-ideal solver consumes), D (Edit popover)
+- **Depends on:** —
+- **Contracts:** —
+- **Files:** `opamp_library.json`, `opamp_library.py` (`OPTIONAL` fields, `_readme`), `topology_tab.py` (`_opamp_part_editor`: show/edit the new fields), `docs/ARCHITECTURE.md`
+- **Goal:** Every shipped op-amp value is traceable to a datasheet and its conditions; doubtful values are corrected or visibly marked as estimates.
+- **Scope:** In — (1) schema: `source` (datasheet, revision, conditions: supply, load, typ/min) and `estimated` (list of fields not taken from the datasheet); (2) curation rule, written into the JSON `_readme` and ARCHITECTURE: which figure to use (typ vs min), how Ro is obtained when the datasheet has no open-loop output resistance (from the open-loop Zout plot, else marked estimated), naming (one entry per die; channel variants in one name, e.g. `AD8505 / AD8506 / AD8508`); (3) review A_ol, GBWP, Ro of all 8 shipped parts against their datasheets; (4) fill `en_nV_rtHz` / `in_pA_rtHz` / `spice_model` from the same datasheets when given (cheap while open; FS-008/009 need them). Out — new parts (FS-019); any change to the op-amp model itself (single-pole A_ol/GBWP + Ro).
+- **Validation:** Every shipped entry has `source`; maintainer spot-checks each value against the cited datasheet; app loads with no `load_errors()`; scratch check that `source`/`estimated` survive a UI edit round-trip (`save_user` keeps optional fields). For each part whose values changed: one design re-solved, BOM change recorded vs the pre-change baseline; unchanged parts give an identical `_job_sig` (baseline unchanged).
+- **Open questions:** Which parameter(s) does the maintainer already distrust (seeds the review)? Library convention: typical or worst-case (min A_ol, min GBWP) — or both as separate fields? Default supply condition to record when a datasheet gives several? Add a `category` field now (audio, precision, micropower, …) so a larger dropdown can be grouped later without re-editing entries? Show `source` in the picker caption, or only in the Edit popover?
+- **Notes:** Known weak spots: open-loop Ro is rarely tabulated and none of the current values (20–1200 Ω) records its origin; the four parts from the old `scoring.py` table (TL072, LM358, OPA1656, NE5532) were rough demo figures. These are reasons to review, not confirmed errors.
+- **Updated:** 2026-09-27
+
+### FS-019 — Wider op-amp library: first batch + standing process
+- **State:** PROPOSED
+- **Priority:** P3 (suggested)
+- **Effort:** low
+- **Tiers:** C (data only)
+- **Depends on:** FS-018 (hard — curation rule and `source` field first)
+- **Contracts:** —
+- **Files:** `opamp_library.json`; this file (standing-process paragraph)
+- **Goal:** The shipped library covers the common op-amp classes, and later additions continue as routine data commits without an open-ended roadmap item.
+- **Scope:** In — one batch of parts chosen by the maintainer (≤ 10), each following the FS-018 rule; a short "standing process" paragraph in this file: later additions are plain data commits (`data(opamp): add …`) with no roadmap item, unless they need code or a schema change. Out — code changes; vendor SPICE model files.
+- **Validation:** App loads with zero `load_errors()` (also catches name clashes); dropdown lists the new parts; every new entry has `source`; one section solved with one new part.
+- **Open questions:** Which parts or classes go in the first batch (e.g. low-noise audio, precision/zero-drift, micropower, rail-to-rail CMOS, high-speed)? Does the dropdown need grouping or a filter once it passes ~30 entries (Streamlit's selectbox already filters by typing; grouping would be a separate UI item)?
+- **Notes:** Growing the library is continuous, and the state machine needs a terminal `DONE` — hence one closeable batch plus a standing rule rather than an item that stays `ACTIVE`.
+- **Updated:** 2026-09-27
 
 ---
 
