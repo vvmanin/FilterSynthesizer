@@ -65,6 +65,10 @@ _svg = ROOT / "Section_Schematic_Diagrams"
 if _svg.is_dir():
     datas += [(str(_svg), "Section_Schematic_Diagrams")]
 
+# Built-in op-amp library (user-editable JSON). Same pattern as the SVGs:
+# build.bat copies it next to the exe; this bundled copy is the fallback.
+datas += [(str(ROOT / "opamp_library.json"), ".")]
+
 
 a = Analysis(
     [str(ROOT / "launcher.py")],

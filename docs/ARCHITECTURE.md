@@ -56,6 +56,8 @@ Streamlit app for analog active-filter design: spec → poles/zeros → biquad c
 | `solvability_probe.py` | 16K | Quick feasibility check before full solve: `probe_cell()`, `assess()` |
 | `first_order_solver.py` | 16K | Closed-form 1st-order section solver: `synthesize_first_order()` |
 | `verify.py` | 8K | Self-test / validation utilities |
+| `opamp_library.py` | 8K | **Single source of op-amp parts** (FS-005). Merges built-in `opamp_library.json` with the per-user overlay `%LOCALAPPDATA%\FilterSynthesizer\opamp_library_user.json` (user entry of the same name overrides a built-in). `choices()`/`resolve()` for the UI picker, `named_params()` for the solvers' string API, `save_user()`/`delete_user()`/`check_new_name()` for UI edits, `IDEAL_PARAMS`, `CUSTOM_DEFAULT`. Reloads on file mtime change; bad entries go to `load_errors()`. No Streamlit import |
+| `opamp_library.json` | 2K | Built-in op-amp data (JSON, hand-editable; A_ol V/V, GBWP_hz Hz, Ro_ohm Ω, optional description/spice_model/en_nV_rtHz/in_pA_rtHz). Shipped next to the exe by `build.bat` + bundled fallback; env `FILTERSYNTHESIZER_OPAMP_FILE` set by `launcher.py` |
 
 ### Tier D — UI & Visualization
 | File | Size | Purpose |
@@ -66,7 +68,7 @@ Streamlit app for analog active-filter design: spec → poles/zeros → biquad c
 | `response_tab.py` | 24K | Tab 5 "Resulting Response": ideal vs realized Bode overlay, Monte Carlo. `render_response_tab()` entry |
 | `schematic_svg.py` | 28K | SVG schematic annotation & rendering: `render_svg()`, `build_annotations()`, `download_buttons()` |
 | `hw_plots.py` | 20K | Hardware-level Bode/phase/GD plots, Monte Carlo engine: `monte_carlo()`, `bode_figure()` |
-| `launcher.py` | 8K | Desktop launcher (exe/port/browser) |
+| `launcher.py` | 8K | Desktop launcher (exe/port/browser); points `FILTERSYNTHESIZER_SVG_DIR` / `FILTERSYNTHESIZER_OPAMP_FILE` at the exe-adjacent user-editable copies |
 
 ### Documentation
 | File | Purpose |
@@ -147,3 +149,4 @@ Sidebar specs
 8. **For topology tab UI**: `topology_tab.py` — use section map above to target the right line range.
 9. **For response tab / Monte Carlo**: `response_tab.py` + `hw_plots.py`.
 10. **For 1st-order sections**: `first_order_solver.py` + `cells_first_order.py`.
+11. **For op-amp parts/parameters**: edit `opamp_library.json` (data) or `opamp_library.py` (loading, naming rules, user overlay). The per-section picker + Edit popover is `topology_tab._opamp_picker`; `response_tab._eval_opamp` and `topology_tab.opamp_label` read the same choice.

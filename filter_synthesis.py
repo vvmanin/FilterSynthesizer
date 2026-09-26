@@ -124,7 +124,7 @@ def _frontier_eligible(solutions):
 # The non-ideal TF collapses onto the ideal TF for these values (verified
 # to 1e-10 by tf_derivation's ideal-limit acceptance test), so the SAME
 # snapper/evaluator path serves both modes -- no separate ideal code.
-IDEAL_OPAMP = dict(A_ol=1e12, GBWP_hz=1e15, Ro=1e-12)
+from opamp_library import IDEAL_PARAMS as IDEAL_OPAMP   # A_ol=1e12, GBWP=1e15 Hz, Ro=1e-12 MOhm
 
 
 def _design_subs(cfg):

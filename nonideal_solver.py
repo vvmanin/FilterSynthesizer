@@ -36,7 +36,8 @@ from concurrent.futures import ProcessPoolExecutor
 
 from tf_derivation_v2 import (get_cases, make_response_func, cell_components,
                               all_cells, topo_name, p1, w0, wz, Q, K)
-from scoring import score_solution, OPAMP_LIBRARY
+from scoring import score_solution
+import opamp_library
 
 
 # =====================================================================
@@ -240,7 +241,7 @@ def solve_nonideal(ideal_solutions, cfg, opamp="TL072",
     """
     n_cores = n_cores or os.cpu_count()
     if isinstance(opamp, str):
-        op = OPAMP_LIBRARY[opamp]; op_name = opamp
+        op = opamp_library.named_params(opamp); op_name = opamp
     else:
         op = opamp; op_name = "custom"
 

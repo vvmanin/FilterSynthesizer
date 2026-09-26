@@ -34,6 +34,7 @@
 import math
 import os
 import threading
+import time
 import concurrent.futures
 
 import numpy as np
@@ -52,6 +53,7 @@ import schematic_svg as schematic                  # per-section schematic overl
 import pairing_utils                               # classify_section / family_from_section
 import first_order_solver as fos                   # closed-form 1st-order realizer
 import solvability_probe as solvprobe              # failure-path global feasibility probe
+import opamp_library as oplib                      # op-amp parts (JSON-backed)
 
 # Module-level durable pick store: stage_num -> chosen BOM row. Survives even a
 # full st.session_state reset / clear (single-user web demo). Mirrored into
@@ -79,10 +81,10 @@ def opamp_label(n):
     choice = st.session_state.get(f"hw_opamp_choice_{n}")
     if not choice:
         return None
-    if OPAMP_LIBRARY.get(choice) == "CUSTOM":
-        a = st.session_state.get(f"hw_aol_{n}", 1e5)
-        g = st.session_state.get(f"hw_gbwp_{n}", 0.95e5)
-        r = st.session_state.get(f"hw_ro_{n}", 1000.0)
+    if choice == oplib.CUSTOM_LABEL:
+        a = st.session_state.get(f"hw_aol_{n}", oplib.CUSTOM_DEFAULT["A_ol"])
+        g = st.session_state.get(f"hw_gbwp_{n}", oplib.CUSTOM_DEFAULT["GBWP_hz"])
+        r = st.session_state.get(f"hw_ro_{n}", oplib.CUSTOM_DEFAULT["Ro_ohm"])
         return f"A_ol = {_eng(a)}; GBWP = {_eng(g)} Hz; Ro = {r:g} Ω"
     return str(choice).split("/")[0].strip()
 
@@ -99,15 +101,8 @@ N_CORES = 32
 # replace the right-hand side with True to restore it permanently.
 DEBUG_UI = os.environ.get("FILTERSYNTHESIZER_DEBUG") == "1"
 
-# Ro in MOhm (1.0e-3 MOhm = 1 kohm). Extend with real parts over time.
-OPAMP_LIBRARY = {
-    "Ideal (no op-amp limits)": None,
-    "AD8505 / AD8506 / AD8508": dict(A_ol=1e5, GBWP_hz=0.95e5, Ro=1.0e-3),
-    "LMV358A": dict(A_ol=1e5, GBWP_hz=1e6, Ro=1.2e-3),
-    "MAX9636/MAX9637/ MAX9638": dict(A_ol=1e5, GBWP_hz=1.5e6, Ro=1e-4),
-    "MAX40100": dict(A_ol=1.41e6, GBWP_hz=1.5e6, Ro=1e-4),
-    "Custom…": "CUSTOM",
-}
+# Op-amp parts live in opamp_library.json (+ the per-user overlay file);
+# see opamp_library.py. Only the Ideal / Custom… UI rows are defined there too.
 
 # Search-effort -> unified_solver multistart breadth.
 SEARCH_PRESETS = {
@@ -778,23 +773,148 @@ def _convergence_inputs():
 # =====================================================================
 #  PER-SECTION SETTINGS  (independent envelope / series / family)
 # =====================================================================
+# --- op-amp library write actions (on_click callbacks: they run before the
+#     rerun, so they may legally set the section's selectbox value) ---------
+def _oplib_msg(n, kind, text):
+    """Result note under the picker. Kept in state (not popped): the tab is a
+    run_every fragment, so a one-shot note would vanish within 2 s. Shown for
+    _OPLIB_MSG_S seconds."""
+    st.session_state[f"hw_oplib_msg_{n}"] = (kind, text, time.monotonic())
+
+
+_OPLIB_MSG_S = 10.0
+
+
+def _oplib_save_custom(n):
+    """Custom… values -> new named user part; the section switches to it."""
+    name = " ".join(str(st.session_state.get(f"hw_opnew_name_{n}", "")).split())
+    err = oplib.check_new_name(name)
+    if err:
+        _oplib_msg(n, "error", err)
+        return
+    try:
+        oplib.save_user(name, st.session_state[f"hw_aol_{n}"],
+                        st.session_state[f"hw_gbwp_{n}"], st.session_state[f"hw_ro_{n}"])
+    except (OSError, ValueError) as ex:
+        _oplib_msg(n, "error", f"Could not save: {ex}")
+        return
+    st.session_state[f"hw_opamp_choice_{n}"] = name
+    st.session_state[f"hw_opnew_name_{n}"] = ""
+    _oplib_msg(n, "success", f"Saved '{name}' to {oplib.user_path()}")
+
+
+def _oped_key(n, tag, field):
+    """Edit-field key. `tag` = part name + current values, so the fields refill
+    whenever the entry changes (UI save, revert, or a hand-edit of the file)."""
+    return f"hw_oped_{field}_{n}_{tag}"
+
+
+def _oped_tag(name, e):
+    return f"{name}|{e['A_ol']!r}|{e['GBWP_hz']!r}|{e['Ro_ohm']!r}|{e.get('description')}"
+
+
+def _oplib_save_edit(n, name, tag):
+    """Edit popover Save: same name -> update/override; new name -> new part."""
+    g = lambda f: st.session_state.get(_oped_key(n, tag, f))
+    new = " ".join(str(g("name") or "").split())
+    target = name
+    if oplib.normalize(new) != oplib.normalize(name):
+        err = oplib.check_new_name(new)
+        if err:
+            _oplib_msg(n, "error", err)
+            return
+        target = new
+    try:
+        oplib.save_user(target, g("aol"), g("gbwp"), g("ro"), description=g("desc") or "")
+    except (OSError, ValueError) as ex:
+        _oplib_msg(n, "error", f"Could not save: {ex}")
+        return
+    st.session_state[f"hw_opamp_choice_{n}"] = target
+    _oplib_msg(n, "success", f"Saved '{target}' to {oplib.user_path()}")
+
+
+def _oplib_remove(n, name, revert):
+    """Revert an edited built-in (keeps the selection) or delete a user part."""
+    try:
+        oplib.delete_user(name)
+    except OSError as ex:
+        _oplib_msg(n, "error", f"Could not update the library: {ex}")
+        return
+    if revert:
+        _oplib_msg(n, "success", f"'{name}' reverted to the shipped values.")
+    else:
+        st.session_state[f"hw_opamp_choice_{n}"] = oplib.IDEAL_LABEL
+        _oplib_msg(n, "success", f"Deleted '{name}'.")
+
+
+_OPLIB_ORIGIN = {"built-in": "built-in", "edited": "built-in · edited", "user": "user part"}
+
+
+def _opamp_part_editor(n, name, e):
+    """Caption + Edit popover for a library part."""
+    tag = _oped_tag(name, e)
+    c = st.columns([4, 1])
+    with c[0]:
+        st.caption(f"A_ol = {_eng(e['A_ol'])}; GBWP = {_eng(e['GBWP_hz'])} Hz; "
+                   f"Ro = {e['Ro_ohm']:g} Ω · {_OPLIB_ORIGIN[e['origin']]}"
+                   + (f" — {e['description']}" if e.get("description") else ""))
+    with c[1], st.popover("✎ Edit", use_container_width=True):
+        st.text_input("Name", value=name, key=_oped_key(n, tag, "name"),
+                      help="Keep the name to update this part; a new name saves a copy.")
+        st.number_input("A_ol (V/V)", value=e["A_ol"], format="%.2e", key=_oped_key(n, tag, "aol"))
+        st.number_input("GBWP (Hz)", value=e["GBWP_hz"], format="%.3e", key=_oped_key(n, tag, "gbwp"))
+        st.number_input("Ro (Ω)", value=e["Ro_ohm"], step=10.0, key=_oped_key(n, tag, "ro"))
+        st.text_input("Description", value=e.get("description") or "", key=_oped_key(n, tag, "desc"))
+        st.button("Save", key=f"hw_oped_save_{n}", on_click=_oplib_save_edit, args=(n, name, tag),
+                  help="Written to your user library; shipped values are never changed.")
+        if e["origin"] == "edited":
+            st.button("Revert to shipped values", key=f"hw_oped_revert_{n}",
+                      on_click=_oplib_remove, args=(n, name, True))
+        elif e["origin"] == "user":
+            st.button("Delete part", key=f"hw_oped_del_{n}",
+                      on_click=_oplib_remove, args=(n, name, False))
+        st.caption(f"Built-in: `{oplib.builtin_path()}`  \nUser: `{oplib.user_path()}`")
+
+
 def _opamp_picker(n):
-    """Per-section op-amp selector (library entry or CUSTOM). Returns the op-amp
-    dict {A_ol, GBWP_hz, Ro(MOhm)} or None (ideal). Shared by both settings UIs."""
+    """Per-section op-amp selector (library part, Ideal or Custom…). Returns the
+    op-amp dict {A_ol, GBWP_hz, Ro(MOhm)} or None (ideal). Shared by both
+    settings UIs. Parts come from opamp_library (JSON files)."""
     st.markdown("**Op-amp model**")
-    choice = st.selectbox("Op-amp", list(OPAMP_LIBRARY.keys()),
-                          key=f"hw_opamp_choice_{n}", label_visibility="collapsed")
-    spec = OPAMP_LIBRARY[choice]
-    if spec == "CUSTOM":
+    for msg in oplib.load_errors():
+        st.warning(msg, icon="⚠️")
+    options = oplib.choices()
+    key = f"hw_opamp_choice_{n}"
+    if key in st.session_state and st.session_state[key] not in options:
+        st.session_state[key] = oplib.IDEAL_LABEL      # part renamed/deleted on disk
+    choice = st.selectbox("Op-amp", options, key=key, label_visibility="collapsed")
+    note = st.session_state.get(f"hw_oplib_msg_{n}")
+    if note and time.monotonic() - note[2] < _OPLIB_MSG_S:
+        (st.error if note[0] == "error" else st.success)(note[1])
+    if choice == oplib.CUSTOM_LABEL:
+        d = oplib.CUSTOM_DEFAULT
         o = st.columns(3)
         with o[0]:
-            a_ol = st.number_input("A_ol (V/V)", value=1e5, format="%.2e", key=f"hw_aol_{n}")
+            a_ol = st.number_input("A_ol (V/V)", value=d["A_ol"], format="%.2e", key=f"hw_aol_{n}")
         with o[1]:
-            gbwp = st.number_input("GBWP (Hz)", value=1e6, format="%.3e", key=f"hw_gbwp_{n}")
+            gbwp = st.number_input("GBWP (Hz)", value=d["GBWP_hz"], format="%.3e", key=f"hw_gbwp_{n}")
         with o[2]:
-            ro_ohm = st.number_input("Ro (Ω)", value=1200.0, step=10.0, key=f"hw_ro_{n}")
+            ro_ohm = st.number_input("Ro (Ω)", value=d["Ro_ohm"], step=10.0, key=f"hw_ro_{n}")
+        s = st.columns([3, 1], vertical_alignment="bottom")
+        with s[0]:
+            st.text_input("Save as part", key=f"hw_opnew_name_{n}",
+                          placeholder="name for the op-amp library",
+                          help="Stores these values as a named part in your user library. "
+                               "The name must not match an existing part (case-insensitive).")
+        with s[1]:
+            st.button("Save to library", key=f"hw_opnew_save_{n}",
+                      on_click=_oplib_save_custom, args=(n,), use_container_width=True)
         return dict(A_ol=a_ol, GBWP_hz=gbwp, Ro=ro_ohm / 1e6)   # ohm -> MOhm
-    return spec   # dict, or None for ideal
+    e = oplib.get(choice)
+    if e is None:
+        return None                                    # ideal
+    _opamp_part_editor(n, choice, e)
+    return oplib.solver_params(e)
 
 
 def _section_settings(sec):

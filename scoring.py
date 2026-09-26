@@ -31,19 +31,7 @@ from tf_derivation_v2 import (get_cases, make_response_func, cell_components,
                               p1, w0, wz, Q, K)
 import sympy as sp
 
-
-# ---- a few common real op-amps (A_ol [V/V], GBWP [Hz], Ro [ohm]) ----
-#  Ro here is in the same unit base as your resistors (MOhm) -> convert.
-#  NOTE: your solver works in MOhm. Ro of tens of ohms = e.g. 50 ohm
-#  = 50e-6 MOhm. Pass opamp Ro already in MOhm to stay consistent.
-OPAMP_LIBRARY = {
-    # name        A_ol     GBWP(Hz)   Ro(MOhm)
-    "ideal":    dict(A_ol=1e12, GBWP_hz=1e15, Ro=1e-12),
-    "TL072":    dict(A_ol=2e5,  GBWP_hz=3e6,  Ro=50e-6),
-    "LM358":    dict(A_ol=1e5,  GBWP_hz=1e6,  Ro=100e-6),
-    "OPA1656":  dict(A_ol=5e6,  GBWP_hz=53e6, Ro=20e-6),
-    "NE5532":   dict(A_ol=1e5,  GBWP_hz=10e6, Ro=30e-6),
-}
+import opamp_library   # op-amp parts by name (A_ol V/V, GBWP Hz, Ro MOhm)
 
 
 # =====================================================================
@@ -174,10 +162,7 @@ def score_table(solutions, opamp="TL072", design_subs=None,
                 sort_by="ni_penalty", verbose=True):
     """Score every solution. `opamp` may be a library name or a dict."""
     if isinstance(opamp, str):
-        if opamp not in OPAMP_LIBRARY:
-            raise ValueError(f"unknown op-amp '{opamp}'; "
-                             f"choose {list(OPAMP_LIBRARY)} or pass a dict")
-        op = OPAMP_LIBRARY[opamp]; op_name = opamp
+        op = opamp_library.named_params(opamp); op_name = opamp
     else:
         op = opamp; op_name = "custom"
 
@@ -223,9 +208,11 @@ if __name__ == "__main__":
     design = {p1: 2*sp.pi*508.9, w0: 2*sp.pi*486.76,
               wz: 2*sp.pi*1668.0, Q: 1.0455, K: 680.75}
     demo = [{
-        "topology": "Without R7", "sens_score": 4.90,
+        # 3rd-order gained LP-notch without R7 (legacy name "Without R7");
+        # components = tf_derivation_v2.cell_components for that cell.
+        "topology": "3LPn-gained", "sens_score": 4.90,
         "C1":0.01,"C2":2.7e-4,"C3":2.7e-4,"C4":6.8e-4,
-        "R1":0.043,"R2":0.1,"R3":0.2,"R4":0.15,"R5":0.3,"R6":0.5,"R7":None,
+        "R1":0.043,"R2":0.1,"R3":0.2,"R4":0.15,"R5":0.3,"R6":0.5,
     }]
     for name in ["TL072", "OPA1656", "LM358"]:
         scored = score_table(demo, opamp=name, design_subs=design, verbose=True)

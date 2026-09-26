@@ -30,7 +30,8 @@ import tf_derivation_v2 as TF
 import cells_first_order as FO
 from filter_synthesis import IDEAL_OPAMP
 from topology_tab import (section_kind, section_dc_gain, opamp_label,
-                          _ensure_state, OPAMP_LIBRARY, _PICKS)
+                          _ensure_state, _PICKS)
+import opamp_library as oplib
 import report_ui
 
 
@@ -132,11 +133,12 @@ def _loggrad(topo_name):
 def _eval_opamp(n):
     """Reconstruct the section's op-amp params from its picker state."""
     choice = st.session_state.get(f"hw_opamp_choice_{n}")
-    spec = OPAMP_LIBRARY.get(choice) if choice else None
+    spec = oplib.resolve(choice)
     if spec == "CUSTOM":
-        spec = dict(A_ol=st.session_state.get(f"hw_aol_{n}", 1e5),
-                    GBWP_hz=st.session_state.get(f"hw_gbwp_{n}", 0.95e5),
-                    Ro=st.session_state.get(f"hw_ro_{n}", 1000.0) / 1e6)
+        d = oplib.CUSTOM_DEFAULT
+        spec = dict(A_ol=st.session_state.get(f"hw_aol_{n}", d["A_ol"]),
+                    GBWP_hz=st.session_state.get(f"hw_gbwp_{n}", d["GBWP_hz"]),
+                    Ro=st.session_state.get(f"hw_ro_{n}", d["Ro_ohm"]) / 1e6)
     return spec if isinstance(spec, dict) else IDEAL_OPAMP
 
 

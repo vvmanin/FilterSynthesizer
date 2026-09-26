@@ -228,6 +228,16 @@ def main():
         if os.path.isdir(bundled):
             os.environ["FILTERSYNTHESIZER_SVG_DIR"] = bundled
 
+    # Built-in op-amp library: same EXE-adjacent-first rule (opamp_library.py).
+    # User parts/edits live in writable_app_data()/opamp_library_user.json.
+    ext_op = os.path.join(exe_dir(), "opamp_library.json")
+    if os.path.isfile(ext_op):
+        os.environ["FILTERSYNTHESIZER_OPAMP_FILE"] = ext_op
+    else:
+        bundled = resource_path("opamp_library.json")
+        if os.path.isfile(bundled):
+            os.environ["FILTERSYNTHESIZER_OPAMP_FILE"] = bundled
+
     # Diagnostics mode: everything above has run (so the report sees the real
     # runtime state), but the server never starts.
     if "--selftest" in sys.argv:
