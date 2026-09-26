@@ -39,6 +39,8 @@ Streamlit app for analog active-filter design: spec → poles/zeros → biquad c
 | `cells_mfb_hp.py` | 20K | HP | MFB |
 | `cells_mfb_bp.py` | 12K | BP | MFB |
 | `cells_mfb_notch.py` | 16K | Notch | MFB |
+| `cells_am.py` / `cells_am_hp.py` / `cells_am_bp.py` / `cells_am_notch.py` | 4-5K each | LP / HP / BP / Notch | Ackerberg-Mossberg (thin per-family wrappers) |
+| `cells_am_core.py` | 16K | — | Shared Ackerberg-Mossberg nodal (MNA) model |
 | `tf_derivation_v2.py` | 20K | — | **Cell registry/dispatcher**: `all_cells()`, `derive_all()`, `get_cases()`, caching. Routes to cell modules by `topo["family"]` |
 | `tf_symbols.py` | 4K | — | Shared SymPy symbols (s, R1-R7, C1-C4, A_ol, etc.) |
 
@@ -64,13 +66,16 @@ Streamlit app for analog active-filter design: spec → poles/zeros → biquad c
 | `response_tab.py` | 24K | Tab 5 "Resulting Response": ideal vs realized Bode overlay, Monte Carlo. `render_response_tab()` entry |
 | `schematic_svg.py` | 28K | SVG schematic annotation & rendering: `render_svg()`, `build_annotations()`, `download_buttons()` |
 | `hw_plots.py` | 20K | Hardware-level Bode/phase/GD plots, Monte Carlo engine: `monte_carlo()`, `bode_figure()` |
-| `section_router.py` | 4K | `route_section()` — maps a cascade stage to the correct cell family |
+| `section_router.py` | 4K | Legacy `SECTION_SOLVERS` / `route_section()` table — **not imported anywhere, stale**. The live dispatch gate is `topology_tab.section_kind()` (CONTRACTS §3) |
 | `launcher.py` | 8K | Desktop launcher (exe/port/browser) |
 
 ### Documentation
 | File | Purpose |
 |---|---|
-| `ROADMAP.md` | Master architecture doc, tier contracts, work-item tracker |
+| `CLAUDE.md` | Working agreement for Claude Code sessions (navigation, conventions, git policy) |
+| `.claude/settings.json` | Claude Code permission policy: denies git write ops (Bash + PowerShell) and edits to schematic SVGs / `docs/*.pdf` / `tf_cache_v6.json`; asks before any other Write/Edit; allows read-only tools, `git status/diff/log`, `python verify.py` |
+| `docs/CONTRACTS.md` | Binding cross-tier rules: cell registry interface, section classification, dispatch gate, scoring dispatch, cascade sign, data schemas, perf notes |
+| `dev/ROADMAP.md` | Feature work-item state (backlog, priorities) |
 | `MFB_INTEGRATION_README.md` | MFB topology integration notes |
 | `MFB_BP_NOTCH_README.md` | MFB bandpass/notch specifics |
 | `MFB_FOLLOWUP_FIXES.md` | Post-integration bugfixes |
@@ -105,7 +110,7 @@ Sidebar specs
   → pairing_utils.auto_pair_stages() → stages list
   → [Tab 1-3: plots, roots, pairing in app.py]
   → [Tab 4: topology_tab]
-    → section_router.route_section() → cell family
+    → topology_tab.section_kind() → pairing_utils.family_from_section() → solver kind
     → tf_derivation_v2.get_cases() → symbolic TFs
     → solvability_probe.assess() → feasibility
     → unified_solver_v2.run_synthesis() → continuous solutions

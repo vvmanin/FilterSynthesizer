@@ -1,0 +1,35 @@
+{
+  "permissions": {
+    "deny": [
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(git reset:*)",
+      "Bash(git checkout:*)",
+      "Bash(git add:*)",
+      "PowerShell(git commit:*)",
+      "PowerShell(git push:*)",
+      "PowerShell(git reset:*)",
+      "PowerShell(git checkout:*)",
+      "PowerShell(git add:*)",
+      "Write(Section_Schematic_Diagrams/**)",
+      "Write(docs/*.pdf)",
+      "Write(tf_cache_v6.json)",
+      "Edit(Section_Schematic_Diagrams/**)",
+      "Edit(docs/*.pdf)",
+      "Edit(tf_cache_v6.json)"
+    ],
+    "ask": [
+      "Write(**)",
+      "Edit(**)"
+    ],
+    "allow": [
+      "Read(**)",
+      "Grep(**)",
+      "Glob(**)",
+      "Bash(git status)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(python verify.py)"
+    ]
+  }
+}
