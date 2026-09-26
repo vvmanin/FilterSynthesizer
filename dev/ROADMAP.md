@@ -140,12 +140,21 @@ first.
 | FS-012 | AI integration (external API/MCP or built-in assistant) | P2 | PROPOSED | plan xhigh / build high | FS-011 (soft) |
 | FS-013 | All-pass (phase) responses + all-pass cells | P3 | PROPOSED | max | FS-006 (soft) |
 | FS-014 | Topology family expansion — research | P3 | PROPOSED | max | — |
+| FS-015 | Topology tab Overall filter: BP values off (validate BR) | P2 *(s)* | PROPOSED | plan high / build medium | — |
+| FS-016 | Auto-pairing review: all types, esp. BP/BR; Q < 0.5 pairs | P2 *(s)* | PROPOSED | plan xhigh / build high | — |
+| FS-017 | Manual pairing override: unreliable clicks | P2 *(s)* | PROPOSED | medium | — |
 
 *(s)* = suggested priority, awaiting maintainer confirmation.
 
 Suggested order: FS-005 → FS-006 → FS-008 (the P1 track, FS-005 as its small
 prerequisite), FS-007 in parallel planning; UI polish FS-001 → FS-002 → FS-003
 → FS-004 can be interleaved as low-risk medium-effort sessions.
+
+Defect items FS-015/016/017 have no hard dependencies and block nothing; slot
+them between feature items. File-overlap notes (to avoid rework, not
+blockers): FS-017 before FS-004 (same Biquad Pairing tab region in `app.py`);
+FS-016 before taking BOM baselines for other items' validation (it can change
+stage assignments); FS-016 before FS-007 build (custom designs reuse pairing).
 
 ---
 
@@ -341,6 +350,51 @@ prerequisite), FS-007 in parallel planning; UI polish FS-001 → FS-002 → FS-0
 - **Goal:** Decide which additional section topologies are worth adding, given that this solver makes component-calculation complexity irrelevant.
 - **Scope:** In — survey candidates (Boctor notches, KHN, Tow-Thomas, and less common single-op-amp designs); judge each on sensitivity, op-amp count, component spread, notch depth, what it adds over VCVS/MFB/AM; shortlist with rationale. Out — implementation (each shortlisted topology becomes its own item).
 - **Validation:** Survey reviewed and accepted by the maintainer.
+- **Updated:** 2026-09-26
+
+### FS-015 — Topology tab Overall filter: BP values off (validate BR)
+- **State:** PROPOSED
+- **Priority:** P2 (suggested — not critical, per maintainer)
+- **Effort:** plan high / build medium
+- **Tiers:** D (possibly C if the cause is in stage-gain bookkeeping)
+- **Depends on:** —
+- **Contracts:** §5 (overall sign/gain = product of sections)
+- **Files:** `topology_tab.py` (`_render_overall`, ~L1869), possibly `pairing_utils.compute_stage_gains`
+- **Goal:** The Overall filter section of the Topology tab reports the correct cascade values for band-pass filters, and is confirmed correct for band-reject.
+- **Scope:** In — find which overall values deviate for BP (gain, f0/fc, Q/bandwidth…) and why; fix the overall computation/display only. Confirm BR (and spot-check LP/HP) is correct. Out — per-section solutions and BOMs must not change.
+- **Validation:** For 2–3 BP designs (even/odd order, gained/unity) and 2 BR designs: overall values match (a) the Response Plots target and (b) the product of the realized section responses evaluated independently (scratch check); per-section BOMs identical to baseline.
+- **Open questions:** Which values differ, and by roughly how much, on a reproducing design (spec to record in Notes)?
+- **Notes:** Isolated to the Overall section — can land any time without touching other items. Hypothesis to check first: overall BP gain built from per-section peak gains, whereas the cascade peak ≠ product of individual section peaks when section centre frequencies differ.
+- **Updated:** 2026-09-26
+
+### FS-016 — Auto-pairing review: all types, esp. BP/BR; Q < 0.5 pairs
+- **State:** PROPOSED
+- **Priority:** P2 (suggested — not critical; manual re-pair is the workaround)
+- **Effort:** plan xhigh / build high
+- **Tiers:** A
+- **Depends on:** —
+- **Contracts:** §2 (stages feed classification), §6 (Stage schema — keep unchanged)
+- **Files:** `pairing_utils.py` (`auto_pair_bandpass` L75, `auto_pair_bandreject` L212, `auto_pair_stages` L327, real-pole absorption), `filter_solvers.py`/`filter_engine.py` only if Q < 0.5 pairs originate in the prototype
+- **Goal:** Auto-pairing produces a sound section distribution for every filter type — correct pole-zero proximity pairing, sensible section ordering, valid real-pole absorption — and never emits a "2nd-order pair" made of two real poles (Q < 0.5) unless deliberately.
+- **Scope:** Phase 1 (investigation, no code): a test matrix over types × responses × orders; record every non-optimal distribution, invalid absorption and Q < 0.5 pair with its spec in `Notes`; determine whether Q < 0.5 pairs come from pairing or from the approximation stage. Phase 2 (fix): targeted changes per finding. In — LP/HP/BP/BR auto-pairing. Out — manual override UI (FS-017); Stage dict schema changes.
+- **Validation:** Re-run the Phase-1 matrix: every recorded case now correct; for designs that were already correct, stage assignments unchanged (scratch diff over the matrix); pairing results feed Topology without new `pending` sections.
+- **Open questions:** Criteria for "optimal" per type (pole-zero proximity, ascending-Q order, gain distribution, dynamic range)? Should two real poles ever be combined deliberately into one 2nd-order section (valid for a Q < 0.5 biquad), or always split into 1st-order sections?
+- **Notes:** Can be split into two sessions per phase. Changes stage assignments → retake BOM baselines afterwards.
+- **Updated:** 2026-09-26
+
+### FS-017 — Manual pairing override: unreliable clicks
+- **State:** PROPOSED
+- **Priority:** P2 (suggested — not critical)
+- **Effort:** medium
+- **Tiers:** D
+- **Depends on:** —
+- **Contracts:** —
+- **Files:** `app.py` (Biquad Pairing mnemoscheme, `pz_mnemo_chart` `on_select` handling ~L1150–1300), `plot_utils.py` (mnemoscheme figure) if marker/selection settings are involved
+- **Goal:** A single click on a pole or zero reliably registers in manual pairing mode.
+- **Scope:** In — reproduce, find the cause, fix the click/selection handling. Out — pairing algorithm (FS-016); tab layout (FS-004).
+- **Validation:** Build a full manual pairing on an 8th-order BP and a 6th-order BR: every click registers once; re-clicking the same element, clicking after a rerun, and undo/reset behave; auto-pair still works when manual mode is off.
+- **Open questions:** Does it fail on the first click after entering manual mode, on re-clicking the same element, or randomly?
+- **Notes:** Likely suspects to check first: Plotly selection state persisting across reruns (clicking an already-selected point emits no new event), and `manual_routing_active` being reset on the rerun the click triggers.
 - **Updated:** 2026-09-26
 
 ---
