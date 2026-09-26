@@ -219,13 +219,13 @@ def section_kind(sec):
     """(kind, reason): 'lp' | 'hp' | 'notch' | 'first_order' | 'pending'.
 
     Thin wrapper over the authoritative classifier (pairing_utils.
-    family_from_section), feeding the 4.4 dispatch:
+    family_from_section), feeding the dispatch gate (docs/CONTRACTS.md §3):
       order-1 LP/HP            -> 'first_order' (closed-form solver, item 1)
       order 2/3 LP/LPn         -> 'lp'          (12-cell LP unified solver)
       order 2/3 HP/HPn         -> 'hp'          (16-cell HP unified solver, item 2)
       order 2   pure notch     -> 'notch'       (VCVS 2N notch solver, item 3)
       every other family       -> 'pending'     (NEVER sent to a mismatched
-                                                 solver -- the 4.4 garbage gate)
+                                                 solver -- the dispatch gate)
     Gain mode (unity vs gained vs atten) is decided LATER from the effective
     gain, so a per-section Custom-gain override can still flip the cell."""
     fam = pairing_utils.family_from_section(sec)

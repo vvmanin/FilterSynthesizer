@@ -234,7 +234,7 @@ if __name__ == "__main__":
 
 
 # =====================================================================
-# 5. FAMILY-DISPATCHED METRIC EXTRACTION   (ROADMAP 4.2)
+# 5. FAMILY-DISPATCHED METRIC EXTRACTION   (docs/CONTRACTS.md §4)
 # =====================================================================
 #   metrics_for(family, ...) is the reusable seam every later family binds to.
 #   The LPn/HPn/notch branch reuses _response_metrics above unchanged (the
@@ -296,7 +296,7 @@ def _bp_metrics(Hfun, comp, f_lo, f_hi, n=6000):
 
 
 def metrics_for(family, Hfun, comp, f_lo=1.0, f_hi=1e6):
-    """Family-dispatched Bode-metric extractor (ROADMAP 4.2).
+    """Family-dispatched Bode-metric extractor (docs/CONTRACTS.md §4).
        'LPn'|'HPn'|'notch' -> notch extractor (_response_metrics, unchanged)
        'LP'  -> {dc_gain, f_c, passband_ripple_db, rolloff_db_dec}
        'HP'  -> {hf_gain, f_c, stopband_floor_db}

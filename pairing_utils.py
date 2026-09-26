@@ -538,11 +538,11 @@ def compute_stage_gains(stages, p_bricks, z_bricks, k_system, passband_gain_line
     return stage_k, k_remainder
 
 # =====================================================================
-#  classify_section  —  authoritative section classifier (ROADMAP 4.1)
+#  classify_section  —  authoritative section classifier (docs/CONTRACTS.md §2)
 # =====================================================================
 #  Section type comes from order + the pole<->zero frequency ratio (wz/w0),
 #  independent of filter type. topology_tab routes every section through this
-#  (via family_from_section) into the 4.4 dispatch. The rule CORE is factored
+#  (via family_from_section) into the dispatch gate (CONTRACTS §3). The rule CORE is factored
 #  out so the brick-level (stage+bricks) and the UI-level (Section dict) paths
 #  share one source of truth.
 # =====================================================================
@@ -579,7 +579,7 @@ def _family_from_features(order, pole_type, n_origin_zeros, wz, w0, wz_tol=0.05)
 
 
 def classify_section(stage, p_bricks, z_bricks, wz_tol=0.05):
-    """Authoritative classifier (ROADMAP 4.1). Resolves the stage's pole and
+    """Authoritative classifier (docs/CONTRACTS.md §2). Resolves the stage's pole and
     zeros against the bricks and returns:
         {'order':1|2|3,
          'family':'LP'|'HP'|'BP'|'BP1LP'|'BP1HP'|'LPn'|'HPn'|'notch',

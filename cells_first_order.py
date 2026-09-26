@@ -71,7 +71,7 @@ def all_cells():
 
 
 def sign_of(topo):
-    """Cascade sign of a realization (ROADMAP 4.3): inverting -> -1.
+    """Cascade sign of a realization (docs/CONTRACTS.md §5): inverting -> -1.
     A *realization* property — never set by classify_section."""
     return -1 if topo["realization"] == "inv" else +1
 

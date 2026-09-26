@@ -62,10 +62,6 @@ The live gate is `topology_tab.section_kind(sec)`, returning one of
 `first_order | lp | hp | notch | bp | pending`. Adding a family means adding
 its branch there; everything unmatched falls to `pending`.
 
-> `section_router.py` holds an older table form of this gate
-> (`SECTION_SOLVERS` / `route_section`). It is not imported anywhere and its
-> entries are stale; do not treat it as authoritative.
-
 ## 4. Scoring metrics by family (Tier C)
 
 `scoring.metrics_for(family, Hfun, comp, f_lo, f_hi)` dispatches the Bode

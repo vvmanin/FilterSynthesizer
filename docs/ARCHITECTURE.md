@@ -66,7 +66,6 @@ Streamlit app for analog active-filter design: spec → poles/zeros → biquad c
 | `response_tab.py` | 24K | Tab 5 "Resulting Response": ideal vs realized Bode overlay, Monte Carlo. `render_response_tab()` entry |
 | `schematic_svg.py` | 28K | SVG schematic annotation & rendering: `render_svg()`, `build_annotations()`, `download_buttons()` |
 | `hw_plots.py` | 20K | Hardware-level Bode/phase/GD plots, Monte Carlo engine: `monte_carlo()`, `bode_figure()` |
-| `section_router.py` | 4K | Legacy `SECTION_SOLVERS` / `route_section()` table — **not imported anywhere, stale**. The live dispatch gate is `topology_tab.section_kind()` (CONTRACTS §3) |
 | `launcher.py` | 8K | Desktop launcher (exe/port/browser) |
 
 ### Documentation
