@@ -74,7 +74,11 @@ metric extractor by family:
 - `LPn` | `HPn` | `notch` → notch extractor (`_response_metrics`)
 - `LP` → `{dc_gain, f_c, passband_ripple_db, rolloff_db_dec}`
 - `HP` → `{hf_gain, f_c, stopband_floor_db}`
-- `BP` → `{center_gain, f0, Q, BW_-3dB}`
+- `BP` | `BP1LP` | `BP1HP` → `{center_gain, f0, Q, BW_-3dB}` (peak-referenced;
+  the 3rd-order shapes just have asymmetric skirts)
+
+Today the only caller is `first_order_solver` (families `LP`/`HP`); 2nd/3rd-
+order scoring goes through `score_solution` → `_response_metrics`.
 
 Unknown families raise. A new family needs its extractor here before it can be
 scored.

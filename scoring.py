@@ -300,13 +300,16 @@ def metrics_for(family, Hfun, comp, f_lo=1.0, f_hi=1e6):
        'LPn'|'HPn'|'notch' -> notch extractor (_response_metrics, unchanged)
        'LP'  -> {dc_gain, f_c, passband_ripple_db, rolloff_db_dec}
        'HP'  -> {hf_gain, f_c, stopband_floor_db}
-       'BP'  -> {center_gain, f0, Q, BW_-3dB}"""
+       'BP'|'BP1LP'|'BP1HP' -> {center_gain, f0, Q, BW_-3dB}
+    BP1LP/BP1HP (3rd-order asymmetric band-pass) are still single-peaked, so
+    the peak-referenced BP extractor applies; the -3 dB skirts are simply
+    asymmetric."""
     if family in ("LPn", "HPn", "notch"):
         return _response_metrics(Hfun, comp, f_lo, f_hi)
     if family == "LP":
         return _lp_metrics(Hfun, comp, f_lo, f_hi)
     if family == "HP":
         return _hp_metrics(Hfun, comp, f_lo, f_hi)
-    if family == "BP":
+    if family in ("BP", "BP1LP", "BP1HP"):
         return _bp_metrics(Hfun, comp, f_lo, f_hi)
     raise ValueError(f"metrics_for: unknown family {family!r}")
