@@ -76,7 +76,7 @@ Streamlit app for analog active-filter design: spec → poles/zeros → biquad c
 | File | Purpose |
 |---|---|
 | `CLAUDE.md` | Working agreement for Claude Code sessions (navigation, conventions, git policy) |
-| `.claude/settings.json` | Claude Code permission policy: denies git write ops (Bash + PowerShell) and edits to schematic SVGs / `docs/*.pdf` / `tf_cache_v6.json`; asks before any other Write/Edit; allows read-only tools, `git status/diff/log`, `python verify.py` |
+| `.claude/settings.json` | Claude Code permission policy: denies `git reset` / `git checkout` (Bash) and all git write ops in PowerShell (Claude commits and pushes only its session `claude/*` branch — see `CLAUDE.md`), and edits to schematic SVGs / `docs/*.pdf` / `tf_cache_v6.json`; asks before any other Write/Edit; allows read-only tools, `git status/diff/log`, `python verify.py` |
 | `docs/CONTRACTS.md` | Binding cross-tier rules: cell registry interface, section classification, dispatch gate, scoring dispatch, cascade sign, data schemas, perf notes |
 | `dev/ROADMAP.md` | Feature work-item state (backlog, priorities) |
 | `MFB_INTEGRATION_README.md` | MFB topology integration notes |

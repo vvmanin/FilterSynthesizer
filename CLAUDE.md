@@ -64,11 +64,15 @@ When a change touches solver or cell math, say explicitly how it was checked.
 - Schematic SVGs in `Section_Schematic_Diagrams/` are draw.io sources and are
   hand-edited; do not regenerate or reformat them programmatically.
 
-## Git — read-only
+## Git — session branch only
 
-Never run `git commit`, `git push`, `git add`, `git reset` or `git checkout`.
-When a unit of work is finished, print a suggested commit message in the chat
-and stop. I commit manually.
+- Commit and push only to the session's `claude/*` branch; never to `main`;
+  never merge.
+- Never run `git reset` or `git checkout` (denied in `.claude/settings.json`),
+  and never rewrite pushed history (no rebase, amend or force-push).
+- When a unit of work is finished and its checks pass, commit it, push the
+  branch, and say which branch and commit. I test that branch locally and merge
+  it into `main` myself (fast-forward).
 
 ## Working style
 
