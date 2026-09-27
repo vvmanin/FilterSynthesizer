@@ -130,7 +130,7 @@ first.
 | FS-002 | Response Plots: phase/GD on main plot, compact sections | P2 *(s)* | PROPOSED | medium | FS-001 (soft) |
 | FS-003 | Fold "Roots & Transfer Function" tab into Response Plots | P2 *(s)* | PROPOSED | medium | FS-002 (hard) |
 | FS-004 | Biquad Pairing tab: compact layout, rad/s note font | P2 *(s)* | PROPOSED | medium | FS-001 (soft) |
-| FS-006 | Bessel and equiripple-delay responses | P1 | PROPOSED | xhigh | — |
+| FS-006 | Bessel and equiripple-delay responses | P1 | PLANNED | xhigh | — |
 | FS-007 | Custom filter design (coefficients or poles/zeros) | P1 | PROPOSED | plan xhigh / build high | FS-003 (soft), FS-006 (soft) |
 | FS-008 | LTspice export with Monte Carlo presets | P1 | PROPOSED | plan xhigh / build high | FS-005 (hard) |
 | FS-009 | Noise analysis in LTspice output | P2 *(s)* | PROPOSED | medium | FS-008 (hard) |
@@ -144,6 +144,7 @@ first.
 | FS-017 | Manual pairing override: unreliable clicks | P2 *(s)* | PROPOSED | medium | — |
 | FS-018 | Op-amp data: provenance field + review of shipped parts | P2 *(s)* | PROPOSED | medium | — |
 | FS-019 | Wider op-amp library: first batch + standing process | P3 *(s)* | PROPOSED | low | FS-018 (hard) |
+| FS-020 | Equiripple phase-error (Zverev linear-phase) response | P3 *(s)* | PROPOSED | plan xhigh / build high | FS-006 (hard) |
 
 *(s)* = suggested priority, awaiting maintainer confirmation.
 
@@ -220,18 +221,34 @@ sourced) and before FS-019 (additions follow its curation rule).
 - **Updated:** 2026-09-26
 
 ### FS-006 — Bessel and equiripple-delay responses
-- **State:** PROPOSED
+- **State:** PLANNED
 - **Priority:** P1
 - **Effort:** xhigh
 - **Tiers:** A, D
 - **Depends on:** —
-- **Contracts:** — (all-pole LP prototypes flow through existing pairing and §2 classification unchanged)
-- **Files:** `filter_solvers.py` (new prototype solvers), `filter_engine.py`, `app.py` (Response radio L228), `ui_components.py` (spec validation), `plot_utils.py` if delay-specific plot hints are added
-- **Goal:** Two new responses in the sidebar: Bessel (maximally flat delay) and equiripple group delay, for LP and HP (and BP/BR via existing transforms).
-- **Scope:** In — prototype poles, normalization choice (−3 dB vs delay-normalized), order-selection rule from spec, UI entries, stopband/probe sections degrade gracefully (no ripple/stopband attenuation parameters where irrelevant). Out — hardware stage (unchanged; all-pole sections already realizable).
-- **Validation:** Bessel poles for orders 1–10 match published tables to ≥ 5 significant digits; group-delay flatness check vs order; equiripple-delay ripple within the specified bound; end-to-end one LP design through Topology and Resulting Response.
-- **Open questions:** Normalization for Bessel (−3 dB at fc, or unit delay)? Spec inputs for equiripple delay (delay ripple %, bandwidth)? Should BP/BR be offered, given LP→BP transforms do not preserve flat delay?
-- **Updated:** 2026-09-26
+- **Contracts:** — (all-pole prototypes; translated/classic BP sections are LP/HP/BP by §2 rules; pairing, dispatch gate and cells unchanged; no Tier B/C change, TF cache untouched)
+- **Files:** new `delay_solvers.py` (Tier A: Bessel + equiripple-delay prototypes, corner/delay normalization, order selection, stopband notches, delay BP mappings, `delay_info`); `filter_engine.py` (new branches + kwargs `delay_ripple`, `hold_corner`, `bp_mapping`; HP dispatch `else: raise`); `ui_components.py` (order/frequency delay branches, new `draw_delay_block`, BR validation); `app.py` (Response radio, order/anchor resolution step after the sidebar, engine wrappers, Tab 1 delay summary + plot, report rows, pairing signature); `plot_utils.py` (`plot_group_delay_detail`); new `dev/fs006/check_delay_solvers.py`; `docs/ARCHITECTURE.md`; `docs/manual/user_manual.md`, `quick_start.md`
+- **Goal:** Two new responses in the sidebar — Bessel (maximally flat delay) and Equiripple Delay (±δ delay ripple) — for LP, HP (magnitude mirror) and BP, with the order either typed in or selected from delay/corner/stopband specs.
+- **Scope:** In —
+  - LP: corner anchor (f_c at the user's α, default 3.0103 dB) or group-delay anchor (τ₀, LP only); manual order, or "From specs" with criteria max τ₀ (corner anchor → largest n, latency budget) / min f_c (delay anchor → smallest n, delay line), flat delay up to f_d (Bessel ε %, equiripple δ), stopband A_s at f_s.
+  - HP: magnitude mirror, corner anchor, stopband criterion only; captioned "group delay not flat".
+  - BP: prototype order n (BP order 2n), user-selectable mapping — delay-preserving pole translation (default, n/2 origin zeros, edges tuned to −α) or classic geometric transform ("delay tilted"); stopband criterion only; fold check / b > 0.3 warning with measured delay p-p.
+  - Manual notches for LP/HP, stopband only: jω zeros appended to fixed poles (delay exactly unchanged); corner anchor rescales poles to hold −α at f_c, delay anchor keeps τ₀.
+  - Order limits: Bessel LP/HP 1–20, equiripple LP/HP 1–15, BP prototype 1–10.
+  - Tab 1 delay summary + group-delay detail plot; report spec rows.
+  - Out — Band-Reject (validation message: no BR has flat delay); BP notches; asymmetric LP×HP delay BP; equiripple phase-error family (FS-020); non-minimum-phase magnitude equalization (RHP zeros, design note §5.2); any Tier B/C change.
+- **Validation:**
+  - `python dev/fs006/check_delay_solvers.py` (new, asserts): Bessel poles n = 1–10 vs design-note §2.7 to 8 digits and vs `np.roots` on exact coefficients ≤ 3e-12; delay identity ≤ 1e-9; W₃ table §2.4 to 10 digits; W_α at α = 1 dB vs direct bisection; equiripple n = 2–12 × δ ∈ {0.1, 1, 5} %: max|τ − 1| = δ within 1e-6, n + 1 alternations, τ(0) = 1 ± δ, ω_p(4, 1 %) = 3.267570; order cases of note §6.4 item 6; notch at 3·f_c → Δτ = 0; BP n = 4, b = 0.1: translation p-p ≈ 1.01 %, edges ≈ −3.02 dB, classic ≈ 9.1 %; HP τ(2f_c)/τ_LP(0) = 0.250; timing table.
+  - `python verify.py` still passes.
+  - App: Bessel LP n = 4, 1 kHz → sections 1430.2 Hz / Q 0.5219 and 1603.4 Hz / Q 0.8055, −3.01 dB at 1 kHz, τ₀ = 336.4 µs; delay anchor τ₀ = 1 ms, n = 4 → corner 336.4 Hz; auto order: τ₀ = 1 ms + min corner 500 Hz → n = 8, corner 1 kHz + τ₀ ≤ 0.4 ms → n = 5, 40 dB @ 3 kHz → infeasible warning, fallback n = 10; equiripple ±1 % LP n = 4 → f_p = 1.419 kHz; α = 1 dB moves the corner; HP caption; BP n = 4, 950–1050 Hz both mappings solve in Topology; BR message; notch at 3 kHz keeps GD; end-to-end Topology → Resulting Response + PDF report rows.
+  - Regression: Butterworth LP n = 4 and Elliptic BP defaults unchanged.
+- **Open questions:** none (answered 2026-09-27 — see Notes).
+- **Notes:**
+  - Decisions (maintainer, 2026-09-27): prototype stored delay-normalized, UI corner at the user's α; equiripple spec = ±δ % (0.05–10); HP offered as magnitude mirror; BP offered with both mappings, user-selectable; BR not offered; GD + corner auto-order semantics set by the anchor radio; stopband-only manual notches for LP/HP.
+  - Math base, measured tables and algorithms: `dev/FS-006_bessel_eqdelay_design_note.md`; verified reference solver and offline seed generator: `dev/fs006/fs006_reference.py`, `dev/fs006/eqdelay_mp.py` (moved from the chat hand-off).
+  - Measured here (reference, Py 3.13): equiripple solve 0.02–0.21 s up to n = 12, 0.29 s at n = 15 (one 1.5 s outlier at n = 13); worst-case auto-order scan 0.84 s (n ≤ 12) / 1.55 s (n ≤ 15); Bessel via `scipy.signal.besselap` ~1–2 ms at n ≤ 25.
+  - Existing `auto_pair_bandpass` puts origin zeros in pairs into the lowest-ω₀ stages, so the translation BP with n/2 origin zeros needs no pairing change. With n_z = n instead, edges tilt to −4.4 / −1.8 dB (n = 6, b = 0.1) — hence n/2.
+- **Updated:** 2026-09-27
 
 ### FS-007 — Custom filter design (coefficients or poles/zeros)
 - **State:** PROPOSED
@@ -416,6 +433,21 @@ sourced) and before FS-019 (additions follow its curation rule).
 - **Validation:** App loads with zero `load_errors()` (also catches name clashes); dropdown lists the new parts; every new entry has `source`; one section solved with one new part.
 - **Open questions:** Which parts or classes go in the first batch (e.g. low-noise audio, precision/zero-drift, micropower, rail-to-rail CMOS, high-speed)? Does the dropdown need grouping or a filter once it passes ~30 entries (Streamlit's selectbox already filters by typing; grouping would be a separate UI item)?
 - **Notes:** Growing the library is continuous, and the state machine needs a terminal `DONE` — hence one closeable batch plus a standing rule rather than an item that stays `ACTIVE`.
+- **Updated:** 2026-09-27
+
+### FS-020 — Equiripple phase-error (Zverev linear-phase) response
+- **State:** PROPOSED
+- **Priority:** P3 (suggested)
+- **Effort:** plan xhigh / build high
+- **Tiers:** A, D
+- **Depends on:** FS-006 (hard — reuses its Remez/Newton machinery, sidebar and delay plots)
+- **Contracts:** —
+- **Files:** `delay_solvers.py` (new residual: phase error φ(ω) + ωτ instead of delay ripple), `app.py` / `ui_components.py` (Response entry, spec in degrees), `dev/fs006/` (offline seed generation)
+- **Goal:** The classic "linear phase with equiripple error" family (Zverev; Williams & Taylor 0.05° / 0.5° tables), for users who expect those published tables rather than FS-006's equiripple-delay family.
+- **Scope:** In — pole family minimizing max|φ(ω) + ωτ| (alternation points in (0, ω_p]), seeds per order, validation against the published tables. Out — anything FS-006 already covers.
+- **Validation:** Poles match the Zverev / Williams & Taylor 0.05° and 0.5° tables to their printed digits; phase error equiripple within the bound on a dense grid.
+- **Open questions:** Is there user demand beyond FS-006's equiripple-delay family? Which error values to offer (only 0.05° / 0.5°, or continuous)?
+- **Notes:** Split out of FS-006 (design note §3.6). A related idea recorded there, not itemized: non-minimum-phase magnitude equalization with real zero pairs ±σ (flat delay + flatter magnitude), which needs summing/feed-forward sections the hardware stage does not have (note §5.2).
 - **Updated:** 2026-09-27
 
 ---

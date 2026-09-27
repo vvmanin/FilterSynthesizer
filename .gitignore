@@ -218,6 +218,7 @@ FilterSynthesizer-diagnostic-*.txt
 **/build
 **/build_venv
 **/dist
+**/temp
 
 
 # derived TF caches (regenerated at runtime)
