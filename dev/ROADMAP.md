@@ -148,12 +148,23 @@ first.
 | FS-019 | Wider op-amp library: first batch + standing process | P3 *(s)* | PROPOSED | low | FS-018 (hard) |
 | FS-020 | Equiripple phase-error (Zverev linear-phase) response | P3 *(s)* | PROPOSED | plan xhigh / build high | FS-006 (hard) |
 | FS-021 | Equiripple-magnitude stopband for delay responses | P1 *(s)* | PROPOSED | plan xhigh / build high | FS-006 (hard) |
+| FS-022 | PDF report: group-delay axis blown up by notch spikes | P2 *(s)* | PROPOSED | medium | — |
+| FS-023 | PDF report: group-delay detail plot for delay responses | P3 *(s)* | PROPOSED | medium | FS-006 (hard), FS-022 (soft) |
+| FS-024 | Step and impulse response plots (design vs realized) | P3 *(s)* | PROPOSED | high | — |
+| FS-025 | Gaussian and other non-overshooting responses | P3 *(s)* | PROPOSED | plan xhigh / build high | FS-006 (hard), FS-024 (soft) |
 
 *(s)* = suggested priority, awaiting maintainer confirmation.
 
 Suggested order: FS-006 → FS-008 (the P1 track; its prerequisite FS-005 is
 done), FS-007 in parallel planning; UI polish FS-001 → FS-002 → FS-003
 → FS-004 can be interleaved as low-risk medium-effort sessions.
+
+Non-urgent follow-ups added 2026-09-27, ranked by implementation convenience
+(easiest first): FS-022 (a report-data fix in one place) → FS-023 (one more
+optional report plot, reuses FS-006's detail plot) → FS-024 (new time-domain
+computation for ideal and realized, UI + report) → FS-021 (new notch-placement
+solver on fixed delay poles + notch-grid UI; prototype already converges) →
+FS-025 (new approximation families; research first).
 
 Defect items FS-015/016/017 have no hard dependencies and block nothing; slot
 them between feature items. File-overlap notes (to avoid rework, not
@@ -456,22 +467,89 @@ sourced) and before FS-019 (additions follow its curation rule).
 - **Updated:** 2026-09-27
 
 ### FS-021 — Equiripple-magnitude stopband for delay responses
-- **State:** PROPOSED
+- **State:** PROPOSED (plan drafted 2026-09-27; waiting on the open questions)
 - **Priority:** P1 (suggested)
 - **Effort:** plan xhigh / build high
 - **Tiers:** A, D
 - **Depends on:** FS-006 (hard)
-- **Contracts:** — (notch sections are LPn/HPn by §2; no new family expected)
-- **Files:** `delay_solvers.py` (notch-placement solver on fixed delay poles), `filter_engine.py` (LP branch), `app.py` (Manual Notch Placement section), maybe `ui_components.py`
-- **Goal:** For a Bessel / Equiripple Delay lowpass with manual order and the corner anchor, a checkbox "Equiripple Magnitude Stopband" in the Manual Notch Placement section places the stopband notches automatically so the stopband is equiripple (every hump at A_s, like Inverse Chebyshev) while the passband group delay stays exactly that of the delay prototype (jω zeros add no delay; the poles only get the corner-holding scale).
-- **Scope (maintainer's proposal, 2026-09-27):**
-  - Ticking the checkbox ticks the notch pins and makes their number boxes read-only; the computed notch frequencies are shown in ascending order.
-  - The number of ticked pins sets the number of notches m and so the far-stopband roll-off 20·(n − 2m) dB/dec. Default: the largest m keeping at least −20 dB/dec (m = ⌊(n − 1)/2⌋); for even n the user may also tick the last pin (m = n/2) for a flat stopband floor.
-  - Unticking pins recomputes the remaining notches and refills the read-only cells.
-  - Out (to investigate separately) — bandpass.
-- **Validation:** (to define) every stopband hump within a tolerance of A_s; the group delay identical to the notch-free design up to the corner scale (phase-derivative check as in FS-006); −α at f_c; roll-off slope 20·(n − 2m) dB/dec; comparison of selectivity against Inverse Chebyshev / plain Bessel at the same order.
-- **Open questions:** Which quantity is solved for — the notches for a given A_s (stopband edge follows, like the Inverse Chebyshev slots), or A_s maximized for a given stopband edge? Interaction with the delay anchor (corner moves instead of τ₀) — excluded or allowed? Behaviour when A_s cannot be met with m notches near f_c (the corner-holding scale grows; feasibility test ∏(1 − (f_c/f_z)²) > 10^(−α/20) from FS-006)? Reuse of the Inverse Chebyshev slot solver (`filter_solvers.solve_inv_chebyshev_lp` least-squares loop) vs a new Remez on the notch frequencies with the pole scale as an extra unknown?
-- **Notes:** Proposed after FS-006 review: manual notches combine well with Bessel / Equiripple Delay (passband delay preserved exactly). Unknowns ≈ m notch frequencies + the pole scale; equations ≈ m hump levels (m − 1 between notches + 1 above the last, or the HF floor when 2m = n) + the corner condition — a square system, Newton-solvable like FS-006's equiripple delay.
+- **Contracts:** — (notch sections are LPn / HPn / notch by §2; no new family, no Tier B/C change)
+- **Files:** `delay_solvers.py` (new `solve_delay_stopband_notches` + a hump evaluator; `design_delay_lp` gains an equiripple mode), `filter_engine.py` (LP delay branch passes the mode and the pinned/free slot layout, returns the computed notches as `ideal_notches_hz` like Inverse Chebyshev), `app.py` (Manual Notch Placement section: checkbox, pin/row behaviour, read-only cells filled from `ideal_notches_hz`; pairing signature), `dev/fs006/check_delay_solvers.py` (new section), `docs/ARCHITECTURE.md`
+- **Goal:** For a Bessel / Equiripple Delay lowpass with manual order and the corner anchor, a checkbox "Equiripple Magnitude Stopband" in Manual Notch Placement places the stopband notches automatically so every stopband hump sits exactly at A_s (Inverse-Chebyshev-like magnitude), while the passband group delay keeps the shape of the delay prototype (jω zeros add no delay; the poles only get the corner-holding scale).
+- **Scope:** In —
+  - Math (Tier A): given order n, α, A_s, ripple δ and m notches, solve the m notch frequencies (normalized, > 1) so that the m stopband maxima (m − 1 between notches + the one above the last notch, or the HF floor when 2m = n) all equal A_s, with the poles scaled at every step so −α stays at f_c (FS-006 `design_delay_lp(hold_corner=True)`). Same semantics as `solve_inv_chebyshev_lp`: A_s is the input, the stopband edge f_s follows. Least-squares on log(Ω_z − 1) (keeps notches above the corner), start from a corner-feasible geometric spread (first notch ≈ 3, ratio ≈ 1.7), infeasible corner-hold returns a large residual.
+  - UI (Tier D), shown only for delay response + Lowpass + manual order + corner anchor: checkbox `widget_ems` in Manual Notch Placement. Ticking it ticks the P = ⌊n/2⌋ pin rows' "active" state per the default below and makes every number box read-only, showing the computed frequencies in ascending order. The number of active rows = m, i.e. the far-stopband roll-off 20·(n − 2m) dB/dec. Default m = ⌊(n − 1)/2⌋ (at least −20 dB/dec); for even n the last row may be activated too (m = n/2, flat stopband floor). Deactivating a row re-solves the rest and refills the read-only cells.
+  - Readout: the pole scale / τ₀ reduction (it is not small — see Notes), the achieved f_s, and the unchanged delay shape (FS-006 Group Delay Detail already shows it).
+  - Out — bandpass (investigate in a follow-up: the translation BP has asymmetric skirts and n/2 origin zeros); the τ₀ anchor (the corner hold is what makes the problem square); mixing user-pinned frequencies with solved ones (possible later, as the Inverse Chebyshev "slots" do).
+- **Validation:**
+  - `check_delay_solvers.py` new section: for Bessel and Equiripple (δ = 1 %), n ∈ {3, 4, 5, 6, 8}, m ∈ {1 … ⌊n/2⌋}, A_s ∈ {30, 40, 60} dB: every hump within 1e-6 dB of A_s on a dense grid; −α at f_c within 1e-9 dB; group delay equals the notch-free design scaled by the pole scale (phase-derivative check, as FS-006 §6); far-stopband slope 20·(n − 2m) dB/dec; solve time < 0.5 s.
+  - Reference values from the 2026-09-27 prototype (normalized to f_c): Bessel n = 4, m = 1, 40 dB → notch 3.735, scale 1.118, f_s 3.375; Bessel n = 8, m = 3, 40 dB → notches 2.934 / 3.828 / 6.163, scale 1.646, f_s 2.811; Equiripple n = 6, m = 3, 40 dB → 2.918 / 3.815 / 9.020, scale 1.556, f_s 2.798.
+  - App: Bessel LP n = 6, 1 kHz, 40 dB, tick the checkbox → 2 notches, equal humps on the magnitude plot, Group Delay Detail flat as before (τ₀ reduced by the reported scale); activate the 3rd row → flat floor at −40 dB; deactivate one → roll-off steepens and cells refill; Topology solves the LPn sections.
+- **Open questions:**
+  1. Confirm A_s as the input (humps pinned to A_s, f_s follows), as Inverse Chebyshev does — or should the user give f_s and get the best A_s?
+  2. The corner hold scales the poles up by 1.1–2.0× (more notches, lower A_s → more), so τ₀ drops by the same factor and the flat-delay band widens. Accept, and just report it? The alternative (poles untouched) lets the corner move down instead, like the τ₀ anchor.
+  3. Pin semantics: in this mode a ticked pin means "this notch exists (frequency solved)", not "frequency fixed by me" as elsewhere. OK, or use a separate per-row "active" control so the pin keeps its usual meaning?
+- **Notes:**
+  - Proposed after the FS-006 review: manual notches combine well with Bessel / Equiripple Delay (passband delay preserved exactly).
+  - Feasibility prototype (2026-09-27, scratch, not in the repo): least-squares on the notch frequencies with the FS-006 corner hold inside converged for every case of the validation grid above, hump error ≤ 2e-10 dB, 50–240 ms per solve. The first start (notches 2 and 4) failed only because it violated the corner-hold condition ∏(1 − 1/Ω_z²) > 10^(−α/20); a start at 3, 5.1, … is feasible.
+  - Gain in selectivity is real but moderate: Bessel n = 8 reaches 40 dB at 2.81·f_c with 3 notches vs ≈ 3.4·f_c without.
+- **Updated:** 2026-09-27
+
+### FS-022 — PDF report: group-delay axis blown up by notch spikes
+- **State:** PROPOSED
+- **Priority:** P2 (suggested — a defect in the output, not urgent)
+- **Effort:** medium
+- **Tiers:** D
+- **Depends on:** —
+- **Contracts:** —
+- **Files:** `report_ui.py` (build `ideal_gd` / `realized_gd` for the report), maybe `response_tab.py` (share the computation), `report_pdf.py` (`_gd_ms` fallback, ~L510–606)
+- **Goal:** The report's Bode page scales its group-delay axis like the Resulting Response tab: realized-GD peaks at non-ideal notches (phase error near the notch) are clipped, and the passband delay stays readable.
+- **Scope:** In — pass analytic ideal and realized GD to the report in every case; keep the existing clip window (ideal min/max + realized 3–97 % bulk, ±20 %). Out — changes to the interactive plot.
+- **Validation:** Inverse Chebyshev LP n = 6 with realized notches: report GD axis spans the passband delay (not the notch spikes), same window as the tab's plot; a design without notches unchanged.
+- **Open questions:** none expected once the cause is confirmed.
+- **Notes:** Likely cause (read, not yet reproduced): `report_pdf.py` L583–601 already copies the tab's clipping, but anchors it on the IDEAL curve. The analytic `ideal_gd` / `realized_gd` arrays reach the report only when the Resulting Response tab's "Group delay" checkbox is on (`response_tab.py` L519–535 → `report_ui.py` L114/198). Otherwise `_gd_ms` differentiates the phase, which spikes at the π phase jump of every jω zero even for the ideal response, and the window is anchored on that spiky curve.
+- **Updated:** 2026-09-27
+
+### FS-023 — PDF report: group-delay detail plot for delay responses
+- **State:** PROPOSED
+- **Priority:** P3 (suggested)
+- **Effort:** medium
+- **Tiers:** D
+- **Depends on:** FS-006 (hard), FS-022 (soft — same report GD data)
+- **Contracts:** —
+- **Files:** `report_ui.py` (checkbox next to "Passband detail plot"), `report_pdf.py` (matplotlib version of the detail plot), `app.py` (publish `delay_info` + tolerance to the report snapshot)
+- **Goal:** For Bessel / Equiripple Delay designs, a report option "Group-delay passband detail" adds the FS-006 Group Delay Detail (zoomed τ(f), τ_nom line, ±δ or −ε band, flat-band edges) to the PDF, design vs realized.
+- **Scope:** In — checkbox shown only for delay responses; ideal and realized curves; same zoom rule as the Tab 1 plot. Out — the interactive plot.
+- **Validation:** Bessel LP n = 4 and Equiripple ±1 % LP n = 4 reports show the zoomed delay with the tolerance band; the realized curve stays inside it for a clean BOM; unchecked → report unchanged.
+- **Open questions:** Realized curve too (needs the realized section TFs, as FS-022), or design only?
+- **Updated:** 2026-09-27
+
+### FS-024 — Step and impulse response plots (design vs realized)
+- **State:** PROPOSED
+- **Priority:** P3 (suggested)
+- **Effort:** high
+- **Tiers:** D (A helper for the ideal response)
+- **Depends on:** —
+- **Contracts:** —
+- **Files:** `plot_utils.py` / `hw_plots.py` (time-domain figures), `app.py` (Tab 1, ideal), `response_tab.py` (realized, optionally with Monte-Carlo spread), `report_pdf.py` + `report_ui.py` (optional report page)
+- **Goal:** Step and impulse responses of the ideal design and of the realized circuit, with overshoot, rise time (10–90 %), settling time and delay read out — the time-domain view that makes Bessel / Equiripple Delay (and FS-025) worth choosing.
+- **Scope:** In — ideal from poles/zeros/k (partial fractions or `scipy.signal.step/impulse` on the ZPK; time span from the slowest pole); realized from the section TFs with op-amp model (same source as the realized Bode); metrics table; LP/HP/BP/BR (BP/BR: envelope or plain waveform — to decide). Out — transient simulation of non-linear effects (slew, clipping).
+- **Validation:** Bessel LP n = 4: overshoot 0.84 %, rise ≈ 0.34/f_c (design note §2.3); Butterworth n = 4: 10.8 %; realized curve matches ideal within the Bode match for a clean BOM.
+- **Open questions:** Where in the UI (Tab 1 section vs Resulting Response tab vs both)? Monte-Carlo envelope in time domain too?
+- **Updated:** 2026-09-27
+
+### FS-025 — Gaussian and other non-overshooting responses
+- **State:** PROPOSED
+- **Priority:** P3 (suggested)
+- **Effort:** plan xhigh / build high
+- **Tiers:** A, D
+- **Depends on:** FS-006 (hard — reuses the delay-response UI and order selection), FS-024 (soft — step response to show the benefit)
+- **Contracts:** —
+- **Files:** `delay_solvers.py` or a new sibling module, `ui_components.py`, `app.py`, `dev/` research note
+- **Goal:** More responses aimed at clean transients: Gaussian (truncated-Taylor approximation of exp(−ω²)), transitional Gaussian-to-6 dB / 12 dB, and other candidates with zero or near-zero step overshoot (e.g. critically damped / all-real-pole, Legendre-Papoulis as a steeper low-overshoot option).
+- **Scope:** Phase 1 — research note: definitions, pole computation, overshoot/rise/selectivity table per order vs Bessel, which ones earn a place. Phase 2 — implement the chosen ones as LP (+ translation BP if meaningful) through the FS-006 machinery. Out — highpass/band-reject (same reasoning as FS-006).
+- **Validation:** Poles vs published tables (Zverev; Williams & Taylor); step overshoot per order (with FS-024); −α at f_c.
+- **Open questions:** Which families? Is "non-overshooting" strict (0 %) or "low" (< 1 %)?
+- **Notes:** Relation: FS-020 (equiripple phase error) is another linear-phase family — plan them together.
 - **Updated:** 2026-09-27
 
 ---
