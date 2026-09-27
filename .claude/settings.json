@@ -1,11 +1,8 @@
 {
   "permissions": {
     "deny": [
-      "Bash(git commit:*)",
-      "Bash(git push:*)",
       "Bash(git reset:*)",
       "Bash(git checkout:*)",
-      "Bash(git add:*)",
       "PowerShell(git commit:*)",
       "PowerShell(git push:*)",
       "PowerShell(git reset:*)",
