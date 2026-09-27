@@ -274,6 +274,77 @@ def plot_phase_delay(engine_results, f_corner_ui, freq_unit, multiplier, show_ph
     return fig
 
 
+def time_scale(t_s):
+    """(factor, unit) to show a time given in seconds: 336e-6 s -> (1e6, 'µs')."""
+    a = abs(t_s)
+    for f, u in ((1.0, "s"), (1e3, "ms"), (1e6, "µs"), (1e9, "ns")):
+        if a * f >= 1.0:
+            return f, u
+    return 1e12, "ps"
+
+
+def format_seconds(t_s, digits=4):
+    f, u = time_scale(t_s)
+    return f"{t_s * f:.{digits}g} {u}"
+
+
+def plot_group_delay_detail(engine_results, freq_unit, multiplier, f_corner_ui, f2_corner_ui=None, fd_ui=None):
+    """Group-delay detail for Bessel / Equiripple Delay (FS-006; lowpass / bandpass), from
+    engine_results['delay_info']: linear axes zoomed on the flat-delay region, with the nominal
+    delay and the tolerance (±δ band for equiripple, the (1 − ε) floor for a Bessel lowpass,
+    ±ε for a Bessel bandpass) and the flat-band edges."""
+    from delay_solvers import group_delay, EQDELAY
+
+    info = engine_results["delay_info"]
+    p_rad, z_rad = engine_results["poles"], engine_results["zeros"]
+    kind = info["kind"]
+    tol = info["delta"] if info["response"] == EQDELAY else info["eps_ref"]
+    band = info.get("flat_band_hz")
+
+    fig = go.Figure()
+    if kind == "LP":
+        ref = info["tau_nom_s"]
+        edges = [band[1] / multiplier] if band else []
+        f_hi = 1.3 * max([f_corner_ui] + edges + ([fd_ui] if fd_ui else []))
+        f_ui = np.linspace(0.0, f_hi, 1500)
+        corners = [(f_corner_ui, "fc")]
+    else:
+        ref = info["tau_nom_s"] if info["response"] == EQDELAY else info["tau_center_s"]
+        edges = [band[0] / multiplier, band[1] / multiplier] if band else []
+        bw = f2_corner_ui - f_corner_ui
+        f_ui = np.linspace(max(f_corner_ui - 0.5 * bw, 1e-9), f2_corner_ui + 0.5 * bw, 1500)
+        corners = [(f_corner_ui, "fc1"), (f2_corner_ui, "fc2")]
+    tau = group_delay(p_rad, 2 * np.pi * f_ui * multiplier, z_rad)
+    k, tu = time_scale(ref)
+    fig.add_trace(go.Scattergl(x=f_ui, y=tau * k, mode="lines", line=dict(color="green", width=2)))
+    if info["response"] == EQDELAY or kind == "BP":
+        fig.add_hrect(y0=ref * (1 - tol) * k, y1=ref * (1 + tol) * k, fillcolor="green",
+                      opacity=0.08, line_width=0)
+        lo_y, hi_y = ref * (1 - 4 * tol) * k, ref * (1 + 2.5 * tol) * k
+        tol_txt = f"±{tol * 100:g} %"
+    else:
+        fig.add_hline(y=ref * (1 - tol) * k, line_dash="dash", line_color="red", opacity=0.6,
+                      line_width=1, annotation_text=f"−{tol * 100:g} %")
+        lo_y, hi_y = ref * (1 - 4 * tol) * k, ref * (1 + 1.5 * tol) * k
+        tol_txt = f"−{tol * 100:g} %"
+    fig.add_hline(y=ref * k, line_width=1, line_color="black", opacity=0.5,
+                  annotation_text=f"τ = {ref * k:.4g} {tu}")
+    for x in edges:
+        fig.add_vline(x=x, line_dash="dash", line_color="green", opacity=0.7, line_width=1,
+                      annotation_text=f"flat to {tol_txt}")
+    for x, lbl in corners:
+        fig.add_vline(x=x, line_dash="dot", line_color="black", opacity=0.7, line_width=1,
+                      annotation_text=f"{lbl} ({freq_unit})", annotation_position="bottom right")
+    if fd_ui:
+        fig.add_vline(x=fd_ui, line_dash="dot", line_color="magenta", opacity=0.6, line_width=1,
+                      annotation_text="f_d", annotation_position="bottom left")
+    fig.update_layout(xaxis_title=f"Linear Frequency ({freq_unit})",
+                      xaxis_range=[f_ui[0], f_ui[-1]], yaxis_range=[lo_y, hi_y])
+    fig.update_layout(yaxis_title=f"Group Delay ({tu})", margin=dict(l=20, r=20, t=30, b=10),
+                      height=320, showlegend=False)
+    return fig
+
+
 def plot_pole_zero_map(poles, zeros, scale_type, unit_label, stretch_factor=1.0):
     fig = go.Figure()
 

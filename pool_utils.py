@@ -46,11 +46,31 @@ def get_process_pool():
     return concurrent.futures.ProcessPoolExecutor(max_workers=MAX_WORKERS)
 
 
+def _source_stamp():
+    """Newest mtime of the app's .py files. `streamlit run` hot-reloads an edited module in the
+    main process only; the pool workers keep the code they imported when spawned, so after an
+    edit they run stale functions (e.g. a TypeError on a keyword the new caller passes). In the
+    frozen exe the bundled files never change, so the stamp is constant."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    try:
+        return max(e.stat().st_mtime for e in os.scandir(here) if e.name.endswith(".py"))
+    except (OSError, ValueError):
+        return None
+
+
 def run_in_pool(fn, *args, **kwargs):
     """`get_process_pool().submit(fn, ...).result()` with one rebuild-and-retry
-    if the pool was found dead. Exceptions raised by `fn` propagate unchanged."""
+    if the pool was found dead. Exceptions raised by `fn` propagate unchanged.
+    The pool is also rebuilt when a source file changed since it was built (dev servers)."""
+    stamp = _source_stamp()
+    pool = get_process_pool()
+    if getattr(pool, "_source_stamp", stamp) != stamp:
+        pool.shutdown(wait=False)         # queued work still finishes on the old workers
+        get_process_pool.clear()
+        pool = get_process_pool()
+    pool._source_stamp = stamp
     try:
-        return get_process_pool().submit(fn, *args, **kwargs).result()
+        return pool.submit(fn, *args, **kwargs).result()
     except BrokenProcessPool:
         get_process_pool.clear()          # drop the poisoned executor
         return get_process_pool().submit(fn, *args, **kwargs).result()

@@ -19,6 +19,7 @@ import pandas as pd
 
 from filter_engine import synthesize_lowpass, synthesize_highpass, synthesize_bandpass, synthesize_bandreject
 from plot_utils import plot_main_magnitude, plot_passband_magnitude, plot_phase_delay, evaluate_h_complex, plot_pole_zero_map, plot_mnemoscheme_map
+from plot_utils import plot_group_delay_detail, format_seconds
 from tf_utils import clean_roots, poly_to_latex, roots_to_biquad_latex, build_coeff_table, format_val, format_latex_val, poly_to_latex_lines, roots_to_biquad_lines, tf_latex
 from pairing_utils import build_stage_bricks, auto_pair_stages, find_clicked_brick, compute_stage_gains
 from topology_tab import render_topology_tab
@@ -28,12 +29,19 @@ from _version import __version__, APP_NAME
 # Import all UI components
 from ui_components import (
     draw_order_block, 
+    draw_delay_order_block,
+    draw_filter_type,
     draw_frequency_block, 
     draw_gain_block, 
     draw_ripple_block, 
+    draw_delay_block,
     draw_modifications_block, 
-    validate_filter_specs
+    validate_filter_specs,
+    UNIT_MULT as _UNIT_MULT,
+    RECIPROCAL_UNIT as _RECIP_UNIT,
 )
+import delay_solvers
+from delay_solvers import DELAY_RESPONSES
 
 
 from pool_utils import run_in_pool, format_exc_for_ui, env_summary
@@ -225,16 +233,23 @@ st.markdown("""
 with st.sidebar:
     st.header("Filter Configuration")
     
-    response = st.radio("Response", ["Butterworth", "Chebyshev", "Inverse Chebyshev", "Elliptic"], index=0)
+    response = st.radio("Response", ["Butterworth", "Chebyshev", "Inverse Chebyshev", "Elliptic",
+                                     "Bessel", "Equiripple Delay"], index=0)
+    st.markdown("---")
+    is_delay = response in DELAY_RESPONSES
+    
+    filter_type = draw_filter_type(response)
     st.markdown("---")
     
-    filter_type = st.radio("Filter Type", ["Lowpass", "Highpass", "Bandpass", "Band-Reject"], index=0)
+    delay_order_mode, delay_order_slot = None, None
+    if is_delay:
+        final_lp_order, final_hp_order, delay_order_mode, delay_order_slot = \
+            draw_delay_order_block(response, filter_type)
+    else:
+        final_lp_order, final_hp_order = draw_order_block(response, filter_type)
     st.markdown("---")
     
-    final_lp_order, final_hp_order = draw_order_block(response, filter_type)
-    st.markdown("---")
-    
-    f1_val, f2_val, freq_unit = draw_frequency_block(filter_type)
+    f1_val, f2_val, freq_unit, delay_anchor_ui = draw_frequency_block(filter_type, response)
     st.markdown("---")
     
     final_gain_units = draw_gain_block()
@@ -242,10 +257,141 @@ with st.sidebar:
     
     final_alpha, final_as_lp, final_as_hp = draw_ripple_block(response, filter_type)
         
+    delay_spec = None
+    if is_delay and filter_type in delay_solvers.DELAY_FILTER_TYPES:
+        delay_spec = draw_delay_block(
+            response, filter_type, delay_order_mode,
+            delay_anchor_ui["anchor"] if delay_anchor_ui else "corner", freq_unit)
+
     pb_mod_lp, pb_mod_hp, sb_roll_lp, sb_roll_hp = draw_modifications_block(
     response, filter_type, final_lp_order, final_hp_order
 )
     st.markdown("---")
+
+# ============================================================
+# DELAY RESPONSES (FS-006): ORDER / CORNER RESOLUTION
+# ============================================================
+# Runs before anything consumes the order or the corner, so everything downstream (engine,
+# plots, report windows, notch fallbacks) works unchanged. The corner anchor holds f_c; the
+# delay anchor holds tau0 and derives f_c from the order.
+_DELAY_KIND = {"Lowpass": "LP", "Bandpass": "BP"}
+
+
+@st.cache_data(max_entries=50, show_spinner=False)
+def _select_delay_order(response, kind, alpha, delta, anchor, fc_hz, tau0_s, crit, n_max,
+                        f1_hz, f2_hz, mapping):
+    return delay_solvers.select_delay_order(response, kind, alpha, delta, anchor, fc_hz, tau0_s,
+                                            crit, n_max, f1_hz=f1_hz, f2_hz=f2_hz, mapping=mapping)
+
+
+def _fmt_delay_row(value, unit, freq_unit):
+    """One order-criterion value in the sidebar's units (times in 1/freq_unit)."""
+    mult = _UNIT_MULT[freq_unit]
+    if unit == "s":
+        return f"{value * mult:.4g} {_RECIP_UNIT[freq_unit]}"
+    if unit == "Hz":
+        return f"{value / mult:.4g} {freq_unit}"
+    if unit == "frac":
+        return f"{value * 100:.3g} %"
+    return f"{value:.1f} dB"
+
+
+def _render_delay_summary(info, freq_unit):
+    """Tab 1 metrics row for a Bessel / Equiripple Delay design (engine_results['delay_info'])."""
+    mult = _UNIT_MULT[freq_unit]
+    eq = info["response"] == delay_solvers.EQDELAY
+    tol_txt = (f"±{info['delta'] * 100:g} %" if eq
+               else f"{'±' if info['kind'] == 'BP' else '−'}{info['eps_ref'] * 100:g} %")
+    band = info.get("flat_band_hz")
+    cells = []
+    if info["kind"] == "LP":
+        cells.append(("Group delay τ(0)", format_seconds(info["tau_dc_s"])))
+        if eq:
+            cells.append(("Nominal delay", format_seconds(info["tau_nom_s"])))
+        if info.get("corner_hz"):
+            cells.append((f"Corner ({info['alpha_db']:g} dB)", f"{info['corner_hz'] / mult:.5g} {freq_unit}"))
+        cells.append((f"Flat delay ({tol_txt}) to",
+                      f"{band[1] / mult:.4g} {freq_unit}" if band else "—"))
+    elif info["kind"] == "BP":
+        cells.append(("Delay at centre", format_seconds(info["tau_center_s"])))
+        cells.append(("Centre", f"{info['center_hz'] / mult:.4g} {freq_unit}"))
+        cells.append((f"Flat delay ({tol_txt})",
+                      f"{band[0] / mult:.3g}–{band[1] / mult:.3g}" if band else "—"))
+        cells.append(("Delay p-p f1…f2", f"{info['delay_pp_pct']:.2f} %"))
+    cells.append(("Max section Q", f"{info['max_q']:.3f}"))
+    for col, (lbl, val) in zip(st.columns(len(cells)), cells):
+        col.metric(lbl, val)
+    if info.get("pole_scale", 1.0) != 1.0:
+        st.caption(f"Poles scaled ×{info['pole_scale']:.4f} to hold the corner with the notches "
+                   "(same delay shape; τ is 1/scale of the notch-free design).")
+    for w in info.get("warnings", []):
+        st.warning(w)
+
+
+delay_anchor = "corner"
+delay_ripple, delay_eps, delay_bp_mapping = 0.01, 0.01, delay_solvers.BP_TRANSLATION
+delay_order_sel = None
+if delay_spec is not None:
+    _dk = _DELAY_KIND[filter_type]
+    _mult = _UNIT_MULT[freq_unit]
+    delay_ripple, delay_eps = delay_spec["delta"], delay_spec["eps"]
+    delay_bp_mapping = delay_spec["bp_mapping"]
+    if delay_anchor_ui:
+        delay_anchor = delay_anchor_ui["anchor"]
+    _tau0 = delay_anchor_ui["tau0_s"] if delay_anchor == "delay" else None
+
+    if delay_order_mode == "From specs":
+        _crit, _notes = dict(delay_spec["crit"]), []
+        if "fs_hz" in _crit:
+            _fs = _crit["fs_hz"]
+            _lo, _hi = f1_val * _mult, (f2_val or f1_val) * _mult
+            if _dk == "BP" and _lo <= _fs <= _hi:
+                _notes.append("Stopband criterion ignored: f_s must lie outside f1…f2.")
+                _crit.pop("fs_hz")
+            else:
+                _crit["as_db"] = final_as_hp if (_dk == "BP" and _fs < _lo) else final_as_lp
+        try:
+            with st.spinner("Selecting the order..."):
+                delay_order_sel = _select_delay_order(
+                    response, _dk, final_alpha, delay_ripple, delay_anchor,
+                    f1_val * _mult if delay_anchor == "corner" else None, _tau0, _crit,
+                    delay_solvers.max_order(response, filter_type),
+                    f1_val * _mult if _dk == "BP" else None,
+                    f2_val * _mult if _dk == "BP" else None, delay_bp_mapping)
+        except Exception as e:
+            delay_order_sel = {"n": None, "feasible": False, "rows": [],
+                               "message": f"Order selection failed: {type(e).__name__}: {e}"}
+        with delay_order_slot.container():
+            if delay_order_sel["n"] is None:
+                st.info(f"{delay_order_sel['message']} Using n = {final_lp_order} meanwhile.")
+            else:
+                final_lp_order = final_hp_order = delay_order_sel["n"]
+                _box = st.success if delay_order_sel["feasible"] else st.warning
+                _lines = [f"**n = {final_lp_order}** — {delay_order_sel['message']}"]
+                for _lbl, _got, _tgt, _ok, _u in delay_order_sel["rows"]:
+                    _lines.append(f"- {'✓' if _ok else '✗'} {_lbl} "
+                                  f"{_fmt_delay_row(_tgt, _u, freq_unit)}: "
+                                  f"{_fmt_delay_row(_got, _u, freq_unit)}")
+                _box("\n".join(_lines))
+            for _n in _notes:
+                st.warning(_n)
+
+    if _dk == "LP" and delay_anchor == "delay":
+        _W = delay_solvers.corner_product(response, final_lp_order, final_alpha, delay_ripple)
+        f1_val = _W / (2 * np.pi * _tau0) / _mult
+        delay_anchor_ui["slot"].caption(
+            f"Corner at {final_alpha:g} dB: **{f1_val:.6g} {freq_unit}** (n = {final_lp_order})")
+
+    if _dk == "BP" and delay_bp_mapping == delay_solvers.BP_TRANSLATION and f2_val:
+        _b = (f2_val - f1_val) / (0.5 * (f1_val + f2_val))
+        _lim = delay_solvers.bp_fold_limit(response, final_lp_order, final_alpha, delay_ripple)
+        if _b >= _lim:
+            st.error(f"**Band too wide for the delay-preserving bandpass:** B/f0 = {_b:.3g} "
+                     f"exceeds {_lim:.3g} for n = {final_lp_order}; the translated poles would "
+                     "cross the real axis.")
+            st.warning("Narrow the band, lower the order, or choose the Classic (geometric) "
+                       "bandpass mapping.")
+            st.stop()
 
 # ============================================================
 # MAIN CANVAS CHASSIS
@@ -283,9 +429,11 @@ P_eff = 0
 import time
 
 @st.cache_data(max_entries=50, show_spinner=False)
-def run_lowpass_in_background(response, order, fc_hz, alpha_max, as_db, manual_notches_hz, pb_even_mod, sb_rolloff):
+def run_lowpass_in_background(response, order, fc_hz, alpha_max, as_db, manual_notches_hz, pb_even_mod, sb_rolloff,
+                              delay_ripple=0.01, hold_corner=True, eps_ref=0.01):
     time.sleep(0.85) # <-- The Debounce Timer!
-    return run_in_pool(synthesize_lowpass, response, order, fc_hz, alpha_max, as_db, manual_notches_hz, pb_even_mod, sb_rolloff)
+    return run_in_pool(synthesize_lowpass, response, order, fc_hz, alpha_max, as_db, manual_notches_hz, pb_even_mod, sb_rolloff,
+                       delay_ripple=delay_ripple, hold_corner=hold_corner, eps_ref=eps_ref)
     
 
 @st.cache_data(max_entries=50, show_spinner=False)
@@ -298,14 +446,15 @@ def run_highpass_in_background(response, order, fc_hz, alpha_max, as_db, manual_
 def run_bandpass_in_background(
     response, order_hp, order_lp, f1_hz, f2_hz, alpha_max, as_hp_db, as_lp_db, 
     manual_notches_hp_hz, manual_notches_lp_hz, pb_even_mod_hp, pb_even_mod_lp, 
-    sb_rolloff_hp, sb_rolloff_lp
+    sb_rolloff_hp, sb_rolloff_lp, delay_ripple=0.01, bp_mapping="translation", eps_ref=0.01
 ):
     time.sleep(0.05) # <-- The Debounce Timer!
     return run_in_pool(
         synthesize_bandpass, 
         response, order_hp, order_lp, f1_hz, f2_hz, alpha_max, as_hp_db, as_lp_db, 
         manual_notches_hp_hz, manual_notches_lp_hz, pb_even_mod_hp, pb_even_mod_lp, 
-        sb_rolloff_hp, sb_rolloff_lp
+        sb_rolloff_hp, sb_rolloff_lp,
+        delay_ripple=delay_ripple, bp_mapping=bp_mapping, eps_ref=eps_ref
     )
 
 
@@ -346,7 +495,8 @@ if filter_type == "Lowpass":
             engine_results = run_lowpass_in_background(
                 response=response, order=final_lp_order, fc_hz=real_fc,
                 alpha_max=final_alpha, as_db=final_as_lp, manual_notches_hz=active_slots, 
-                pb_even_mod=pb_mod_lp, sb_rolloff=sb_roll_lp
+                pb_even_mod=pb_mod_lp, sb_rolloff=sb_roll_lp,
+                delay_ripple=delay_ripple, hold_corner=(delay_anchor == "corner"), eps_ref=delay_eps
             )
     except Exception as e:
         st.error(f"**Engine Error:** {type(e).__name__}: {e}")
@@ -386,8 +536,9 @@ elif filter_type == "Highpass":
             st.code(diagnostics.collect(deep=False))
 
 elif filter_type == "Bandpass":
-    P_hp = final_hp_order // 2
-    P_lp = final_lp_order // 2
+    # Delay responses (FS-006) take no bandpass notches
+    P_hp = 0 if is_delay else final_hp_order // 2
+    P_lp = 0 if is_delay else final_lp_order // 2
     
     P_eff_hp = P_hp - 1 if sb_roll_hp and response in ["Inverse Chebyshev", "Elliptic"] else P_hp
     P_eff_lp = P_lp - 1 if sb_roll_lp and response in ["Inverse Chebyshev", "Elliptic"] else P_lp
@@ -420,7 +571,7 @@ elif filter_type == "Bandpass":
             active_slots_lp[i] = raw_val * multiplier
 
     try:
-        with st.spinner("Synthesizing Asymmetric Elliptic Bandpass on Ryzen Core..."):
+        with st.spinner(f"Synthesizing {response} Bandpass on Ryzen Core..."):
             engine_results = run_bandpass_in_background(
                 response=response, 
                 order_hp=final_hp_order, 
@@ -435,7 +586,10 @@ elif filter_type == "Bandpass":
                 pb_even_mod_hp=pb_mod_hp, 
                 pb_even_mod_lp=pb_mod_lp, 
                 sb_rolloff_hp=sb_roll_hp, 
-                sb_rolloff_lp=sb_roll_lp
+                sb_rolloff_lp=sb_roll_lp,
+                delay_ripple=delay_ripple,
+                bp_mapping=delay_bp_mapping,
+                eps_ref=delay_eps
             )
     except Exception as e:
         st.error(f"**Engine Error:** {type(e).__name__}: {e}")
@@ -639,6 +793,39 @@ if engine_results:
                      + ",  Upper = " + _rep_edge(engine_results.get("f_stop_lp_hz"), _sbr),
                      True))
 
+# Delay responses (FS-006): the delay spec and what the design achieved.
+_dinfo = engine_results.get("delay_info") if engine_results else None
+if is_delay and _dinfo:
+    _tol = (f"±{delay_ripple * 100:g} %" if response == delay_solvers.EQDELAY
+            else f"{'±' if _dinfo['kind'] == 'BP' else '−'}{_dinfo['eps_ref'] * 100:g} %")
+    _band = _dinfo.get("flat_band_hz")
+    if filter_type == "Lowpass":
+        _rep.append(("Delay spec", "group delay τ₀ held, corner derived" if delay_anchor == "delay"
+                     else "corner fc held"))
+    if filter_type == "Bandpass":
+        _rep.append(("Bandpass mapping", "delay-preserving (arithmetic)"
+                     if delay_bp_mapping == delay_solvers.BP_TRANSLATION else "classic (geometric)"))
+    if response == delay_solvers.EQDELAY:
+        _rep.append(("Delay ripple ±δ", f"{delay_ripple * 100:g} %"))
+    if _dinfo["kind"] == "LP":
+        _rep.append(("Group delay τ(0)", format_seconds(_dinfo["tau_dc_s"])))
+        if response == delay_solvers.EQDELAY:
+            _rep.append(("Nominal delay τ_nom", format_seconds(_dinfo["tau_nom_s"])))
+        _rep.append((f"Flat-delay band ({_tol})",
+                     f"0 … {_band[1] / multiplier:.4g} {freq_unit}" if _band else "—"))
+    elif _dinfo["kind"] == "BP":
+        _rep.append(("Group delay at centre", format_seconds(_dinfo["tau_center_s"])))
+        _rep.append((f"Flat-delay band ({_tol})",
+                     f"{_band[0] / multiplier:.4g} … {_band[1] / multiplier:.4g} {freq_unit}"
+                     if _band else "—"))
+        _rep.append(("Delay p-p over f1…f2", f"{_dinfo['delay_pp_pct']:.2f} %"))
+    _rep.append(("Max section Q", f"{_dinfo['max_q']:.3f}"))
+    if delay_order_sel and delay_order_sel.get("n") is not None:
+        _rep.append(("Order selection", f"from specs — n = {delay_order_sel['n']} "
+                     + delay_order_sel["message"], True))
+    else:
+        _rep.append(("Order selection", "manual"))
+
 st.session_state["report_spec"] = _rep
 st.session_state["report_spec_short"] = (
     f"{response.replace(' ', '')}_{filter_type.replace('-', '')}_n{_tot_order}")
@@ -744,6 +931,16 @@ with tab_plots:
                     alpha_max=final_alpha, target_gain_units=final_gain_units, filter_type=filter_type, f2_corner_ui=f2_val
                 )
                 st.plotly_chart(fig_pb, use_container_width=True)
+
+            # 2b. Group-delay detail (Bessel / Equiripple Delay, FS-006)
+            if engine_results.get("delay_info"):
+                st.markdown("#### Group Delay Detail")
+                _render_delay_summary(engine_results["delay_info"], freq_unit)
+                _fd = delay_spec["crit"].get("fd_hz") if delay_spec else None
+                fig_gdd = plot_group_delay_detail(
+                    engine_results, freq_unit, multiplier, f1_val, f2_val,
+                    fd_ui=_fd / multiplier if _fd else None)
+                st.plotly_chart(fig_gdd, use_container_width=True)
             
             # 3. Phase / Group Delay (Conditional)
             if show_phase or show_gd:
@@ -876,6 +1073,14 @@ with tab_plots:
             if is_elliptic_over_limit:
                 st.warning(f"Manual Notch Tuning for Elliptic {filter_type} filters is safely disabled for Order > 8 to prevent extreme numerical distortion.")
             else:
+                if is_delay:
+                    st.caption(
+                        "Stopband only: a pinned notch must lie above the corner (passband "
+                        "notches are ignored). Notches add no group "
+                        "delay: the poles keep their delay shape"
+                        + ("; with the τ₀ anchor the corner moves instead of the delay."
+                           if delay_anchor == "delay" else
+                           " and are scaled to hold the corner, so τ₀ shrinks slightly."))
                 for i in range(P_eff):
                     col_pin, col_val, col_unit = st.columns([1, 3, 6])
                     is_pinned = col_pin.checkbox(f"Pin {i}", key=f"pin_notch_{i}")
@@ -898,6 +1103,8 @@ with tab_plots:
     elif filter_type == "Bandpass":
         if response == "Elliptic":
             st.info("Manual Notch Tuning is disabled for Elliptic Bandpass filters to preserve twin equiripple passband integrity.")
+        elif is_delay:
+            st.info(f"Manual notches are not available for {response} bandpass filters.")
         else:
             col_grid_hp, col_grid_lp = st.columns(2)
             
@@ -1189,6 +1396,8 @@ with tab_pairing:
 
         # Add the checkbox state to the signature so toggling it triggers a recalculation
         current_signature = f"{response}_{final_lp_order}_{real_fc}_{final_alpha}_{final_as_lp}_{len(z_bricks)}_mnemo_{do_absorb}"
+        if is_delay:   # FS-006 parameters that move poles without changing the above
+            current_signature += f"_{delay_ripple}_{delay_anchor}_{delay_bp_mapping}_{f2_val}"
         
         # If the physical filter changed OR manual routing is off, run the Auto-Router
         if 'filter_signature' not in st.session_state or st.session_state.filter_signature != current_signature:

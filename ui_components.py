@@ -3,6 +3,22 @@
 
 import streamlit as st
 
+from delay_solvers import (
+    DELAY_RESPONSES, DELAY_FILTER_TYPES, BESSEL, EQDELAY, DELTA_MIN, DELTA_MAX,
+    BP_TRANSLATION, BP_CLASSIC, max_order as delay_max_order,
+)
+
+FILTER_TYPES = ["Lowpass", "Highpass", "Bandpass", "Band-Reject"]
+UNIT_MULT = {"Hz": 1, "kHz": 1e3, "MHz": 1e6, "GHz": 1e9}
+RECIPROCAL_UNIT = {"Hz": "s", "kHz": "ms", "MHz": "µs", "GHz": "ns"}   # τ in 1/unit
+DELAY_ORDER_MODES = ["Manual", "From specs"]
+DELAY_ANCHORS = ["Corner frequency", "Group delay"]
+BP_MAPPINGS = ["Delay-preserving (arithmetic)", "Classic (geometric)"]
+CRIT_TAU = "Max group delay (latency budget)"
+CRIT_FMIN = "Min corner frequency"
+CRIT_FLAT = "Flat delay up to f_d"
+CRIT_STOP = "Stopband: A_s at f_s"
+
 # ============================================================
 # CALLBACK FUNCTIONS (Instant Memory Savers)
 # ============================================================
@@ -67,9 +83,81 @@ def sync_as_hp():
 def sync_gain():
     st.session_state._mem_gain = st.session_state.widget_gain
 
+
+def _mem_widget(widget, label, key, default, **kw):
+    """A keyed radio / number_input / checkbox whose value survives being hidden: it is
+    mirrored into session_state['_mem_<key>'] by an on_change callback (the same `_mem_*`
+    pattern as the callbacks above). Returns the widget's current value."""
+    mem = "_mem_" + key
+    if mem not in st.session_state:
+        st.session_state[mem] = default
+
+    def _sync():
+        st.session_state[mem] = st.session_state[key]
+
+    if widget is st.radio:
+        opts = kw["options"]
+        if st.session_state[mem] not in opts:
+            st.session_state[mem] = default
+        return widget(label, index=opts.index(st.session_state[mem]), key=key,
+                      on_change=_sync, **kw)
+    cur = st.session_state[mem]
+    if "min_value" in kw:
+        cur = max(kw["min_value"], cur)
+    if "max_value" in kw:
+        cur = min(kw["max_value"], cur)
+    st.session_state[mem] = cur
+    return widget(label, value=cur, key=key, on_change=_sync, **kw)
+
 # ============================================================
 # UI COMPONENT BLOCKS
 # ============================================================
+def draw_filter_type(response):
+    """Filter Type radio. Bessel / Equiripple Delay offer only the types that can have a flat
+    delay (Streamlit cannot grey out a single radio option, so the others are left out). The
+    choice lives in _mem_filter_type, so it survives the switch between the two option lists
+    (each list has its own widget key); an unavailable type falls back to Lowpass."""
+    delay = response in DELAY_RESPONSES
+    opts = list(DELAY_FILTER_TYPES) if delay else FILTER_TYPES
+    key = "widget_filter_type_delay" if delay else "widget_filter_type"
+    if st.session_state.get("_mem_filter_type") not in opts:
+        st.session_state._mem_filter_type = opts[0]
+
+    def _sync():
+        st.session_state._mem_filter_type = st.session_state[key]
+
+    ft = st.radio("Filter Type", opts, index=opts.index(st.session_state._mem_filter_type),
+                  key=key, on_change=_sync)
+    if delay:
+        st.caption(f"{response}: lowpass and bandpass only — a highpass or band-reject "
+                   "passband cannot have a flat group delay.")
+    return ft
+
+
+def draw_delay_order_block(response, filter_type):
+    """Order block for Bessel / Equiripple Delay (FS-006): typed in, or selected from the
+    criteria drawn by draw_delay_block. Returns (lp_order, hp_order, mode, slot); in
+    "From specs" mode `slot` is an st.empty() that app.py fills with the selection result,
+    and the returned orders are only the fallback used while no criterion is ticked."""
+    if "_mem_order" not in st.session_state: st.session_state._mem_order = 4
+    st.markdown("### Order Specifications")
+    mode = _mem_widget(st.radio, "Order selection", "widget_delay_order_mode",
+                       DELAY_ORDER_MODES[0], options=DELAY_ORDER_MODES, horizontal=True)
+    n_max = delay_max_order(response, filter_type)
+    st.session_state._mem_order = max(1, min(st.session_state._mem_order, n_max))
+    slot = None
+    if mode == DELAY_ORDER_MODES[0]:
+        label = "Prototype order n (BP order = 2n)" if filter_type == "Bandpass" else "Order"
+        st.number_input(
+            label, min_value=1, max_value=n_max,
+            value=st.session_state._mem_order, key="widget_sym_order", on_change=sync_symmetric
+        )
+    else:
+        slot = st.empty()
+    n = st.session_state._mem_order
+    return n, n, mode, slot
+
+
 def draw_order_block(response, filter_type):
     if "_mem_order" not in st.session_state: st.session_state._mem_order = 4
     if "_mem_lp" not in st.session_state: st.session_state._mem_lp = 4
@@ -160,7 +248,11 @@ def draw_order_block(response, filter_type):
 
             return st.session_state._mem_lp, st.session_state._mem_hp
 
-def draw_frequency_block(filter_type):
+def draw_frequency_block(filter_type, response=None):
+    """Returns (f1, f2, unit, anchor_info). anchor_info is None except for a Bessel /
+    Equiripple Delay lowpass: {"anchor": "corner" | "delay", "tau0_s", "slot"}, where in
+    delay mode f1 is only a placeholder (app.py derives the corner from tau0 and writes it
+    into `slot`)."""
     if "_mem_fc" not in st.session_state: st.session_state._mem_fc = 1.0
     if "_mem_f1" not in st.session_state: st.session_state._mem_f1 = 1.0
     if "_mem_f2" not in st.session_state: st.session_state._mem_f2 = 2.0
@@ -171,12 +263,26 @@ def draw_frequency_block(filter_type):
     unit = st.radio("Unit", ["Hz", "kHz", "MHz", "GHz"], horizontal=True, index=1)
     
     if filter_type in ["Lowpass", "Highpass"]:
+        anchor_info = None
+        if response in DELAY_RESPONSES and filter_type == "Lowpass":
+            anchor = _mem_widget(st.radio, "Specify by", "widget_delay_anchor", DELAY_ANCHORS[0],
+                                 options=DELAY_ANCHORS, horizontal=True)
+            if anchor == DELAY_ANCHORS[1]:
+                tau_ui = _mem_widget(
+                    st.number_input, f"Group delay τ₀ ({RECIPROCAL_UNIT[unit]})", "widget_tau0",
+                    1.0, min_value=1e-6, format="%f",
+                    help="Nominal group delay, held exactly: τ(0) for Bessel, the centre of the "
+                         "±δ ripple band for Equiripple Delay. The corner (at the passband "
+                         "attenuation below) is derived from it and the order.")
+                return (st.session_state._mem_fc, None, unit,
+                        {"anchor": "delay", "tau0_s": tau_ui / UNIT_MULT[unit], "slot": st.empty()})
+            anchor_info = {"anchor": "corner", "tau0_s": None, "slot": None}
         st.number_input(
             "Corner Frequency", 
             value=st.session_state._mem_fc, format="%f", 
             key="widget_fc", on_change=sync_fc
         )
-        return st.session_state._mem_fc, None, unit
+        return st.session_state._mem_fc, None, unit, anchor_info
     else:
         if not st.session_state._f2_init:
             st.session_state._mem_f2 = st.session_state._mem_f1 * 2.0
@@ -198,7 +304,7 @@ def draw_frequency_block(filter_type):
                 value=st.session_state._mem_f2, format="%f", 
                 key="widget_f2", on_change=sync_f2
             )
-        return st.session_state._mem_f1, st.session_state._mem_f2, unit
+        return st.session_state._mem_f1, st.session_state._mem_f2, unit, None
 
 def draw_gain_block():
     if "_mem_gain" not in st.session_state: st.session_state._mem_gain = 1.0
@@ -319,7 +425,87 @@ def draw_modifications_block(response, filter_type, lp_order, hp_order):
     # The master switch was removed here.
     return pb_even_lp, pb_even_hp, sb_roll_lp, sb_roll_hp
     
+
+def draw_delay_block(response, filter_type, order_mode, anchor, unit):
+    """"Delay Specs" block for Bessel / Equiripple Delay (FS-006; lowpass and bandpass only).
+    Returns {"delta", "bp_mapping", "eps", "crit"}: delta = equiripple ripple (fraction), eps =
+    the Bessel delay-error tolerance (fraction; also the reference for the flat-band readout),
+    crit = the ONE order criterion in SI units (A_s is added by app.py from the Stopband
+    Attenuation box)."""
+    mult, tu = UNIT_MULT[unit], RECIPROCAL_UNIT[unit]
+    spec = {"delta": 0.01, "bp_mapping": BP_TRANSLATION, "eps": 0.01, "crit": {}}
+    if not (filter_type == "Bandpass" or response == EQDELAY
+            or order_mode == DELAY_ORDER_MODES[1]):
+        return spec             # manual Bessel lowpass: nothing to ask
+    st.markdown("---")
+    st.markdown("### Delay Specs")
+
+    if filter_type == "Bandpass":
+        m = _mem_widget(
+            st.radio, "Bandpass mapping", "widget_delay_bp_map", BP_MAPPINGS[0], options=BP_MAPPINGS,
+            help="Delay-preserving: the lowpass delay shape is moved to the band centre "
+                 "(arithmetic symmetry; stays flat up to a fractional bandwidth of ~0.3). "
+                 "Classic: the usual geometric bandpass transform; the delay is tilted across "
+                 "the band.")
+        spec["bp_mapping"] = BP_TRANSLATION if m == BP_MAPPINGS[0] else BP_CLASSIC
+    if response == EQDELAY:
+        d = _mem_widget(st.number_input, "Delay ripple ±δ (%)", "widget_delay_ripple", 1.0,
+                        min_value=DELTA_MIN * 100, max_value=DELTA_MAX * 100, step=0.1,
+                        format="%.2f",
+                        help="Equal-ripple deviation of the group delay from its nominal "
+                             "value, over the flat-delay band.")
+        spec["delta"] = d / 100.0
+
+    if order_mode == DELAY_ORDER_MODES[1]:
+        crit = {}
+        if filter_type == "Lowpass":
+            first = CRIT_FMIN if anchor == "delay" else CRIT_TAU
+            kind = _mem_widget(
+                st.radio, "Order criterion", f"widget_crit_{anchor}", first,
+                options=[first, CRIT_FLAT, CRIT_STOP],
+                help="The order is chosen from one criterion. "
+                     "Max group delay: f_c is held; the LARGEST order whose delay stays within "
+                     "the budget. Min corner frequency: τ₀ is held; the smallest order whose "
+                     "corner reaches the frequency. Flat delay: the smallest order whose delay "
+                     "stays within tolerance up to f_d. Stopband: the smallest order with at "
+                     "least A_s (Stopband Attenuation above) at f_s.")
+        else:
+            kind = CRIT_STOP
+            st.markdown("**Order criterion:** stopband A_s at f_s (f_s outside the passband; "
+                        "A_s is the Stopband Attenuation above)")
+        if kind == CRIT_FMIN:
+            v = _mem_widget(st.number_input, f"f_c ≥ ({unit})", "widget_crit_f_min", 0.5,
+                            min_value=1e-6, format="%f")
+            crit["f_min_hz"] = v * mult
+        elif kind == CRIT_TAU:
+            v = _mem_widget(st.number_input, f"τ₀ ≤ ({tu})", "widget_crit_tau_max", 0.4,
+                            min_value=1e-6, format="%f")
+            crit["tau_max_s"] = v / mult
+        elif kind == CRIT_FLAT:
+            v = _mem_widget(st.number_input, f"f_d ({unit})", "widget_crit_fd", 0.5,
+                            min_value=1e-6, format="%f")
+            crit["fd_hz"] = v * mult
+            if response == BESSEL:
+                e = _mem_widget(st.number_input, "Max delay error ε (%)", "widget_crit_eps", 1.0,
+                                min_value=0.01, max_value=50.0, step=0.1, format="%.2f",
+                                help="Bessel delay only sags: τ(f) ≥ (1 − ε)·τ₀ up to f_d.")
+                spec["eps"] = e / 100.0
+                crit["eps"] = e / 100.0
+            else:
+                st.caption("Tolerance: the ±δ ripple above.")
+        else:
+            v = _mem_widget(st.number_input, f"f_s ({unit})", "widget_crit_fs", 3.0,
+                            min_value=1e-6, format="%f")
+            crit["fs_hz"] = v * mult
+        spec["crit"] = crit
+    return spec
+
+
 def validate_filter_specs(response, filter_type, lp_order, hp_order):
+    if response in DELAY_RESPONSES and filter_type not in DELAY_FILTER_TYPES:
+        # Guard only: draw_filter_type does not offer these types for the delay responses.
+        return False, (f"{filter_type} is not available for {response}: its passband cannot "
+                       "have a flat group delay. Use Lowpass or Bandpass.")
     if filter_type == "Band-Reject":
         total_order = lp_order + hp_order
         if total_order % 2 != 0:

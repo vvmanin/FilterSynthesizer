@@ -19,6 +19,13 @@ from filter_solvers import (
     synthesize_elliptic_gbr,
     find_crossings_br
 )
+from delay_solvers import (
+    DELAY_RESPONSES,
+    BP_TRANSLATION,
+    design_delay_lp,
+    synthesize_delay_bp,
+    make_delay_info,
+)
 
 def calculate_physical_gain_lp(physical_zeros, physical_poles, target_dc_db=0.0):
     """
@@ -96,10 +103,12 @@ def analyze_stopband_compliance(zeros_phys, poles_phys, k_phys, as_db, fc_hz):
 
 #@st.cache_data(max_entries=50)
 def synthesize_lowpass(response, order, fc_hz, alpha_max, as_db, 
-                       manual_notches_hz=None, pb_even_mod=False, sb_rolloff=False):
+                       manual_notches_hz=None, pb_even_mod=False, sb_rolloff=False,
+                       delay_ripple=0.01, hold_corner=True, eps_ref=0.01):
     """
     The Traffic Controller for Lowpass Synthesis.
     Translates physical UI frequencies to normalized math, and back again.
+    delay_ripple / hold_corner / eps_ref only apply to the delay responses (FS-006).
     """
     if manual_notches_hz is None:
         manual_notches_hz = {}
@@ -140,6 +149,12 @@ def synthesize_lowpass(response, order, fc_hz, alpha_max, as_db,
                     z_n, p_n, _, ws_n, ideal_notches_norm, r_zeros_norm = solve_elliptic_lp(order, alpha_max, as_db, slots=nudged_slots, pb_even_mod=pb_even_mod, sb_rolloff=sb_rolloff)
             else:
                 raise e
+    elif response in DELAY_RESPONSES:
+        # Poles from the delay spec only; notches are appended (delay unchanged).
+        z_n, p_n, ws_n, delay_notes = design_delay_lp(
+            response, order, alpha_max, as_db, delta=delay_ripple,
+            notches=list(normalized_slots.values()), hold_corner=hold_corner)
+        r_zeros_norm = np.zeros(order, dtype=complex)
     else:
         raise ValueError(f"Unknown response type: {response}")
 
@@ -171,7 +186,7 @@ def synthesize_lowpass(response, order, fc_hz, alpha_max, as_db,
     elif sb_status == 'corrupted':
         ws_phys_hz = None
 
-    return {
+    results = {
         "poles": p_phys,
         "zeros": z_phys,
         "reflection_zeros": r_zeros_phys,
@@ -180,6 +195,12 @@ def synthesize_lowpass(response, order, fc_hz, alpha_max, as_db,
         "ideal_notches_hz": ideal_notches_hz,
         "sb_status": sb_status
     }
+    if response in DELAY_RESPONSES:
+        cw = delay_notes["corner_w"]
+        results["delay_info"] = make_delay_info(
+            response, "LP", order, alpha_max, delay_ripple, p_phys, z_phys,
+            corner_hz=cw * fc_hz if cw else None, eps_ref=eps_ref, notes=delay_notes)
+    return results
 
 def calculate_physical_gain_hp(target_inf_db=0.0):
     """
@@ -257,6 +278,10 @@ def synthesize_highpass(response, order, fc_hz, alpha_max, as_db,
     The Traffic Controller for Highpass Synthesis.
     Wraps the Lowpass prototype solvers using the s -> 1/s spectral transformation.
     """
+    if response in DELAY_RESPONSES:
+        raise ValueError(f"Highpass is not available for {response}: a highpass cannot have a "
+                         "flat group delay (tau -> 0 across its passband).")
+
     if manual_notches_hz is None:
         manual_notches_hz = {}
         
@@ -294,6 +319,8 @@ def synthesize_highpass(response, order, fc_hz, alpha_max, as_db,
                     z_n, p_n, _, ws_n_lp, ideal_notches_norm_lp, _ = solve_elliptic_lp(order, alpha_max, as_db, slots=nudged_slots, pb_even_mod=pb_even_mod, sb_rolloff=sb_rolloff)
             else:
                 raise e
+    else:
+        raise ValueError(f"Unknown response type: {response}")
                 
     # 3. SPECTRAL TRANSFORMATION (s -> 1/s)
     p_hp_norm = 1.0 / p_n
@@ -473,10 +500,13 @@ def synthesize_bandpass(response, order_hp, order_lp, f1_hz, f2_hz,
                         alpha_max, as_hp_db, as_lp_db, 
                         manual_notches_hp_hz=None, manual_notches_lp_hz=None, 
                         pb_even_mod_hp=False, pb_even_mod_lp=False, 
-                        sb_rolloff_hp=False, sb_rolloff_lp=False):
+                        sb_rolloff_hp=False, sb_rolloff_lp=False,
+                        delay_ripple=0.01, bp_mapping=BP_TRANSLATION, eps_ref=0.01):
     """
     Traffic controller for the direct-synthesis asymmetric Bandpass solvers.
     Uses Geometric Center Normalization to prevent float64 polynomial explosion.
+    delay_ripple / bp_mapping / eps_ref only apply to the delay responses (FS-006), which are
+    symmetric (order_lp is the prototype order) and take no manual notches.
     """
     if manual_notches_hp_hz is None: manual_notches_hp_hz = {}
     if manual_notches_lp_hz is None: manual_notches_lp_hz = {}
@@ -550,6 +580,9 @@ def synthesize_bandpass(response, order_hp, order_lp, f1_hz, f2_hz,
              else:
                 raise e
         r_zeros_norm = np.array(opt_z_n) # Extract reflection zeros
+    elif response in DELAY_RESPONSES:
+        poles_n, zeros_n, k_norm, ws_hp_n, ws_lp_n, delay_notes = synthesize_delay_bp(
+            response, order_lp, wp1_norm, wp2_norm, alpha_max, delay_ripple, bp_mapping)
     else:
         raise ValueError(f"Unknown response type: {response}")
 
@@ -584,7 +617,7 @@ def synthesize_bandpass(response, order_hp, order_lp, f1_hz, f2_hz,
     ws_hp_hz = ws_hp_deg
     ws_lp_hz = ws_lp_deg
     
-    return {
+    results = {
         "poles": poles_phys,
         "zeros": zeros_phys,
         "reflection_zeros": r_zeros_phys,
@@ -596,6 +629,12 @@ def synthesize_bandpass(response, order_hp, order_lp, f1_hz, f2_hz,
         "sb_status_hp": stat_hp,  
         "sb_status_lp": stat_lp   
     }
+    if response in DELAY_RESPONSES:
+        results["delay_info"] = make_delay_info(
+            response, "BP", order_lp, alpha_max, delay_ripple, poles_phys, zeros_phys,
+            f1_hz=f1_hz, f2_hz=f2_hz, center_w=delay_notes["center_w"] * w0_center,
+            mapping=bp_mapping, eps_ref=eps_ref, notes=delay_notes)
+    return results
 
 def analyze_stopband_compliance_br(zeros_phys, poles_phys, k_phys, as_db, f1_hz, f2_hz):
     from scipy.optimize import minimize_scalar
@@ -639,6 +678,10 @@ def synthesize_bandreject(response, order_lp, order_hp, f1_hz, f2_hz,
                           sb_rolloff=False):
     from scipy.signal import find_peaks
     from filter_utils import evaluate_h
+
+    if response in DELAY_RESPONSES:
+        raise ValueError(f"Band-Reject is not available for {response}: no band-reject has a "
+                         "flat group delay in either passband.")
     
     manual_notches_hz = manual_notches_hz or {}
     
