@@ -146,7 +146,7 @@ first.
 | FS-018 | Op-amp data: provenance field + review of shipped parts | P2 *(s)* | PROPOSED | medium | — |
 | FS-019 | Wider op-amp library: first batch + standing process | P3 *(s)* | PROPOSED | low | FS-018 (hard) |
 | FS-020 | Equiripple phase-error (Zverev linear-phase) response | P3 *(s)* | PROPOSED | plan xhigh / build high | FS-006 (hard) |
-| FS-021 | Equiripple-magnitude stopband for delay responses | P1 *(s)* | PROPOSED | plan xhigh / build high | FS-006 (hard) |
+| FS-021 | Equiripple-magnitude stopband for delay responses | P1 *(s)* | VALIDATING | plan xhigh / build high | FS-006 (hard) |
 | FS-022 | PDF report: group-delay axis blown up by notch spikes | P2 *(s)* | PROPOSED | medium | — |
 | FS-023 | PDF report: group-delay detail plot for delay responses | P3 *(s)* | PROPOSED | medium | FS-006 (hard), FS-022 (soft) |
 | FS-024 | Step and impulse response plots (design vs realized) | P3 *(s)* | PROPOSED | high | — |
@@ -434,31 +434,32 @@ sourced) and before FS-019 (additions follow its curation rule).
 - **Updated:** 2026-09-27
 
 ### FS-021 — Equiripple-magnitude stopband for delay responses
-- **State:** PROPOSED (plan drafted 2026-09-27; waiting on the open questions)
+- **State:** VALIDATING (code done 2026-09-27; waiting on the maintainer's app checks)
 - **Priority:** P1 (suggested)
 - **Effort:** plan xhigh / build high
 - **Tiers:** A, D
 - **Depends on:** FS-006 (hard)
 - **Contracts:** — (notch sections are LPn / HPn / notch by §2; no new family, no Tier B/C change)
-- **Files:** `delay_solvers.py` (new `solve_delay_stopband_notches` + a hump evaluator; `design_delay_lp` gains an equiripple mode), `filter_engine.py` (LP delay branch passes the mode and the pinned/free slot layout, returns the computed notches as `ideal_notches_hz` like Inverse Chebyshev), `app.py` (Manual Notch Placement section: checkbox, pin/row behaviour, read-only cells filled from `ideal_notches_hz`; pairing signature), `dev/fs006/check_delay_solvers.py` (new section), `docs/ARCHITECTURE.md`
+- **Files:** `delay_solvers.py` (new `solve_delay_stopband_notches` + hump evaluator `_stopband_humps`; corner-hold scale extracted into `_corner_hold_scale`; `design_delay_lp(..., ems_m=0)`; `make_delay_info` passes `ems` through), `filter_engine.py` (`synthesize_lowpass(..., ems_m=0)` passes the active-notch count, returns the solved notches as `ideal_notches_hz` like Inverse Chebyshev), `app.py` (mode state block before the engine run, Manual Notch Placement checkbox + Active column + readout, notch display mapping, report row, pairing signature), `dev/fs006/check_delay_solvers.py` (new section 11), `docs/ARCHITECTURE.md`
 - **Goal:** For a Bessel / Equiripple Delay lowpass with manual order and the corner anchor, a checkbox "Equiripple Magnitude Stopband" in Manual Notch Placement places the stopband notches automatically so every stopband hump sits exactly at A_s (Inverse-Chebyshev-like magnitude), while the passband group delay keeps the shape of the delay prototype (jω zeros add no delay; the poles only get the corner-holding scale).
 - **Scope:** In —
-  - Math (Tier A): given order n, α, A_s, ripple δ and m notches, solve the m notch frequencies (normalized, > 1) so that the m stopband maxima (m − 1 between notches + the one above the last notch, or the HF floor when 2m = n) all equal A_s, with the poles scaled at every step so −α stays at f_c (FS-006 `design_delay_lp(hold_corner=True)`). Same semantics as `solve_inv_chebyshev_lp`: A_s is the input, the stopband edge f_s follows. Least-squares on log(Ω_z − 1) (keeps notches above the corner), start from a corner-feasible geometric spread (first notch ≈ 3, ratio ≈ 1.7), infeasible corner-hold returns a large residual.
-  - UI (Tier D), shown only for delay response + Lowpass + manual order + corner anchor: checkbox `widget_ems` in Manual Notch Placement. Ticking it ticks the P = ⌊n/2⌋ pin rows' "active" state per the default below and makes every number box read-only, showing the computed frequencies in ascending order. The number of active rows = m, i.e. the far-stopband roll-off 20·(n − 2m) dB/dec. Default m = ⌊(n − 1)/2⌋ (at least −20 dB/dec); for even n the last row may be activated too (m = n/2, flat stopband floor). Deactivating a row re-solves the rest and refills the read-only cells.
-  - Readout: the pole scale / τ₀ reduction (it is not small — see Notes), the achieved f_s, and the unchanged delay shape (FS-006 Group Delay Detail already shows it).
+  - Math (Tier A): given order n, α, A_s, ripple δ and m notches, solve the m notch frequencies (normalized, > 1) so that the m stopband maxima (m − 1 between notches + the one above the last notch; when 2m = n the larger of that and the HF floor 20·log10(∏|p|/∏Ω²)) all equal A_s, with the poles scaled at every step so −α stays at f_c (FS-006 `design_delay_lp(hold_corner=True)`). Same semantics as `solve_inv_chebyshev_lp`: A_s is the input, the stopband edge f_s follows. `scipy.optimize.least_squares` on ordered gaps Ω₁ = 1 + e^{y₁}, Ω_k = Ω_{k−1} + e^{y_k} (notches stay above the corner and in order); start from a geometric spread 3·1.7^k scaled by the smallest c ∈ {1, 1.25, …} with ∏(1 − 1/Ω²) ≥ 10^(−α/40) (corner-feasible for any α the UI allows); infeasible corner-hold returns a large residual; converged when max hump error < 1e-8 dB, one retry from start × 1.4, else the best iterate with a warning (never raises). The α_b corner products are computed uncached so the solver loop does not flood the `lru_cache`s.
+  - UI (Tier D), shown only for delay response + Lowpass + manual order + corner anchor (other delay-LP setups get a one-line note instead): checkbox `widget_ems` (via `_mem_widget`, survives being hidden) in Manual Notch Placement. In this mode each of the P = ⌊n/2⌋ rows shows a separate **Active** checkbox (`ems_active_{i}`) in place of Pin, and a read-only cell with the solved frequency (active rows, ascending) or "∞". The number of active rows = m, i.e. the far-stopband roll-off 20·(n − 2m) dB/dec. Default m = max(1, ⌊(n − 1)/2⌋) (at least −20 dB/dec; n = 2 → the flat floor); any row may be activated (even n: m = n/2 gives a flat stopband floor at −A_s). Toggling a row re-solves and refills the cells; the defaults are re-applied when the mode is switched on or the order changes. Pins keep their usual meaning: they are parked while the mode is on (`_ems_saved_pins`) and restored unchanged when it is switched off.
+  - Readout under the rows: m, humps at −A_s with the max error, achieved f_s, roll-off (or flat floor), pole scale with τ(0) before → after (it is not small — see Notes); a warning if the solve did not converge. The unchanged delay shape is shown by the FS-006 Group Delay Detail. Report: a "Manual notches" row listing the solved notches and the pole scale. Pairing signature gains the mode/count.
   - Out — bandpass (investigate in a follow-up: the translation BP has asymmetric skirts and n/2 origin zeros); the τ₀ anchor (the corner hold is what makes the problem square); mixing user-pinned frequencies with solved ones (possible later, as the Inverse Chebyshev "slots" do).
 - **Validation:**
   - `check_delay_solvers.py` new section: for Bessel and Equiripple (δ = 1 %), n ∈ {3, 4, 5, 6, 8}, m ∈ {1 … ⌊n/2⌋}, A_s ∈ {30, 40, 60} dB: every hump within 1e-6 dB of A_s on a dense grid; −α at f_c within 1e-9 dB; group delay equals the notch-free design scaled by the pole scale (phase-derivative check, as FS-006 §6); far-stopband slope 20·(n − 2m) dB/dec; solve time < 0.5 s.
   - Reference values from the 2026-09-27 prototype (normalized to f_c): Bessel n = 4, m = 1, 40 dB → notch 3.735, scale 1.118, f_s 3.375; Bessel n = 8, m = 3, 40 dB → notches 2.934 / 3.828 / 6.163, scale 1.646, f_s 2.811; Equiripple n = 6, m = 3, 40 dB → 2.918 / 3.815 / 9.020, scale 1.556, f_s 2.798.
-  - App: Bessel LP n = 6, 1 kHz, 40 dB, tick the checkbox → 2 notches, equal humps on the magnitude plot, Group Delay Detail flat as before (τ₀ reduced by the reported scale); activate the 3rd row → flat floor at −40 dB; deactivate one → roll-off steepens and cells refill; Topology solves the LPn sections.
-- **Open questions:**
-  1. Confirm A_s as the input (humps pinned to A_s, f_s follows), as Inverse Chebyshev does — or should the user give f_s and get the best A_s?
-  2. The corner hold scales the poles up by 1.1–2.0× (more notches, lower A_s → more), so τ₀ drops by the same factor and the flat-delay band widens. Accept, and just report it? The alternative (poles untouched) lets the corner move down instead, like the τ₀ anchor.
-  3. Pin semantics: in this mode a ticked pin means "this notch exists (frequency solved)", not "frequency fixed by me" as elsewhere. OK, or use a separate per-row "active" control so the pin keeps its usual meaning?
+  - Robustness: α ∈ {0.5, 1, 6} dB for Bessel n = 4 / 6 and Equiripple n = 6 at the default and the maximum m, A_s ∈ {30, 60} dB: all converge; A_s = 20 dB, n = 8, m = 4 converges or returns `converged = False` with a warning (never raises).
+  - Engine end to end: `synthesize_lowpass(Bessel, 6, 1 kHz, 3.0103, 40, ems_m=2)` → 2 ascending `ideal_notches_hz`, `sb_status` normal, `delay_info["ems"]` converged, `pole_scale` > 1; `ems_m = 0` identical to today; `hold_corner = False` → warning, no notches. FS-006 sections 1–10 still pass unchanged (the corner-hold refactor keeps §6 exact).
+  - App: Bessel LP n = 6, 1 kHz, 40 dB, manual order, corner anchor, tick the checkbox → 2 of 3 rows Active, cells show ascending frequencies, equal humps on the magnitude plot, Group Delay Detail flat as before (τ₀ reduced by the reported scale); activate the 3rd row → flat floor at −40 dB; deactivate one → roll-off steepens and cells refill; untick → earlier pins restored; From specs or the τ₀ anchor → the note instead of the checkbox; Topology solves the LPn sections; the report shows the solved-notch row.
+- **Open questions:** none (answered 2026-09-27, see Notes).
 - **Notes:**
+  - Decisions (maintainer, 2026-09-27): (1) A_s is the input, as Inverse Chebyshev — humps pinned to −A_s, f_s follows. (2) The passband-attenuation corner must not move: the poles take the corner-holding scale (1.1–2.0×), τ₀ drops by the same factor and the flat-delay band widens; this is reported (Tab 1 readout, report row), not avoided. (3) A separate per-row **Active** control selects which notches exist; Pin keeps its usual meaning ("frequency fixed by me") and is parked/restored around the mode.
   - Proposed after the FS-006 review: manual notches combine well with Bessel / Equiripple Delay (passband delay preserved exactly).
   - Feasibility prototype (2026-09-27, scratch, not in the repo): least-squares on the notch frequencies with the FS-006 corner hold inside converged for every case of the validation grid above, hump error ≤ 2e-10 dB, 50–240 ms per solve. The first start (notches 2 and 4) failed only because it violated the corner-hold condition ∏(1 − 1/Ω_z²) > 10^(−α/20); a start at 3, 5.1, … is feasible.
   - Gain in selectivity is real but moderate: Bessel n = 8 reaches 40 dB at 2.81·f_c with 3 notches vs ≈ 3.4·f_c without.
+  - Build (2026-09-27), checked by Claude: `check_delay_solvers.py` ALL CHECKS PASSED — §1–10 unchanged (the `_corner_hold_scale` refactor keeps §6 exact), §11 all 72 grid cases (hump error ≤ 1e-6 dB on the independent dense grid, slowest 162 ms), the three prototype reference cases to 1e-3, the α robustness set, the A_s = 20 dB n = 8 m = 4 case (converges) and the engine end-to-end checks. Scratch sweep over the UI range (Bessel n ≤ 20, Equiripple n ≤ 15, m ∈ {1, default, max}, A_s 10…100 dB, α 0.01…12 dB, 240 cases): all converge; slowest 1.7 s at Bessel n = 20, m = 10, α = 12 dB (typical tens of ms). Headless `streamlit.testing` AppTest of Tab 1 (Bessel LP n = 6, 1 kHz, 40 dB): checkbox shown, default 2 of 3 rows Active with 2.993 / 4.446 kHz, readout (f_s 2.8465 kHz, poles ×1.3868, τ(0) 430.3 → 310.2 µs), 3rd row → 3 notches, row 0 off → rows 1–2 refilled, untick → Pin 0 restored at its value, τ₀ anchor → note instead of checkbox, back to corner → mode remembered, report row lists the solved notches; no exceptions. Not run by Claude: magnitude/GD plots by eye, Topology solve of the LPn sections, the PDF.
 - **Updated:** 2026-09-27
 
 ### FS-022 — PDF report: group-delay axis blown up by notch spikes
@@ -567,3 +568,14 @@ screenshots, `--accept`, PDF build); a batch deletes the entries it covered.
     `widget_crit_fd`, `widget_crit_eps`, `widget_crit_fs`.
   - Stale screenshots: at least `02a-sidebar-type`; run `doc_drift.py` for the
     full list.
+- **FS-021** (Equiripple Magnitude Stopband, Bessel / Equiripple Delay LP):
+  - Tab 1 Manual Notch Placement: checkbox "Equiripple Magnitude Stopband"
+    (manual order + corner anchor only; otherwise a one-line note). When on,
+    each row has an **Active** checkbox instead of Pin and a read-only solved
+    frequency; default ⌊(n − 1)/2⌋ rows active (at least 1); pins are kept
+    and come back when the mode is switched off.
+  - Readout under the rows: number of notches, humps at −A_s (max error),
+    f_s, far-stopband roll-off or flat floor, pole scale and τ(0) before → after.
+  - Report: the "Manual notches" row lists the solved notches and the pole
+    scale.
+  - New widget keys: `widget_ems`, `ems_active_{i}`.

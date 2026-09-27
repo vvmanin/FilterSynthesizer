@@ -28,6 +28,7 @@ import functools
 import math
 
 import numpy as np
+from scipy.optimize import least_squares, minimize_scalar
 from scipy.signal import besselap
 
 from filter_solvers import _transform_lp_to_bp
@@ -485,7 +486,103 @@ def tau_dc_factor(response, n, delta=0.01):
 # LP design with optional stopband notches (engine drop-in)
 # =====================================================================================
 
-def design_delay_lp(response, order, alpha_max, as_db, delta=0.01, notches=(), hold_corner=True):
+def _corner_hold_scale(response, n, alpha_db, delta, notches):
+    """Pole scale that keeps -alpha_db at omega = 1 with jw notches at `notches` (all > 1).
+    The notches take -20 log10 prod(1 - 1/wz^2) of the corner attenuation, the poles the rest
+    alpha_b, so scale = W_alpha / W_alpha_b. None when alpha_b <= 0 (the notches alone already
+    take alpha at the corner). alpha_b varies continuously with the notches, so it bypasses the
+    lru_caches: the FS-021 solver loop would only flood them."""
+    n1 = float(np.prod([1.0 - 1.0 / wz ** 2 for wz in notches]))
+    alpha_b = alpha_db + 20.0 * math.log10(n1) if n1 > 0 else -1.0
+    if alpha_b <= 1e-6:
+        return None
+    if response == BESSEL:
+        w_b = bessel_corner_product.__wrapped__(int(n), float(alpha_b))
+    else:
+        w_b = _first_crossing(eqdelay_poles(n, delta)[0], alpha_b)
+    return corner_product(response, n, alpha_db, delta) / w_b
+
+
+def _stopband_humps(poles, notches):
+    """DC-referenced dB level of every stopband maximum of an LP with jw notches at `notches`
+    (ascending, corner-normalized): one between each pair of notches and one above the last.
+    With 2m = n the response above the last notch tends to the HF floor prod|p| / prod wz^2,
+    which counts as that last maximum when no interior peak is higher."""
+    wz = np.asarray(notches, float)
+    p = np.asarray(poles, complex)
+    zeros = np.concatenate([1j * wz, -1j * wz])
+    f = lambda lw: _db(p, np.exp(lw), zeros)
+
+    def peak(a, b, n_grid):
+        lw = np.linspace(math.log(a), math.log(b), n_grid)[1:-1]
+        v = f(lw)
+        i = int(np.argmax(v))
+        if i == len(lw) - 1:
+            return float(v[i]), True          # still rising at the top of the range
+        lo, hi = lw[max(i - 1, 0)], lw[i + 1]
+        r = minimize_scalar(lambda x: -f([x])[0], bounds=(lo, hi), method="bounded",
+                            options={"xatol": 1e-12})
+        return max(float(-r.fun), float(v[i])), False
+
+    humps = [peak(wz[k], wz[k + 1], 66)[0] for k in range(len(wz) - 1)]
+    top, rising = peak(wz[-1], wz[-1] * 1e3, 402)
+    if 2 * len(wz) == len(p):
+        floor = (np.sum(np.log(np.abs(p))) - 2.0 * np.sum(np.log(wz))) / LN10_20
+        top = floor if rising else max(top, floor)
+    humps.append(top)
+    return np.array(humps)
+
+
+def solve_delay_stopband_notches(response, order, alpha_max, as_db, m, delta=0.01):
+    """FS-021: m jw notch frequencies (corner-normalized, ascending, > 1) that put every stopband
+    maximum at exactly -as_db, with the poles scaled at every step so that -alpha_max stays at
+    omega = 1 (the corner hold of design_delay_lp). A_s is the input and the stopband edge
+    follows, as in solve_inv_chebyshev_lp. The delay keeps the prototype shape (jw zeros add no
+    delay); tau shrinks by the returned pole scale.
+
+    Least squares on ordered gaps (w1 = 1 + e^y1, wk = w(k-1) + e^yk) from a corner-feasible
+    geometric start; one retry further out; never raises on non-convergence (the best iterate
+    is returned with converged = False).
+    Returns (notches, info) with info = {m, converged, max_err_db, pole_scale}.
+    """
+    m = int(min(max(int(m), 0), order // 2))
+    if m == 0:
+        return np.array([]), {"m": 0, "converged": True, "max_err_db": 0.0, "pole_scale": 1.0}
+    pc = prototype_corner(response, order, alpha_max, delta)
+
+    def omegas(y):
+        return 1.0 + np.cumsum(np.exp(y))
+
+    def resid(y):
+        wz = omegas(y)
+        a = _corner_hold_scale(response, order, alpha_max, delta, wz)
+        if a is None or not np.isfinite(a):
+            return np.full(m, 1e3)
+        return _stopband_humps(pc * a, wz) + as_db
+
+    base = 3.0 * 1.7 ** np.arange(m)
+    lim = 10.0 ** (-alpha_max / 40.0)          # half of alpha for the notches' droop at f_c
+    c = 1.0
+    while np.prod(1.0 - 1.0 / (c * base) ** 2) < lim:
+        c *= 1.25
+    best_y, best_err = None, np.inf
+    for start in (c * base, 1.4 * c * base):
+        y0 = np.log(np.diff(np.concatenate([[1.0], start])))
+        sol = least_squares(resid, y0, x_scale="jac", ftol=1e-14, xtol=1e-14, gtol=1e-14,
+                            max_nfev=100 * (m + 1))
+        err = float(np.max(np.abs(sol.fun)))
+        if err < best_err:
+            best_y, best_err = sol.x, err
+        if err < 1e-8:
+            break
+    wz = omegas(best_y)
+    a = _corner_hold_scale(response, order, alpha_max, delta, wz)
+    return wz, {"m": m, "converged": bool(best_err < 1e-8), "max_err_db": best_err,
+                "pole_scale": float(a) if a else 1.0}
+
+
+def design_delay_lp(response, order, alpha_max, as_db, delta=0.01, notches=(), hold_corner=True,
+                    ems_m=0):
     """Corner-normalized LP (-alpha_max at omega = 1) with optional jw-axis notches.
 
     Poles come from the delay spec only and are never re-synthesized (design note section 5):
@@ -494,10 +591,28 @@ def design_delay_lp(response, order, alpha_max, as_db, delta=0.01, notches=(), h
     factor so that -alpha_max stays at omega = 1 (the delay SHAPE is kept; tau shrinks by that
     factor); without it the poles are untouched (tau exact) and the corner moves.
 
-    Returns (tzeros, poles, omega_s, notes) with notes = {pole_scale, corner_w, warnings}.
+    ems_m > 0 (FS-021, equiripple magnitude stopband): `notches` is ignored and ems_m notches are
+    solved so every stopband hump sits at -as_db (solve_delay_stopband_notches). Needs
+    hold_corner; without it the mode is ignored with a warning.
+
+    Returns (tzeros, poles, omega_s, notes) with notes = {pole_scale, corner_w, warnings, ems};
+    ems is the solver info (None when the mode is off).
     """
     p = prototype_corner(response, order, alpha_max, delta)
     warnings = []
+    ems = None
+    if ems_m and ems_m > 0:
+        if hold_corner:
+            notches, ems = solve_delay_stopband_notches(response, order, alpha_max, as_db,
+                                                        ems_m, delta)
+            notches = list(notches)
+            if not ems["converged"]:
+                warnings.append(f"Equiripple stopband: the notch solve did not converge (humps "
+                                f"within {ems['max_err_db']:.2g} dB of −A_s).")
+        else:
+            warnings.append("Equiripple magnitude stopband needs the corner anchor (it holds "
+                            "f_c while placing the notches); ignored.")
+            notches = ()
     kept, rejected = [], []
     for wz in sorted(float(v) for v in notches):
         (kept if wz > 1.0 + 1e-9 else rejected).append(wz)
@@ -508,12 +623,10 @@ def design_delay_lp(response, order, alpha_max, as_db, delta=0.01, notches=(), h
 
     scale = 1.0
     if kept:
-        n1 = float(np.prod([1.0 - 1.0 / wz ** 2 for wz in kept]))
         if hold_corner:
-            alpha_b = alpha_max + 20.0 * math.log10(n1)   # the pole part's share of alpha
-            if alpha_b > 1e-6:
-                scale = (corner_product(response, order, alpha_max, delta)
-                         / corner_product(response, order, alpha_b, delta))
+            s = _corner_hold_scale(response, order, alpha_max, delta, kept)
+            if s is not None:
+                scale = s
                 p = p * scale
             else:
                 warnings.append("The corner cannot be held at f_c: the notches are too close to "
@@ -522,7 +635,8 @@ def design_delay_lp(response, order, alpha_max, as_db, delta=0.01, notches=(), h
     zeros = np.array([s * 1j * wz for wz in kept for s in (1, -1)], dtype=complex)
     corner_w = _first_crossing(p, alpha_max, zeros)
     omega_s = _first_crossing(p, as_db, zeros)
-    return zeros, p, omega_s, {"pole_scale": scale, "corner_w": corner_w, "warnings": warnings}
+    return zeros, p, omega_s, {"pole_scale": scale, "corner_w": corner_w, "warnings": warnings,
+                               "ems": ems}
 
 
 # =====================================================================================
@@ -672,6 +786,7 @@ def make_delay_info(response, kind, order, alpha_db, delta, poles, zeros, *,
         "max_q": float(section_q_max(poles)),
         "bp_mapping": mapping, "n_origin_zeros": notes.get("n_origin_zeros"),
         "pole_scale": notes.get("pole_scale", 1.0),
+        "ems": notes.get("ems"),
         "warnings": list(notes.get("warnings", [])),
         "tau_dc_s": None, "tau_nom_s": None, "tau_center_s": None,
         "w_prod": None, "corner_hz": corner_hz, "center_hz": None,

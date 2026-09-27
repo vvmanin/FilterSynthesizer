@@ -37,6 +37,7 @@ from ui_components import (
     draw_delay_block,
     draw_modifications_block, 
     validate_filter_specs,
+    _mem_widget,
     UNIT_MULT as _UNIT_MULT,
     RECIPROCAL_UNIT as _RECIP_UNIT,
 )
@@ -328,6 +329,26 @@ def _render_delay_summary(info, freq_unit):
         st.warning(w)
 
 
+def _render_ems_readout(er, order, as_db, freq_unit):
+    """FS-021 readout under the notch rows: what the equiripple stopband achieved and cost."""
+    mult = _UNIT_MULT[freq_unit]
+    info = er.get("delay_info") or {}
+    ems = info.get("ems")
+    if not ems:
+        st.caption("No row active: the plain delay lowpass (no notches).")
+        return
+    m, scale = ems["m"], info.get("pole_scale", 1.0)
+    fs = er.get("f_stop_hz")
+    roll = ("flat stopband floor at −A_s" if 2 * m == order
+            else f"far-stopband roll-off {20 * (order - 2 * m)} dB/dec")
+    txt = (f"**{m} notch{'es' if m > 1 else ''}**: every stopband hump at −{as_db:g} dB "
+           f"(max error {ems['max_err_db']:.1e} dB) · f_s = "
+           + (f"{fs / mult:.5g} {freq_unit}" if fs else "—")
+           + f" · {roll} · poles ×{scale:.4f} to hold the corner: τ(0) "
+           f"{format_seconds(info['tau_dc_s'] * scale)} → {format_seconds(info['tau_dc_s'])}")
+    (st.info if ems["converged"] else st.warning)(txt)
+
+
 delay_anchor = "corner"
 delay_ripple, delay_eps, delay_bp_mapping = 0.01, 0.01, delay_solvers.BP_TRANSLATION
 delay_order_sel = None
@@ -430,10 +451,10 @@ import time
 
 @st.cache_data(max_entries=50, show_spinner=False)
 def run_lowpass_in_background(response, order, fc_hz, alpha_max, as_db, manual_notches_hz, pb_even_mod, sb_rolloff,
-                              delay_ripple=0.01, hold_corner=True, eps_ref=0.01):
+                              delay_ripple=0.01, hold_corner=True, eps_ref=0.01, ems_m=0):
     time.sleep(0.85) # <-- The Debounce Timer!
     return run_in_pool(synthesize_lowpass, response, order, fc_hz, alpha_max, as_db, manual_notches_hz, pb_even_mod, sb_rolloff,
-                       delay_ripple=delay_ripple, hold_corner=hold_corner, eps_ref=eps_ref)
+                       delay_ripple=delay_ripple, hold_corner=hold_corner, eps_ref=eps_ref, ems_m=ems_m)
     
 
 @st.cache_data(max_entries=50, show_spinner=False)
@@ -471,12 +492,38 @@ def run_bandreject_in_background(
     )
 
 
+# FS-021: Equiripple Magnitude Stopband (delay LP, manual order, corner anchor). Resolved here,
+# before any Tab 1 widget renders, like the pins below. While the mode is on, each notch row has
+# an "Active" checkbox (ems_active_<i>) instead of Pin and the engine solves that many notches.
+# Streamlit drops the state of widgets it does not render, so the pins are parked in
+# _ems_saved_pins while the mode is on and restored when it goes off. _ems_n = "on, at order n".
+ems_ok = (is_delay and filter_type == "Lowpass" and delay_order_mode == "Manual"
+          and delay_anchor == "corner" and final_lp_order // 2 >= 1)
+ems_on = ems_ok and bool(st.session_state.get("_mem_widget_ems", False))
+ems_m = 0
+if ems_on:
+    _ems_P, _ems_def = final_lp_order // 2, max(1, (final_lp_order - 1) // 2)
+    if "_ems_n" not in st.session_state:                     # just switched on: park the pins
+        st.session_state["_ems_saved_pins"] = {
+            i: st.session_state[f"val_notch_{i}"] for i in range(_ems_P)
+            if st.session_state.get(f"pin_notch_{i}") and f"val_notch_{i}" in st.session_state}
+    if st.session_state.get("_ems_n") != final_lp_order:     # switched on or order changed
+        for i in range(_ems_P):
+            st.session_state[f"ems_active_{i}"] = i < _ems_def
+        st.session_state["_ems_n"] = final_lp_order
+    ems_m = sum(bool(st.session_state.get(f"ems_active_{i}")) for i in range(_ems_P))
+elif "_ems_n" in st.session_state:                           # just switched off: restore them
+    del st.session_state["_ems_n"]
+    for i, v in st.session_state.pop("_ems_saved_pins", {}).items():
+        st.session_state[f"pin_notch_{i}"] = True
+        st.session_state[f"val_notch_{i}"] = v
+
 if filter_type == "Lowpass":
     P = final_lp_order // 2
     P_eff = P - 1 if sb_roll_lp and response in ["Inverse Chebyshev", "Elliptic"] else P
     safe_fallback = f2_val if f2_val is not None else f1_val * 2.0
-    
-    for i in range(P_eff):
+
+    for i in range(0 if ems_on else P_eff):   # FS-021: pins are ignored while the mode is on
         # ... (keep your existing Lowpass pin logic exactly as is) ...
         if st.session_state.get(f"pin_notch_{i}", False):
             if f"val_notch_{i}" not in st.session_state:
@@ -496,7 +543,8 @@ if filter_type == "Lowpass":
                 response=response, order=final_lp_order, fc_hz=real_fc,
                 alpha_max=final_alpha, as_db=final_as_lp, manual_notches_hz=active_slots, 
                 pb_even_mod=pb_mod_lp, sb_rolloff=sb_roll_lp,
-                delay_ripple=delay_ripple, hold_corner=(delay_anchor == "corner"), eps_ref=delay_eps
+                delay_ripple=delay_ripple, hold_corner=(delay_anchor == "corner"), eps_ref=delay_eps,
+                ems_m=ems_m
             )
     except Exception as e:
         st.error(f"**Engine Error:** {type(e).__name__}: {e}")
@@ -650,7 +698,14 @@ if engine_results:
     actual_rad = sorted([z.imag for z in z_rad if z.imag > 1e-6 and abs(z.real) < 1e-6])
     actual_notches_hz = [r / (2 * np.pi) for r in actual_rad]
     
-    if filter_type in ["Lowpass", "Highpass"]:
+    if ems_on:
+        # FS-021: the solved notches, ascending, fill the Active rows in order
+        _it = iter(actual_notches_hz)
+        for i in range(P_eff):
+            if st.session_state.get(f"ems_active_{i}"):
+                free_notches_display[i] = next(_it, 0.0)
+
+    elif filter_type in ["Lowpass", "Highpass"]:
         if filter_type == "Highpass": actual_notches_hz.reverse()
         pool = actual_notches_hz.copy()
         
@@ -768,6 +823,14 @@ for _lbl, _sl in (("Manual notches", globals().get("active_slots")),
     _row = _rep_slots(_sl, _lbl)
     if _row:
         _rep.append(_row)
+if ems_on and engine_results:   # FS-021: solved notches, not user slots
+    _ems_hz = list(engine_results.get("ideal_notches_hz", []))
+    _ems_sc = (engine_results.get("delay_info") or {}).get("pole_scale", 1.0)
+    _rep.append(("Manual notches",
+                 "equiripple stopband at A_s — solved: "
+                 + (", ".join(f"{v / multiplier:.5g}" for v in _ems_hz) + f" {freq_unit}"
+                    if _ems_hz else "none active")
+                 + (f"; poles ×{_ems_sc:.4f} to hold fc" if _ems_hz else "")))
 if not any(k.startswith("Manual notches") for k, *_ in _rep):
     _rep.append(("Manual notches", "none (all free)"))
 
@@ -1073,7 +1136,24 @@ with tab_plots:
             if is_elliptic_over_limit:
                 st.warning(f"Manual Notch Tuning for Elliptic {filter_type} filters is safely disabled for Order > 8 to prevent extreme numerical distortion.")
             else:
-                if is_delay:
+                if is_delay and filter_type == "Lowpass":   # FS-021 mode switch
+                    if ems_ok:
+                        _mem_widget(st.checkbox, "Equiripple Magnitude Stopband", "widget_ems", False,
+                                    help="Place the active notches automatically so that every "
+                                         "stopband hump sits at −A_s (Inverse-Chebyshev-like "
+                                         "magnitude). The corner stays at f_c: the poles are "
+                                         "scaled up, so τ₀ drops by the reported factor while "
+                                         "the delay keeps its shape.")
+                    else:
+                        st.caption("Equiripple Magnitude Stopband: needs manual order and the "
+                                   "corner anchor.")
+                if ems_on:
+                    st.caption(
+                        "Notches placed so every stopband hump sits at −A_s. Tick **Active** to "
+                        "choose how many: each one costs 40 dB/dec of far-stopband roll-off. "
+                        "The poles are scaled to hold the corner: the delay keeps its shape and "
+                        "τ₀ shrinks by the scale. Your pins come back when the mode is off.")
+                elif is_delay:
                     st.caption(
                         "Stopband only: a pinned notch must lie above the corner (passband "
                         "notches are ignored). Notches add no group "
@@ -1083,6 +1163,14 @@ with tab_plots:
                            " and are scaled to hold the corner, so τ₀ shrinks slightly."))
                 for i in range(P_eff):
                     col_pin, col_val, col_unit = st.columns([1, 3, 6])
+                    if ems_on:   # FS-021: Active column, solved frequencies read-only
+                        if col_pin.checkbox(f"Active {i}", key=f"ems_active_{i}") and engine_results:
+                            col_val.number_input(f"Notch {i} freq", value=float(free_notches_display.get(i, 0.0) / multiplier),
+                                                 format="%.4f", disabled=True, label_visibility="collapsed")
+                        else:
+                            col_val.text_input(f"Notch {i} freq", value="∞", disabled=True, label_visibility="collapsed")
+                        col_unit.markdown(f"**{freq_unit}**")
+                        continue
                     is_pinned = col_pin.checkbox(f"Pin {i}", key=f"pin_notch_{i}")
                     
                     safe_fallback = f2_val if f2_val is not None else (f1_val * 2.0 if filter_type == "Lowpass" else f1_val * 0.5)
@@ -1097,6 +1185,8 @@ with tab_plots:
                         else:
                             col_val.text_input(f"Notch {i} freq", value="∞", disabled=True, label_visibility="collapsed")
                     col_unit.markdown(f"**{freq_unit}**")
+                if ems_on and engine_results:
+                    _render_ems_readout(engine_results, final_lp_order, final_as_lp, freq_unit)
         else:
             st.info("Order is too low to support finite transmission zeros.")
 
@@ -1397,7 +1487,7 @@ with tab_pairing:
         # Add the checkbox state to the signature so toggling it triggers a recalculation
         current_signature = f"{response}_{final_lp_order}_{real_fc}_{final_alpha}_{final_as_lp}_{len(z_bricks)}_mnemo_{do_absorb}"
         if is_delay:   # FS-006 parameters that move poles without changing the above
-            current_signature += f"_{delay_ripple}_{delay_anchor}_{delay_bp_mapping}_{f2_val}"
+            current_signature += f"_{delay_ripple}_{delay_anchor}_{delay_bp_mapping}_{f2_val}_ems{ems_m if ems_on else -1}"
         
         # If the physical filter changed OR manual routing is off, run the Auto-Router
         if 'filter_signature' not in st.session_state or st.session_state.filter_signature != current_signature:

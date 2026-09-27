@@ -104,11 +104,13 @@ def analyze_stopband_compliance(zeros_phys, poles_phys, k_phys, as_db, fc_hz):
 #@st.cache_data(max_entries=50)
 def synthesize_lowpass(response, order, fc_hz, alpha_max, as_db, 
                        manual_notches_hz=None, pb_even_mod=False, sb_rolloff=False,
-                       delay_ripple=0.01, hold_corner=True, eps_ref=0.01):
+                       delay_ripple=0.01, hold_corner=True, eps_ref=0.01, ems_m=0):
     """
     The Traffic Controller for Lowpass Synthesis.
     Translates physical UI frequencies to normalized math, and back again.
-    delay_ripple / hold_corner / eps_ref only apply to the delay responses (FS-006).
+    delay_ripple / hold_corner / eps_ref only apply to the delay responses (FS-006);
+    ems_m > 0 (FS-021) solves that many stopband notches with every hump at -as_db
+    (manual_notches_hz is then ignored).
     """
     if manual_notches_hz is None:
         manual_notches_hz = {}
@@ -153,8 +155,10 @@ def synthesize_lowpass(response, order, fc_hz, alpha_max, as_db,
         # Poles from the delay spec only; notches are appended (delay unchanged).
         z_n, p_n, ws_n, delay_notes = design_delay_lp(
             response, order, alpha_max, as_db, delta=delay_ripple,
-            notches=list(normalized_slots.values()), hold_corner=hold_corner)
+            notches=list(normalized_slots.values()), hold_corner=hold_corner, ems_m=ems_m)
         r_zeros_norm = np.zeros(order, dtype=complex)
+        if delay_notes["ems"]:   # FS-021: the solved notches, shown like Inverse Chebyshev's
+            ideal_notches_norm = np.sort(np.abs(z_n[z_n.imag > 0].imag))
     else:
         raise ValueError(f"Unknown response type: {response}")
 

@@ -266,4 +266,105 @@ t0 = time.perf_counter()
 pick(B, {"fs_hz": 3e3, "as_db": 80.0}, 20)
 print(f"  Bessel order scan (infeasible, n <= 20): {(time.perf_counter() - t0) * 1e3:.0f} ms")
 
+section("11. Equiripple magnitude stopband (FS-021)")
+from scipy.optimize import minimize_scalar   # noqa: E402
+
+
+def dense_peak(p, z, a, b, n_pts=20001):
+    """Independent hump check: dense log grid on (a, b), then a local refinement."""
+    lw = np.linspace(math.log(a), math.log(b), n_pts)[1:-1]
+    v = ds._db(p, np.exp(lw), z)
+    i = int(np.argmax(v))
+    if i in (0, len(lw) - 1):
+        return float(v[i]), float(np.max(v))
+    r = minimize_scalar(lambda x: -ds._db(p, [math.exp(x)], z)[0],
+                        bounds=(lw[i - 1], lw[i + 1]), method="bounded", options={"xatol": 1e-13})
+    return max(float(-r.fun), float(v[i])), float(np.max(v))
+
+
+def ems_case(resp, n, m, As, alpha=A3, delta=0.01):
+    if resp == EQ:
+        ds.eqdelay_poles(n, delta)                # warm the prototype cache: time the solve only
+    t0 = time.perf_counter()
+    z, p, ws, nt = ds.design_delay_lp(resp, n, alpha, As, delta, ems_m=m)
+    return z, p, ws, nt, time.perf_counter() - t0
+
+
+t_max, n_cases = 0.0, 0
+for resp in (B, EQ):
+    for n in (3, 4, 5, 6, 8):
+        p0 = ds.prototype_corner(resp, n, A3, 0.01)
+        for m in range(1, n // 2 + 1):
+            for As in (30.0, 40.0, 60.0):
+                z, p, ws, nt, dt = ems_case(resp, n, m, As)
+                tag = (resp, n, m, As)
+                e = nt["ems"]
+                assert e["converged"] and e["m"] == m and not nt["warnings"], (tag, e, nt["warnings"])
+                wz = np.sort(z[z.imag > 0].imag)
+                assert len(wz) == m and wz[0] > 1.0, (tag, wz)
+                # every hump at -As, nothing in the stopband above it
+                edges = list(wz) + [wz[-1] * 1e3]
+                for k in range(m):
+                    h, gmax = dense_peak(p, z, edges[k], edges[k + 1])
+                    rising = k == m - 1 and 2 * m == n
+                    if not rising:
+                        assert abs(h + As) < 1e-6, (tag, k, h)
+                    assert gmax < -As + 1e-6, (tag, k, gmax)
+                # corner held
+                assert abs(ds._db(p, [1.0], z)[0] + A3) < 1e-9, tag
+                # delay = notch-free design scaled by the pole scale (phase derivative)
+                a = nt["pole_scale"]
+                w = np.linspace(0.05, min(2.5, 0.9 * wz[0]), 40)
+                g_ref = ds.group_delay(p0 * a, w)
+                assert np.max(np.abs(phase_gd(p, z, w) / g_ref - 1)) < 1e-6, tag
+                # far stopband: slope 20 (n - 2m) dB/dec, or the flat floor at -As
+                d4, d5 = ds._db(p, [wz[-1] * 1e4, wz[-1] * 1e5], z)
+                if 2 * m == n:
+                    assert abs(d5 + As) < 1e-6, (tag, d5)
+                else:
+                    assert abs((d5 - d4) + 20 * (n - 2 * m)) < 0.01, (tag, d5 - d4)
+                assert dt < 0.5, (tag, dt)
+                t_max, n_cases = max(t_max, dt), n_cases + 1
+ok(f"{n_cases} cases (Bessel / Equiripple 1 %, n 3-8, every m, A_s 30/40/60 dB): humps at -A_s "
+   f"within 1e-6 dB, corner held, delay = scaled notch-free design, roll-off 20(n-2m) dB/dec "
+   f"or floor at -A_s; slowest solve {t_max * 1e3:.0f} ms")
+
+# Reference values from the 2026-09-27 prototype (normalized to fc)
+for resp, n, m, ref_wz, ref_a, ref_ws in ((B, 4, 1, (3.735,), 1.118, 3.375),
+                                          (B, 8, 3, (2.934, 3.828, 6.163), 1.646, 2.811),
+                                          (EQ, 6, 3, (2.918, 3.815, 9.020), 1.556, 2.798)):
+    z, p, ws, nt, _ = ems_case(resp, n, m, 40.0)
+    wz = np.sort(z[z.imag > 0].imag)
+    assert np.allclose(wz, ref_wz, atol=1e-3) and abs(nt["pole_scale"] - ref_a) < 1e-3 \
+        and abs(ws - ref_ws) < 1e-3, (resp, n, m, wz, nt["pole_scale"], ws)
+ok("prototype reference values reproduced (Bessel n=4 m=1, Bessel n=8 m=3, Equiripple n=6 m=3)")
+
+# Robustness in alpha, and a hard case that must not raise
+for alpha in (0.5, 1.0, 6.0):
+    for resp, n in ((B, 4), (B, 6), (EQ, 6)):
+        for m in sorted({max(1, (n - 1) // 2), n // 2}):
+            for As in (30.0, 60.0):
+                z, p, ws, nt, _ = ems_case(resp, n, m, As, alpha=alpha)
+                assert nt["ems"]["converged"], (alpha, resp, n, m, As, nt["ems"])
+                assert abs(ds._db(p, [1.0], z)[0] + alpha) < 1e-9
+z, p, ws, nt, _ = ems_case(B, 8, 4, 20.0)
+ok(f"alpha 0.5 / 1 / 6 dB converge; Bessel n=8 m=4 A_s=20 dB -> converged={nt['ems']['converged']} "
+   f"(max error {nt['ems']['max_err_db']:.1e} dB, {len(nt['warnings'])} warning(s))")
+
+# Engine end to end
+er = fe.synthesize_lowpass(B, 6, 1000.0, A3, 40.0, ems_m=2)
+fz = np.asarray(er["ideal_notches_hz"])
+assert len(fz) == 2 and fz[0] < fz[1] and fz[0] > 1000.0, fz
+assert er["sb_status"] == "normal" and er["delay_info"]["ems"]["converged"], er["sb_status"]
+assert er["delay_info"]["pole_scale"] > 1 and er["f_stop_hz"] < fz[0], er["f_stop_hz"]
+e0 = fe.synthesize_lowpass(B, 6, 1000.0, A3, 40.0)
+e1 = fe.synthesize_lowpass(B, 6, 1000.0, A3, 40.0, ems_m=0)
+assert np.array_equal(e0["poles"], e1["poles"]) and len(e1["zeros"]) == 0 \
+    and len(e1["ideal_notches_hz"]) == 0 and e1["delay_info"]["ems"] is None
+eh = fe.synthesize_lowpass(B, 6, 1000.0, A3, 40.0, hold_corner=False, ems_m=2)
+assert len(eh["zeros"]) == 0 and eh["delay_info"]["warnings"], eh["delay_info"]["warnings"]
+ok(f"Bessel LP n=6, 1 kHz, 40 dB, ems_m=2: notches {fz[0]:.1f} / {fz[1]:.1f} Hz, "
+   f"f_s = {er['f_stop_hz']:.1f} Hz, poles x{er['delay_info']['pole_scale']:.4f}; ems_m=0 unchanged; "
+   "no corner hold -> warning, no notches")
+
 print("\nALL CHECKS PASSED")

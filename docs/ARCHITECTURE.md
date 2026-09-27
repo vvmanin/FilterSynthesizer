@@ -22,7 +22,7 @@ Streamlit app for analog active-filter design: spec → poles/zeros → biquad c
 |---|---|---|
 | `filter_engine.py` | 32K | Top-level `synthesize_{lowpass,highpass,bandpass,bandreject}()` — calls solvers, returns engine_results dict |
 | `filter_solvers.py` | 92K | **Largest file.** All prototype solvers: Butterworth/Chebyshev/InvCheby/Elliptic for LP, plus BP transforms. Key fns: `solve_butterworth_lp`, `solve_chebyshev_lp`, `solve_inv_chebyshev_lp`, `solve_elliptic_lp`, `synthesize_bgb`, `synthesize_asym_cheby1_bp`, `synthesize_slot_based_inv_cheby`. Lines ~1-700 = LP solvers; ~700-1000 = BP helpers; ~1000+ = BP/BR asymmetric synthesis |
-| `delay_solvers.py` | 40K | **Delay responses (FS-006): Bessel + Equiripple Delay, lowpass and bandpass only (`DELAY_FILTER_TYPES`).** Delay-normalized prototypes (`bessel_poles_delay` via `scipy.signal.besselap`; `eqdelay_poles` = seeded Remez/Newton, `lru_cache`d), corner product W_α = ω_α·τ (`corner_product`), engine drop-ins `design_delay_lp` (corner-normalized LP + stopband notches on fixed poles) and `synthesize_delay_bp` (pole-translation or classic BP), `select_delay_order` (order from specs), `make_delay_info` (the `delay_info` summary). Checks: `python dev/fs006/check_delay_solvers.py` |
+| `delay_solvers.py` | 46K | **Delay responses (FS-006): Bessel + Equiripple Delay, lowpass and bandpass only (`DELAY_FILTER_TYPES`).** Delay-normalized prototypes (`bessel_poles_delay` via `scipy.signal.besselap`; `eqdelay_poles` = seeded Remez/Newton, `lru_cache`d), corner product W_α = ω_α·τ (`corner_product`), engine drop-ins `design_delay_lp` (corner-normalized LP + stopband notches on fixed poles, corner held by `_corner_hold_scale`; `ems_m` > 0 = FS-021 Equiripple Magnitude Stopband: `solve_delay_stopband_notches` places the notches so every stopband hump (`_stopband_humps`) sits at −A_s) and `synthesize_delay_bp` (pole-translation or classic BP), `select_delay_order` (order from specs), `make_delay_info` (the `delay_info` summary). Checks: `python dev/fs006/check_delay_solvers.py` (§11 = FS-021) |
 | `filter_utils.py` | 4K | Tiny: `evaluate_h()`, `find_crossing()` |
 | `tf_utils.py` | 8K | Root formatting, LaTeX poly display, coefficient tables |
 | `pairing_utils.py` | 28K | `build_stage_bricks`, `auto_pair_stages` (LP/HP/BP/BR), `classify_section`, `compute_stage_gains` |
@@ -64,7 +64,7 @@ Streamlit app for analog active-filter design: spec → poles/zeros → biquad c
 ### Tier D — UI & Visualization
 | File | Size | Purpose |
 |---|---|---|
-| `app.py` | 96K, 1880 lines | **Main Streamlit app.** Sidebar (L230-268): response/type/order/freq/gain/ripple/delay. 5 tabs below. |
+| `app.py` | 100K, 1958 lines | **Main Streamlit app.** Sidebar (L234-271): response/type/order/freq/gain/ripple/delay. 5 tabs below. |
 | `ui_components.py` | 23K | Sidebar widget blocks: `draw_filter_type` (drops HP/BR for the delay responses), `draw_order_block`, `draw_delay_order_block`, `draw_frequency_block` (+ delay anchor / τ₀ for delay LP), `draw_gain_block`, `draw_ripple_block`, `draw_delay_block`, `draw_modifications_block`, `validate_filter_specs`; `_mem_widget` = keyed widget whose value survives being hidden |
 | `topology_tab.py` | 68K | Tab 4 "Topology": per-section hardware solver UI, convergence settings, results table, schematics. `render_topology_tab()` entry. Lines ~1-160 = helpers; ~220-510 = job management; ~510-800 = results rendering; ~800-880 = 1st-order; ~880-1150 = `_render_section`; ~1150-1290 = `_render_overall` cascade; ~1294 = `render_topology_tab` |
 | `response_tab.py` | 24K | Tab 5 "Resulting Response": ideal vs realized Bode overlay, Monte Carlo. `render_response_tab()` entry |
@@ -86,23 +86,23 @@ Streamlit app for analog active-filter design: spec → poles/zeros → biquad c
 
 ---
 
-## app.py Section Map (1880 lines)
+## app.py Section Map (1958 lines)
 
 | Lines | Section |
 |---|---|
-| 1-47 | Imports, process pool |
-| 49-128 | Band-reject gain equalization helpers (`_stage_rho`, `_section_peak_mag`, `_equalize_dc_hf_ks`) |
-| 130-228 | Page config, CSS |
-| 230-268 | **Sidebar** — response, filter type, order, freq, gain, ripple, delay specs, modifications |
-| 270-400 | **Delay responses (FS-006): order / corner resolution** — `select_delay_order` (From specs), derived corner under the τ₀ anchor, BP fold check; `_render_delay_summary` for Tab 1 |
-| 402-427 | Main canvas title, validation, 5-tab creation |
-| 429-649 | **Section 1: Engine run** — background workers for LP/HP/BP/BR synthesis, result unpacking, post-processing |
-| 725-884 | Report snapshot (`report_spec` rows incl. delay rows, detail windows) |
-| 886-1191 | **Tab 1: Response Plots** (tab_plots) — magnitude, passband detail, group-delay detail (delay responses), phase/GD, probes, manual notch grid |
-| 1193-1356 | **Tab 2: Roots & TF** (tab_roots) — zero/pole tables, LaTeX TF display, coefficient table |
-| 1358-1876 | **Tab 3: Biquad Pairing** (tab_pairing) — mnemoscheme, stage gain distribution, per-stage TF details |
-| 1877-1878 | **Tab 4: Topology** → delegates to `render_topology_tab()` |
-| 1880 | **Tab 5: Response** → delegates to `render_response_tab()` |
+| 1-50 | Imports, process pool |
+| 52-133 | Band-reject gain equalization helpers (`_stage_rho`, `_section_peak_mag`, `_equalize_dc_hf_ks`) |
+| 135-232 | Page config, CSS |
+| 234-271 | **Sidebar** — response, filter type, order, freq, gain, ripple, delay specs, modifications |
+| 273-416 | **Delay responses (FS-006): order / corner resolution** — `select_delay_order` (From specs), derived corner under the τ₀ anchor, BP fold check; `_render_delay_summary` and `_render_ems_readout` (FS-021) for Tab 1 |
+| 418-442 | Main canvas title, validation, 5-tab creation |
+| 444-769 | **Section 1: Engine run** — background workers for LP/HP/BP/BR synthesis (L495-517: FS-021 Equiripple Magnitude Stopband mode state — `ems_ok`/`ems_on`/`ems_m`, Active-row defaults, pins parked/restored), result unpacking, notch-grid display mapping |
+| 771-936 | Report snapshot (`report_spec` rows incl. delay rows, detail windows) |
+| 938-1270 | **Tab 1: Response Plots** (tab_plots) — magnitude, passband detail, group-delay detail (delay responses), phase/GD, probes, manual notch grid (delay LP: Equiripple Magnitude Stopband checkbox, Active column, readout) |
+| 1272-1435 | **Tab 2: Roots & TF** (tab_roots) — zero/pole tables, LaTeX TF display, coefficient table |
+| 1437-1953 | **Tab 3: Biquad Pairing** (tab_pairing) — mnemoscheme, stage gain distribution, per-stage TF details |
+| 1954-1955 | **Tab 4: Topology** → delegates to `render_topology_tab()` |
+| 1957-1958 | **Tab 5: Response** → delegates to `render_response_tab()` |
 
 ---
 
@@ -134,7 +134,7 @@ Sidebar specs
 
 ## Key Data Structures
 
-- **engine_results**: dict returned by `filter_engine.synthesize_*()`. LP/HP: `poles`, `zeros`, `k`, `f_stop_hz`, `ideal_notches_hz`, `sb_status` (+ `reflection_zeros` for LP). BP: `poles`, `zeros`, `reflection_zeros`, `k`, `f_stop_hp_hz`, `f_stop_lp_hz`, `ideal_notches_hp_hz`, `ideal_notches_lp_hz`, `sb_status_hp`, `sb_status_lp`. BR: the BP keys (with `ideal_notches_hz`) + `actual_as_db`; note `f_stop_hp_hz` is the lower edge. **Delay responses only** (Bessel / Equiripple Delay): `delay_info` = `{response, kind (LP/BP), order, alpha_db, delta, eps_ref, max_q, bp_mapping, n_origin_zeros, pole_scale, warnings, tau_dc_s, tau_nom_s, tau_center_s, w_prod, corner_hz, center_hz, flat_band_hz, delay_pp_pct}` (seconds / Hz) from `delay_solvers.make_delay_info`.
+- **engine_results**: dict returned by `filter_engine.synthesize_*()`. LP/HP: `poles`, `zeros`, `k`, `f_stop_hz`, `ideal_notches_hz`, `sb_status` (+ `reflection_zeros` for LP). BP: `poles`, `zeros`, `reflection_zeros`, `k`, `f_stop_hp_hz`, `f_stop_lp_hz`, `ideal_notches_hp_hz`, `ideal_notches_lp_hz`, `sb_status_hp`, `sb_status_lp`. BR: the BP keys (with `ideal_notches_hz`) + `actual_as_db`; note `f_stop_hp_hz` is the lower edge. **Delay responses only** (Bessel / Equiripple Delay): `delay_info` = `{response, kind (LP/BP), order, alpha_db, delta, eps_ref, max_q, bp_mapping, n_origin_zeros, pole_scale, warnings, tau_dc_s, tau_nom_s, tau_center_s, w_prod, corner_hz, center_hz, flat_band_hz, delay_pp_pct, ems}` (seconds / Hz) from `delay_solvers.make_delay_info`; `ems` (FS-021, LP only) = `{m, converged, max_err_db, pole_scale}` or None, and the solved notches are then in `ideal_notches_hz`.
 - **stage**: dict with `pole_id`, `zero_ids`, `absorbed_real_id`, `type`. Created by `auto_pair_stages()`.
 - **brick**: dict with `id`, `root`, `w0`, `Q`, `type` ("Complex Pair"/"Real"). From `build_stage_bricks()`.
 - **topo**: dict with `family`, `order`, `gain`, `notch`, `has_R7`, plus symbolic circuit equations.
