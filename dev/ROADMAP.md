@@ -133,7 +133,7 @@ first.
 | FS-002 | Response Plots: phase/GD on main plot, compact sections | P2 *(s)* | PROPOSED | medium | FS-001 (soft) |
 | FS-003 | Fold "Roots & Transfer Function" tab into Response Plots | P2 *(s)* | PROPOSED | medium | FS-002 (hard) |
 | FS-004 | Biquad Pairing tab: compact layout, rad/s note font | P2 *(s)* | PROPOSED | medium | FS-001 (soft) |
-| FS-007 | Custom filter design (coefficients or poles/zeros) | P1 | PROPOSED | plan xhigh / build high | FS-003 (soft), FS-006 (soft) |
+| FS-007 | Custom filter design (coefficients or poles/zeros) | P1 | PLANNED | plan xhigh / build high | FS-003 (soft), FS-016 (soft) |
 | FS-008 | LTspice export with Monte Carlo presets | P1 | PROPOSED | plan xhigh / build high | FS-005 (hard) |
 | FS-009 | Noise analysis in LTspice output | P2 *(s)* | PROPOSED | medium | FS-008 (hard) |
 | FS-010 | QSpice compatibility | P3 | PROPOSED | medium | FS-008 (hard) |
@@ -155,8 +155,9 @@ first.
 *(s)* = suggested priority, awaiting maintainer confirmation.
 
 Suggested order: FS-008 (the P1 track; FS-005 and FS-006 are
-done), FS-007 in parallel planning; UI polish FS-001 → FS-002 → FS-003
-→ FS-004 can be interleaved as low-risk medium-effort sessions.
+done) and FS-007 (PLANNED; build after FS-016 if convenient); UI polish
+FS-001 → FS-002 → FS-003 → FS-004 can be interleaved as low-risk
+medium-effort sessions.
 
 Non-urgent follow-ups added 2026-09-27, ranked by implementation convenience
 (easiest first): FS-022 (a report-data fix in one place) → FS-023 (one more
@@ -233,18 +234,34 @@ sourced) and before FS-019 (additions follow its curation rule).
 - **Updated:** 2026-09-26
 
 ### FS-007 — Custom filter design (coefficients or poles/zeros)
-- **State:** PROPOSED
+- **State:** PLANNED
 - **Priority:** P1
 - **Effort:** plan xhigh / build high
 - **Tiers:** A, D
-- **Depends on:** FS-003 (soft — tab layout settled), FS-006 (soft — sidebar Response list changes)
-- **Contracts:** §2 (classification must accept user-supplied roots), §6 (`engine_results`, Brick, Stage fields)
-- **Files:** `filter_engine.py` (new custom entry building `engine_results`), `pairing_utils.py` (generic pairing path), `app.py` + `ui_components.py` (input UI), `tf_utils.py` (coefficient ↔ root conversion)
-- **Goal:** The user specifies H(s) directly — numerator/denominator coefficients, or poles/zeros as (f0, Q) pairs plus real roots — and continues through pairing, topology and response exactly as for a synthesized filter.
-- **Scope:** In — input modes, validation (stability: LHP poles; conjugate pairing; realizable degree), gain constant handling, an `engine_results` with every key downstream tabs read (or explicit gating of sections that have no meaning, e.g. stopband edges, Manual Notch Tuning). Out — changes to hardware synthesis (Tiers B/C).
-- **Validation:** Round-trip: enter the coefficients of a known Butterworth/Elliptic design and get identical poles/zeros, pairing and top BOM; invalid inputs (RHP pole, odd complex count, numerator degree > denominator) rejected with a clear message; every tab renders without exceptions.
-- **Open questions:** Where does the input live — new sidebar Response option "Custom", or a separate panel? Coefficients in normalized or denormalized s? Allow RHP zeros (needed later for FS-013 all-pass)?
-- **Updated:** 2026-09-26
+- **Depends on:** FS-003 (soft — the editor panel sits at the top of Response Plots, which FS-002/003 reshape), FS-016 (soft — pairing fixes; FS-007's realizability gate and pairing pre-flight cover the known pairer gaps meanwhile). FS-006 is done.
+- **Contracts:** §2 (new producer rule: a custom producer emits only origin / jω / ∞ zeros with exact conjugates and strictly-LHP poles — what the classifier and pairers assume; relaxed only by FS-013/FS-014), §5 (an entered negative K is used as |K|; sign stays a realization property), §6 (`engine_results` gains `custom_info`; Brick / Stage / Section schemas unchanged)
+- **Files:** new `custom_tf.py` (Tier A, no Streamlit: parse the input forms, balanced root finding + even-part numerator + precision-aware repeated-root merge, exact snapping, realizability gate, pairing pre-flight, LP-prototype transforms via `scipy.signal.lp2{lp,hp,bp,bs}_zpk`, peak / type / edge measurement, conditioning diagnostic, `custom_info`); `filter_engine.py` (thin `synthesize_custom` entry); `ui_components.py` (Custom branches: mode radio, Unit-radio split-out, gain-mode radio, α / A_s labels and placeholders, editor panel `draw_custom_editor`, `validate_filter_specs` bypass); `app.py` (Response list, sidebar chassis, editor panel + resolution step before `real_fc` L441, engine-dispatch bypass, gating of L689-768 / L1021-1083 / L1122-1267, Tab 2 and report `w_norm`, Tab 3 signature, BR-equalize hide, `hw_pb_gain`, report rows); new `dev/fs007/check_custom_tf.py`; `docs/ARCHITECTURE.md`; `docs/CONTRACTS.md` §2 / §6; this file §7. Not touched: `pairing_utils.py`, `tf_utils.py`, `filter_solvers.py`, cells, Tier C, `topology_tab.py`, `response_tab.py`, `report_pdf.py`, TF cache.
+- **Goal:** The user specifies H(s) directly — polynomial coefficients, factored (f₀, Q) or Tietze–Schenk rows, or root coordinates; normalized to a frequency f_n or absolute — either as a complete filter or as a lowpass prototype mapped to LP/HP/BP/BR, and continues through pairing, topology and response exactly as for a synthesized filter.
+- **Scope:**
+  - In — sidebar Response "Custom H(s)" with a Mode radio (Complete H(s) / Lowpass prototype), Filter Type (all four), target frequencies (prototype), gain-mode radio (Normalize → peak 0 dB + Passband Gain / As entered → entered peak gain G, may be < 1), α as edge level (complete) or measured prototype edge attenuation (prototype), A_s as plot reference.
+  - In — editor panel at the top of Response Plots, rendered before the engine run: forms Coefficients (table by power, or paste with ascending/descending toggle), Factored (f₀, Q) (pole pairs, real poles, jω zero pairs, origin-zero count, K), Factored Tietze–Schenk (aᵢ, bᵢ, A₀), Roots (σ, ω ≥ 0; ω > 0 = conjugate pair) + K; Normalized / Absolute scale; diagnostics (counts, detected type, edges, peak gain, conditioning, merges, gate errors, pre-flight warnings); state kept in `_custom_spec`.
+  - In — transmission zeros only (origin, jω, ∞); the input formats already carry off-axis and RHP zeros (σ > 0, Q_z < 0) and the gate rejects them with a message naming FS-013 / FS-014.
+  - In — prototype transforms (geometric-symmetric; k carried exactly); complete-mode type detection (warning on mismatch with the radio) and passband-edge measurement written into `f1_val` / `f2_val`.
+  - In — realizability gate (design note §7.1), pairing pre-flight (§7.2), coefficient-conditioning diagnostic (§4.4); gating of stopband-edge readout, manual notch tuning and notch-display mapping; Custom report rows; Tab 3 signature from a roots hash; `hw_pb_gain` written for every design.
+  - Out — off-axis / RHP zeros (FS-014 / FS-013); asymmetric or arithmetic (pole-translation) prototype transforms (use complete mode); manual notch tuning and stopband-edge readout for Custom; changes to pairing algorithms (FS-016) or to the Topology BR readout (FS-015); file import of H(s) (FS-011); "load current design into Custom" (follow-up idea); any Tier B/C change.
+- **Validation:**
+  - `python dev/fs007/check_custom_tf.py` (new, asserts; numbers in the design note §11.1): Butterworth n = 4 from 6-digit coefficients → Q 0.541193 / 1.306574, passband deviation ≤ 3e-5 dB, and identical zpk from (f₀, Q), Tietze–Schenk and roots forms; elliptic n = 6 numerator via the even-part method → Re z = 0 exactly, ω_z error ≤ 1e-14; normalized vs absolute scale identical; LP/HP/BP/BR transform identities ≤ 1e-14 with HP/BR k = H_proto(0), BP k = K·B^(n_p−n_z); prototype transforms vs the engine's Chebyshev symmetric BP/BR → equal roots ≤ 1e-9; repeated zeros (s²+1)^m, m = 1…10, and 6-digit (s²+ω₀²)^m merged (ω_z error ≤ 2e-6) while notches 1 % apart stay distinct; conditioning: Butterworth BP 2×5 b = 0.1 at 6 digits warns, 2×6 errors, LP 8 does not; every gate row fires with its message; pre-flight catches a jω pair + origin zero in a 2nd-order BP stage; type detection on even-order elliptic LP / HP and a shelving biquad.
+  - `python verify.py` still passes (no Tier B change).
+  - App: Custom LP/HP/BP/BR in complete mode (one per input form) and a Butterworth n = 4 prototype → LP / HP / BP 800–1250 Hz / BR 800–1250 Hz: every tab renders, one section solves in Topology, Resulting Response overlays, PDF shows the Custom rows; prototype designs match the synthesized Butterworth plots and stages; round trip of the tool's own Tab-2 coefficients (Butterworth LP 4 / 1 kHz, Elliptic LP 5) → same stages and top BOM; As entered with G < 1 → Topology overall readout shows G and the sidebar gain of a standard design is unchanged afterwards; Custom → Butterworth → Custom restores the tables.
+  - Regression: default Butterworth LP and one Elliptic BP give identical Tab-3 pairing and Topology results vs `main`.
+- **Open questions:** none (answered 2026-09-27 — see Notes).
+- **Notes:**
+  - Decisions (maintainer, 2026-09-27): editor panel at the top of Response Plots with the sidebar "Custom H(s)" Response holding the design intent; gain radio Normalize / As entered; Filter Type radio authoritative in complete mode, detection only warns; both Lowpass-prototype and Complete modes; transmission zeros only now, RHP zeros representable for FS-013.
+  - Recommendations adopted with this plan (design note §0): Tietze–Schenk as a fourth form; order limits n_p ≤ 30 (complete), prototype n ≤ 20 LP/HP, ≤ 15 BP/BR, coefficient form bounded by the conditioning diagnostic; peak-relative type detection; outermost −α edges; stopband keys omitted from `engine_results`; custom results built in the main process (no pool).
+  - Math base, measured numerics, gate table, Streamlit mechanics and the consumer-by-consumer gating table: `dev/FS-007_custom_tf_design_note.md`.
+  - Measured here (numpy 2.3.5 / scipy 1.17.1, scratch): `scipy.signal.lp2*_zpk` k equals the closed forms, substitution identities ≤ 9e-16, wideband BP small root ≤ 2.1e-11 relative at f₂/f₁ = 1e6 (so the private `filter_solvers` transforms, which carry no k and drop BR origin zeros, are not reused); repeated roots scatter by ~ε^(1/m) (5 % at m = 10) with exact centroids; expanded coefficients are unusable for narrow-band BP beyond ~2×5 poles at 6 digits (4.1 dB error at 2×5, RHP poles at 2×6) while LP is fine to n ≈ 15.
+  - Pairer gaps found while planning are recorded in FS-016 Notes; FS-007 gates them instead of fixing them.
+- **Updated:** 2026-09-27
 
 ### FS-008 — LTspice export with Monte Carlo presets
 - **State:** PROPOSED
@@ -370,7 +387,8 @@ sourced) and before FS-019 (additions follow its curation rule).
 - **Validation:** Re-run the Phase-1 matrix: every recorded case now correct; for designs that were already correct, stage assignments unchanged (scratch diff over the matrix); pairing results feed Topology without new `pending` sections.
 - **Open questions:** Criteria for "optimal" per type (pole-zero proximity, ascending-Q order, gain distribution, dynamic range)? Should two real poles ever be combined deliberately into one 2nd-order section (valid for a Q < 0.5 biquad), or always split into 1st-order sections?
 - **Notes:** Can be split into two sessions per phase. Changes stage assignments → retake BOM baselines afterwards.
-- **Updated:** 2026-09-26
+  - Inputs from FS-007 planning (code reading, 2026-09-27; confirm in Phase 1 — details in `dev/FS-007_custom_tf_design_note.md` §13): `auto_pair_bandpass` uses only `real_poles[0]` (`pairing_utils.py` L140), so further real poles vanish from the cascade — a wideband odd-order BP gives two real poles per real prototype pole when |r|·B > 2ω₀; it also dumps leftover origin zeros into the lowest stage even if that stage holds a jω pair (L151-162), which `classify_section` then ignores; for a BR real+real stage `hw_sections.f0_hz` comes from p₁ alone while Q = q_eff (app.py L1826), and `_stage_rho` uses the same ω₀; the Tab 3 pairing signature (app.py L1488) omits `filter_type`. FS-007 gates these cases for Custom designs until fixed here.
+- **Updated:** 2026-09-27
 
 ### FS-017 — Manual pairing override: unreliable clicks
 - **State:** PROPOSED
