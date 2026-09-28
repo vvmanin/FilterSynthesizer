@@ -129,13 +129,11 @@ first.
 
 | ID | Title | P | State | Effort | Depends on |
 |---|---|---|---|---|---|
-| FS-003 | Fold "Roots & Transfer Function" tab into Response Plots | P2 *(s)* | PROPOSED | medium | FS-002 (hard, done) |
-| FS-004 | Biquad Pairing tab: compact layout, rad/s note font | P2 *(s)* | PROPOSED | medium | FS-001 (soft, done) |
-| FS-007 | Custom filter design (coefficients or poles/zeros) | P1 | PLANNED | plan xhigh / build high | FS-003 (soft), FS-016 (soft) |
+| FS-007 | Custom filter design (coefficients or poles/zeros) | P1 | PLANNED | plan xhigh / build high | FS-003 (soft, done), FS-016 (soft) |
 | FS-008 | LTspice export with Monte Carlo presets (AC + MC; design note) | P1 | PLANNED | plan xhigh / build high | FS-005 (hard, done) |
 | FS-009 | Noise analysis in LTspice output | P2 *(s)* | PROPOSED | medium | FS-008 (hard) |
 | FS-010 | QSpice compatibility | P3 | PROPOSED | medium | FS-008 (hard) |
-| FS-011 | Project save / load | P2 | PROPOSED | high | FS-003, FS-007 (soft) |
+| FS-011 | Project save / load | P2 | PROPOSED | high | FS-003 (done), FS-007 (soft) |
 | FS-012 | AI integration (external API/MCP or built-in assistant) | P2 | PROPOSED | plan xhigh / build high | FS-011 (soft) |
 | FS-013 | All-pass (phase) responses + all-pass cells | P3 | PROPOSED | max | FS-006 (soft) |
 | FS-014 | Topology family expansion — research | P3 | PROPOSED | max | — |
@@ -155,9 +153,8 @@ first.
 *(s)* = suggested priority, awaiting maintainer confirmation.
 
 Suggested order: FS-008 (the P1 track; FS-005 and FS-006 are
-done) and FS-007 (PLANNED; build after FS-016 if convenient); UI polish
-FS-003 → FS-004 (FS-001 and FS-002 are done) can be interleaved as low-risk
-medium-effort sessions.
+done) and FS-007 (PLANNED; build after FS-016 if convenient). The UI polish
+track FS-001 → FS-004 is done.
 
 Non-urgent follow-ups added 2026-09-27, ranked by implementation convenience
 (easiest first): FS-022 (a report-data fix in one place) → FS-023 (one more
@@ -167,8 +164,7 @@ families; research first).
 
 Defect items FS-015/016/017 have no hard dependencies and block nothing; slot
 them between feature items. File-overlap notes (to avoid rework, not
-blockers): FS-017 before FS-004 (same Biquad Pairing tab region in `app.py`);
-FS-016 before taking BOM baselines for other items' validation (it can change
+blockers): FS-016 before taking BOM baselines for other items' validation (it can change
 stage assignments); FS-016 before FS-007 build (custom designs reuse pairing).
 
 Op-amp data items: FS-018 before FS-009 (it defines how the noise fields are
@@ -180,40 +176,12 @@ FS-027 (loaded realized response) reuses FS-008's IR and MNA.
 
 ---
 
-### FS-003 — Fold "Roots & Transfer Function" tab into Response Plots
-- **State:** PROPOSED
-- **Priority:** P2 (suggested)
-- **Effort:** medium
-- **Tiers:** D
-- **Depends on:** FS-002 (hard — same tab region)
-- **Contracts:** —
-- **Files:** `app.py` (tab tuple ~L265; Roots & TF tab body ~L980–1140), `docs/ARCHITECTURE.md` (app.py section map), User Manual sources
-- **Goal:** Remove the read-only Roots & TF tab; its content appears at the end of Response Plots.
-- **Scope:** In — order after existing Response Plots content: (1) Domain Scale radio Normalized/Denormalized; (2) Root Locations — pole and zero tables + System Gain Constant K, not expandable; (3) Pole-Zero Map — expandable; (4) Transfer Function H(s) — one expander containing a radio Expanded (Isolated Gain) / Expanded (Distributed Gain) / Factored (Cascaded Biquads), showing the current content for the chosen form. Compact spacing, fonts unchanged. Out — changes to the math or tables themselves.
-- **Validation:** Each former Roots & TF element present and identical in content for one LP and one BR design, in both Domain Scale modes and all three H(s) forms; widget keys unique (no Streamlit duplicate-key errors); remaining tabs still work (index shift).
-- **Open questions:** Does the Pole-Zero Map Units radio and "Stretch Real Axis" checkbox stay inside the Pole-Zero Map expander?
-- **Notes:** Tab count 5 → 4 — update ARCHITECTURE.md and flag manual drift.
-- **Updated:** 2026-09-26
-
-### FS-004 — Biquad Pairing tab: compact layout, rad/s note font
-- **State:** PROPOSED
-- **Priority:** P2 (suggested)
-- **Effort:** medium
-- **Tiers:** D
-- **Depends on:** FS-001 (soft — styled sections come from it)
-- **Contracts:** —
-- **Files:** `app.py` (Biquad Pairing tab)
-- **Goal:** Tighter vertical spacing between sections; the "Frequencies expressed in rad/s" note slightly larger.
-- **Scope:** In — spacing; the note's font size. The "Enable 3rd-Order Sections…" area and Hardware Stage Parameters styling is delivered by FS-001. Out — pairing logic.
-- **Validation:** Visual check with an odd-order design (3rd-order sections on and off); all controls still work; stage assignments unchanged vs baseline.
-- **Updated:** 2026-09-26
-
 ### FS-007 — Custom filter design (coefficients or poles/zeros)
 - **State:** PLANNED
 - **Priority:** P1
 - **Effort:** plan xhigh / build high
 - **Tiers:** A, D
-- **Depends on:** FS-003 (soft — the editor panel sits at the top of Response Plots, which FS-002/003 reshape), FS-016 (soft — pairing fixes; FS-007's realizability gate and pairing pre-flight cover the known pairer gaps meanwhile). FS-006 is done.
+- **Depends on:** FS-003 (soft, done — the editor panel sits at the top of Response Plots, which FS-002/003 reshape), FS-016 (soft — pairing fixes; FS-007's realizability gate and pairing pre-flight cover the known pairer gaps meanwhile). FS-006 is done.
 - **Contracts:** §2 (new producer rule: a custom producer emits only origin / jω / ∞ zeros with exact conjugates and strictly-LHP poles — what the classifier and pairers assume; relaxed only by FS-013/FS-014), §5 (an entered negative K is used as |K|; sign stays a realization property), §6 (`engine_results` gains `custom_info`; Brick / Stage / Section schemas unchanged)
 - **Files:** new `custom_tf.py` (Tier A, no Streamlit: parse the input forms, balanced root finding + even-part numerator + precision-aware repeated-root merge, exact snapping, realizability gate, pairing pre-flight, LP-prototype transforms via `scipy.signal.lp2{lp,hp,bp,bs}_zpk`, peak / type / edge measurement, conditioning diagnostic, `custom_info`); `filter_engine.py` (thin `synthesize_custom` entry); `ui_components.py` (Custom branches: mode radio, Unit-radio split-out, gain-mode radio, α / A_s labels and placeholders, editor panel `draw_custom_editor`, `validate_filter_specs` bypass); `app.py` (Response list, sidebar chassis, editor panel + resolution step before `real_fc` L441, engine-dispatch bypass, gating of L689-768 / L1021-1083 / L1122-1267, Tab 2 and report `w_norm`, Tab 3 signature, BR-equalize hide, `hw_pb_gain`, report rows); new `dev/fs007/check_custom_tf.py`; `docs/ARCHITECTURE.md`; `docs/CONTRACTS.md` §2 / §6; this file §7. Not touched: `pairing_utils.py`, `tf_utils.py`, `filter_solvers.py`, cells, Tier C, `topology_tab.py`, `response_tab.py`, `report_pdf.py`, TF cache.
 - **Goal:** The user specifies H(s) directly — polynomial coefficients, factored (f₀, Q) or Tietze–Schenk rows, or root coordinates; normalized to a frequency f_n or absolute — either as a complete filter or as a lowpass prototype mapped to LP/HP/BP/BR, and continues through pairing, topology and response exactly as for a synthesized filter.
@@ -297,7 +265,7 @@ FS-027 (loaded realized response) reuses FS-008's IR and MNA.
 - **Priority:** P2
 - **Effort:** high
 - **Tiers:** D (+ C for solution serialization)
-- **Depends on:** FS-003, FS-007 (soft — the UI key set and spec inputs should settle first to limit format churn)
+- **Depends on:** FS-003 (done), FS-007 (soft — the UI key set and spec inputs should settle first to limit format churn)
 - **Contracts:** §6 (Solution, Section schemas are what gets saved)
 - **Files:** new `project_io.py`, `app.py` (save/load controls; session-state restore), `topology_tab.py` (solved-section results), `response_tab.py` (MC settings)
 - **Goal:** Save all inputs, checkboxes and already-solved sections to a file; load it later and continue where you left off without re-solving.
@@ -537,6 +505,8 @@ FS-006 — Bessel and equiripple-delay responses — DONE 2026-09-27 — 3899437
 FS-021 — Equiripple-magnitude stopband for delay responses — DONE 2026-09-27 — 6b59732 (checks `dev/fs006/check_delay_solvers.py` §11)
 FS-001 — Design-control section style (all tabs) — DONE 2026-09-28 — e3b1ab6 (`ui_components.design_control`; blue = design inputs, amber = BOM pick; streamlit >= 1.39)
 FS-002 — Response Plots: phase/GD on main plot, compact sections — DONE 2026-09-28 — dfd48f2 (phase y2 / GD y3 right-hand axes as in `hw_plots`; `plot_phase_delay` removed)
+FS-003 — Fold "Roots & Transfer Function" tab into Response Plots — DONE 2026-09-28 — commit "feat(ui): FS-003/FS-004 …" (4 tabs; grey-framed `rp_roots` block with Domain Scale + Root Locations / Pole-Zero Map / H(s) expanders, `tf_form_roots` radio; CSS 7b compaction; fixed mnemoscheme axis units ignoring `unit_pair`)
+FS-004 — Biquad Pairing tab: compact layout, rad/s note font — DONE 2026-09-28 — same commit (`bp_body` container under CSS 7b; rules and `<br>` removed; units note body-size)
 
 ---
 
@@ -608,3 +578,23 @@ screenshots, `--accept`, PDF build); a batch deletes the entries it covered.
     two lines (was one line under it). No horizontal rules between Stopband
     Edges, Frequency Probes and Manual Notch; notch rows are tighter.
   - Stale screenshots: Tab 1 (Response Plots); run `doc_drift.py` for the list.
+- **FS-003** (Roots & Transfer Function folded into Response Plots):
+  - The app has 4 tabs; the **Roots & Transfer Function** tab is gone. Its
+    content is at the end of **Response Plots**, after Manual Notch, in a grey
+    frame headed "Roots & Transfer Function": Domain Scale (+ Pole-Zero Map
+    Units when Denormalized), a collapsed **Root Locations** expander (tables
+    and K), a collapsed **Pole-Zero Map** expander (Stretch Real Axis inside), and a
+    collapsed **Transfer Function H(s)** expander whose radio picks Expanded
+    (Isolated Gain) / Expanded (Distributed Gain) / Factored (Cascaded
+    Biquads). User manual §3.3 and the tab table (§ at L23), quick_start L74,
+    SCREENSHOTS.md L91 and `ui_inventory.json` (tab list) are now wrong; tab
+    numbers after Tab 1 shift down by one.
+  - Response Plots is visibly more compact (smaller gaps / heading and alert
+    padding, fonts unchanged).
+  - New widget key: `tf_form_roots`.
+  - Stale screenshots: Tab 1 and the former Tab 2; run `doc_drift.py`.
+- **FS-004** (Biquad Pairing compaction):
+  - No horizontal rules in the tab; tighter gaps between the units radio,
+    mnemoscheme box, Hardware Stage Parameters and the Section blocks (fonts
+    unchanged). "Frequencies expressed in …" is now body-size italic text.
+  - Stale screenshots: Biquad Pairing tab; run `doc_drift.py`.

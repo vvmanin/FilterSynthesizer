@@ -64,10 +64,10 @@ Streamlit app for analog active-filter design: spec → poles/zeros → biquad c
 ### Tier D — UI & Visualization
 | File | Size | Purpose |
 |---|---|---|
-| `app.py` | 100K, 1982 lines | **Main Streamlit app.** Sidebar (L253-290): response/type/order/freq/gain/ripple/delay. 5 tabs below. |
+| `app.py` | 100K, 2003 lines | **Main Streamlit app.** Sidebar (L298-334): response/type/order/freq/gain/ripple/delay. 4 tabs below (FS-003 folded Roots & TF into Response Plots). |
 | `ui_components.py` | 23K | Sidebar widget blocks: `draw_filter_type` (drops HP/BR for the delay responses), `draw_order_block`, `draw_delay_order_block`, `draw_frequency_block` (+ delay anchor / τ₀ for delay LP), `draw_gain_block`, `draw_ripple_block`, `draw_delay_block`, `draw_modifications_block`, `validate_filter_specs`; `_mem_widget` = keyed widget whose value survives being hidden; `design_control(key, variant)` = keyed container styled as a design-control box (FS-001; CSS in `app.py` targets `st-key-dctl_*` blue / `st-key-dcsel_*` amber), used by all tabs |
-| `topology_tab.py` | 68K | Tab 4 "Topology": per-section hardware solver UI, convergence settings, results table, schematics. `render_topology_tab()` entry. Lines ~1-160 = helpers; ~220-510 = job management; ~510-800 = results rendering; ~800-880 = 1st-order; ~880-1150 = `_render_section`; ~1150-1290 = `_render_overall` cascade; ~1294 = `render_topology_tab` |
-| `response_tab.py` | 24K | Tab 5 "Resulting Response": ideal vs realized Bode overlay, Monte Carlo. `render_response_tab()` entry |
+| `topology_tab.py` | 68K | Tab 3 "Topology": per-section hardware solver UI, convergence settings, results table, schematics. `render_topology_tab()` entry. Lines ~1-160 = helpers; ~220-510 = job management; ~510-800 = results rendering; ~800-880 = 1st-order; ~880-1150 = `_render_section`; ~1150-1290 = `_render_overall` cascade; ~1294 = `render_topology_tab` |
+| `response_tab.py` | 24K | Tab 4 "Resulting Response": ideal vs realized Bode overlay, Monte Carlo. `render_response_tab()` entry |
 | `schematic_svg.py` | 28K | SVG schematic annotation & rendering: `render_svg()`, `build_annotations()`, `download_buttons()` |
 | `hw_plots.py` | 20K | Hardware-level Bode/phase/GD plots, Monte Carlo engine: `monte_carlo()`, `bode_figure()` |
 | `launcher.py` | 8K | Desktop launcher (exe/port/browser); points `FILTERSYNTHESIZER_SVG_DIR` / `FILTERSYNTHESIZER_OPAMP_FILE` at the exe-adjacent user-editable copies |
@@ -92,17 +92,17 @@ Streamlit app for analog active-filter design: spec → poles/zeros → biquad c
 |---|---|
 | 1-51 | Imports, process pool |
 | 53-134 | Band-reject gain equalization helpers (`_stage_rho`, `_section_peak_mag`, `_equalize_dc_hf_ks`) |
-| 136-248 | Page config, CSS (block 7 = FS-001 design-control box styles) |
-| 253-290 | **Sidebar** — response, filter type, order, freq, gain, ripple, delay specs, modifications |
-| 292-435 | **Delay responses (FS-006): order / corner resolution** — `select_delay_order` (From specs), derived corner under the τ₀ anchor, BP fold check; `_render_delay_summary` and `_render_ems_readout` (FS-021) for Tab 1 |
-| 437-461 | Main canvas title, validation, 5-tab creation |
-| 463-788 | **Section 1: Engine run** — background workers for LP/HP/BP/BR synthesis (L514-536: FS-021 Equiripple Magnitude Stopband mode state — `ems_ok`/`ems_on`/`ems_m`, Active-row defaults, pins parked/restored), result unpacking, notch-grid display mapping |
-| 790-955 | Report snapshot (`report_spec` rows incl. delay rows, detail windows) |
-| 957-1289 | **Tab 1: Response Plots** (tab_plots) — magnitude, passband detail, group-delay detail (delay responses), phase/GD, probes, manual notch grid (delay LP: Equiripple Magnitude Stopband checkbox, Active column, readout) |
-| 1292-1455 | **Tab 2: Roots & TF** (tab_roots) — zero/pole tables, LaTeX TF display, coefficient table |
-| 1457-1976 | **Tab 3: Biquad Pairing** (tab_pairing) — mnemoscheme (in the `pair_box` design-control box), stage gain distribution, per-stage TF details |
-| 1978-1979 | **Tab 4: Topology** → delegates to `render_topology_tab()` |
-| 1981-1982 | **Tab 5: Response** → delegates to `render_response_tab()` |
+| 136-290 | Page config, CSS (block 7 = FS-001 design-control box styles; 7b = FS-003/FS-004 compact tabs, scoped to the `rp_plots`/`rp_roots` (Response Plots, + grey frame on `rp_roots`) and `bp_body` (Biquad Pairing) containers; 8 = FS-002 notch-box gap) |
+| 298-334 | **Sidebar** — response, filter type, order, freq, gain, ripple, delay specs, modifications |
+| 336-479 | **Delay responses (FS-006): order / corner resolution** — `select_delay_order` (From specs), derived corner under the τ₀ anchor, BP fold check; `_render_delay_summary` and `_render_ems_readout` (FS-021) for Tab 1 |
+| 481-504 | Main canvas title, validation, 4-tab creation |
+| 506-832 | **Section 1: Engine run** — background workers for LP/HP/BP/BR synthesis (L514-536: FS-021 Equiripple Magnitude Stopband mode state — `ems_ok`/`ems_on`/`ems_m`, Active-row defaults, pins parked/restored), result unpacking, notch-grid display mapping |
+| 833-999 | Report snapshot (`report_spec` rows incl. delay rows, detail windows) |
+| 1001-1317 | **Tab 1: Response Plots** (tab_plots, container `rp_plots`) — magnitude, passband detail, group-delay detail (delay responses), phase/GD, probes, manual notch grid (delay LP: Equiripple Magnitude Stopband checkbox, Active column, readout) |
+| 1319-1478 | **Tab 1, continued: Roots & TF** (tab_plots, container `rp_roots`; FS-003) — Domain Scale + units radio (sets `scale_type` / `map_unit_choice`; Biquad Pairing uses its own `unit_pair`), grey frame (CSS 7b), Root Locations expander (pole/zero tables + K), Pole-Zero Map expander, H(s) expander with form radio (`tf_form_roots`) |
+| 1480-1996 | **Tab 2: Biquad Pairing** (tab_pairing, container `bp_body`) — mnemoscheme (in the `pair_box` design-control box), stage gain distribution, per-stage TF details |
+| 1998-2000 | **Tab 3: Topology** → delegates to `render_topology_tab()` |
+| 2002-2003 | **Tab 4: Response** → delegates to `render_response_tab()` |
 
 ---
 
@@ -115,8 +115,8 @@ Sidebar specs
       (Bessel / Equiripple Delay: delay_solvers.design_delay_lp / synthesize_delay_bp; the
        order may come from app.py's resolution step via delay_solvers.select_delay_order)
   → pairing_utils.auto_pair_stages() → stages list
-  → [Tab 1-3: plots, roots, pairing in app.py]
-  → [Tab 4: topology_tab]
+  → [Tab 1-2: plots + roots, pairing in app.py]
+  → [Tab 3: topology_tab]
     → topology_tab.section_kind() → pairing_utils.family_from_section() → solver kind
     → tf_derivation_v2.get_cases() → symbolic TFs
     → solvability_probe.assess() → feasibility
@@ -125,7 +125,7 @@ Sidebar specs
     → discrete_snapper.snap_to_hardware() → E-series BOM
     → scoring.score_solution() → ranked results
     → schematic_svg.render_svg() → annotated circuit
-  → [Tab 5: response_tab]
+  → [Tab 4: response_tab]
     → hw_plots.monte_carlo() → statistical spread
     → hw_plots.bode_figure() → ideal vs realized overlay
 ```

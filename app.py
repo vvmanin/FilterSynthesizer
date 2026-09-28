@@ -243,6 +243,40 @@ st.markdown("""
         background: rgba(214, 142, 26, 0.07);
     }
 
+    /* 7b. FS-003 / FS-004 compact tabs -- Response Plots (containers
+          rp_plots, rp_roots) and Biquad Pairing (bp_body): tighter block
+          gap, heading padding and alert padding; font sizes unchanged.
+          Placed before 8. so the notch box keeps its own tighter gap. */
+    [class*="st-key-rp_"], .st-key-bp_body,
+    [class*="st-key-rp_"] [data-testid="stVerticalBlock"]:not(.st-key-dctl_notch),
+    .st-key-bp_body [data-testid="stVerticalBlock"] {
+        gap: 0.5rem;
+    }
+    [class*="st-key-rp_"] h4, .st-key-bp_body h4 {
+        padding-top: 0.35rem;
+        padding-bottom: 0.4rem;
+    }
+    .st-key-bp_body h5 {           /* "Section N" headings */
+        padding-top: 0.5rem;
+        padding-bottom: 0.2rem;
+    }
+    [class*="st-key-rp_"] [data-testid="stAlertContainer"],
+    .st-key-bp_body [data-testid="stAlertContainer"] {
+        padding: 0.5rem 0.9rem;
+    }
+    /* The folded-in Roots & TF sections: plain grey frame -- neutral
+       colour, uniform 1px, no tint, so it does not read as a blue/amber
+       design-control box (block 7). */
+    .st-key-rp_roots {
+        border: 1px solid rgba(128, 128, 128, 0.45);
+        border-radius: 0.5rem;
+        padding: 0.6rem 0.9rem 0.7rem 0.9rem;
+    }
+    .st-key-rp_roots:not(:has(h4)) {   /* no engine result -> no empty frame */
+        border: none;
+        padding: 0;
+    }
+
     /* 8. FS-002 compact Response Plots: the Manual Notch box stacks one
           row per notch -- halve the 1rem block gap and drop the unit
           label's paragraph margin (fonts unchanged). */
@@ -459,9 +493,8 @@ if not is_valid:
     st.stop()
 
 # Tabs
-tab_plots, tab_roots, tab_pairing, tab_topology, tab_response = st.tabs([
-    "📊 Response Plots", 
-    "🔢 Roots & Transfer Function", 
+tab_plots, tab_pairing, tab_topology, tab_response = st.tabs([
+    "📊 Response Plots",   # FS-003: Roots & Transfer Function folded in at its end
     "🧱 Biquad Pairing & Cascading",
     "⚙️ Topology",
     "📉 Resulting Response & Schematic"
@@ -965,7 +998,7 @@ if engine_results:
     else:
         st.session_state["report_passbands"] = [("Passband", _lo, _hi)]
 
-with tab_plots:
+with tab_plots, st.container(key="rp_plots"):   # key -> CSS 7b. (compact)
     # --- A. MAIN BODE PLOTS ---
     st.markdown("#### Magnitude Response")
     
@@ -1284,15 +1317,19 @@ with tab_plots:
                     st.info("Order is too low to support finite transmission zeros.")
                 
 # ------------------------------------------------------------
-# 3. RENDER TAB: ROOTS & TRANSFER FUNCTION
+# 3. RESPONSE PLOTS, CONTINUED: ROOTS & TRANSFER FUNCTION (FS-003)
+#    Formerly its own tab. Order: Domain Scale (drives everything below),
+#    Root Locations + K, Pole-Zero Map (expander), H(s) (expander + form radio).
+#    The Biquad Pairing tab sets its own units (unit_pair); it does not read these.
 # ------------------------------------------------------------
-with tab_roots:
+with tab_plots, st.container(key="rp_roots"):
     if engine_results:
-        # --- UI CONTROLS ---
-        col_scale, col_units = st.columns([1, 1])
+        st.markdown("#### Roots & Transfer Function")
+        # --- (1) DOMAIN SCALE: map, root tables, K and H(s) all follow it ---
+        col_scale, col_units = st.columns([1, 1], vertical_alignment="center")
         with col_scale:
             scale_type = st.radio("Domain Scale", ["Normalized", "Denormalized"], horizontal=True, key="scale_roots")
-            
+
         with col_units:
             if scale_type == "Normalized":
                 if filter_type in ["Bandpass", "Band-Reject"]:
@@ -1302,8 +1339,6 @@ with tab_roots:
                 map_unit_choice = "rad/s"
             else:
                 map_unit_choice = st.radio("Pole-Zero Map Units", ["rad/s", "Hertz"], horizontal=True, key="unit_roots")
-                
-        st.markdown("---")
 
         # --- DATA TRANSLATION MATH ---
         p_phys_rad = engine_results['poles']
@@ -1336,26 +1371,7 @@ with tab_roots:
             map_plot_roots = (p_disp, z_disp)
             map_unit_label = table_unit
 
-        # --- POLE-ZERO MAP ---
-
-        # --- POLE-ZERO MAP ---
-        st.markdown("#### Pole-Zero Map")
-        col_stretch, col_slider = st.columns([1, 2])
-        with col_stretch:
-            stretch_axis = st.checkbox("Stretch Real Axis", value=False)
-        with col_slider:
-            if stretch_axis:
-                stretch_factor = st.slider("Magnification", min_value=0.25, max_value=10.0, value=1.0, step=0.125, label_visibility="collapsed")
-            else:
-                stretch_factor = 1.0
-
-        fig_pz = plot_pole_zero_map(map_plot_roots[0], map_plot_roots[1], scale_type, map_unit_label, stretch_factor)
-        st.plotly_chart(fig_pz, use_container_width=True, key="pz_map_chart")
-        st.markdown("---")
-
-        # --- DATA TABLES ---
-        st.markdown("#### Root Locations")
-        
+        # --- (2) ROOT LOCATIONS (expander; tables + K) ---
         def format_roots_to_df(roots_array, unit_str):
             if len(roots_array) == 0:
                 return pd.DataFrame({"Real Part": [], "Imaginary Part (± j)": [], "Unit": []})
@@ -1368,34 +1384,42 @@ with tab_roots:
                 })
             return pd.DataFrame(data)
 
-        col_tbl_p, col_tbl_z = st.columns(2)
-        with col_tbl_p:
-            st.markdown("**Poles**")
-            st.dataframe(format_roots_to_df(p_disp, table_unit), hide_index=True, use_container_width=True)
+        with st.expander("Root Locations", expanded=False):
+            col_tbl_p, col_tbl_z = st.columns(2)
+            with col_tbl_p:
+                st.markdown("**Poles**")
+                st.dataframe(format_roots_to_df(p_disp, table_unit), hide_index=True, use_container_width=True)
             
-        with col_tbl_z:
-            st.markdown("**Zeros**")
-            st.dataframe(format_roots_to_df(z_disp, table_unit), hide_index=True, use_container_width=True)
+            with col_tbl_z:
+                st.markdown("**Zeros**")
+                st.dataframe(format_roots_to_df(z_disp, table_unit), hide_index=True, use_container_width=True)
 
-        st.markdown("---")
-        
-        # --- GAIN CONSTANT K ---
-        degree_diff = len(p_disp) - len(z_disp)
-        _ku = ("Hz" if map_unit_choice == "Hertz" else "rad/s") if scale_type == "Denormalized" else "norm rad/s"
-        if degree_diff == 0:   k_unit_str = "(V/V) [Dimensionless]"
-        elif degree_diff == 1: k_unit_str = f"({_ku})"
-        else:                  k_unit_str = f"({_ku})^{degree_diff}"
+            # --- GAIN CONSTANT K ---
+            degree_diff = len(p_disp) - len(z_disp)
+            _ku = ("Hz" if map_unit_choice == "Hertz" else "rad/s") if scale_type == "Denormalized" else "norm rad/s"
+            if degree_diff == 0:   k_unit_str = "(V/V) [Dimensionless]"
+            elif degree_diff == 1: k_unit_str = f"({_ku})"
+            else:                  k_unit_str = f"({_ku})^{degree_diff}"
             
-        st.metric(label="System Gain Constant (K)", value=f"{k_disp:+.6e}", delta=k_unit_str, delta_color="off")
-        st.markdown("---")
+            st.metric(label="System Gain Constant (K)", value=f"{k_disp:+.6e}", delta=k_unit_str, delta_color="off")
+
+        # --- (3) POLE-ZERO MAP (expander; units come from Domain Scale) ---
+        with st.expander("Pole-Zero Map", expanded=False):
+            col_stretch, col_slider = st.columns([1, 2])
+            with col_stretch:
+                stretch_axis = st.checkbox("Stretch Real Axis", value=False)
+            with col_slider:
+                if stretch_axis:
+                    stretch_factor = st.slider("Magnification", min_value=0.25, max_value=10.0, value=1.0, step=0.125, label_visibility="collapsed")
+                else:
+                    stretch_factor = 1.0
+
+            fig_pz = plot_pole_zero_map(map_plot_roots[0], map_plot_roots[1], scale_type, map_unit_label, stretch_factor)
+            st.plotly_chart(fig_pz, use_container_width=True, key="pz_map_chart")
 
         # ==========================================================
-        # TRANSFER FUNCTION GENERATION
+        # (4) TRANSFER FUNCTION H(s): one expander, form picked by radio
         # ==========================================================
-        st.markdown("#### Transfer Function H(s)")
-        if scale_type == "Denormalized":
-            st.caption(f"*Frequencies expressed in {'Hz' if map_unit_choice == 'Hertz' else 'rad/s'}*")
-
         # 1. Clean numerical fuzz & build monic arrays
         clean_p = clean_roots(p_disp)
         clean_z = clean_roots(z_disp)
@@ -1406,63 +1430,67 @@ with tab_roots:
         # Define k_latex globally here so all forms can use the beautiful scientific notation
         k_latex = format_latex_val(k_disp, scale_type)
 
-        # --- FORM 1: Expanded (K Outside) ---
-        with st.expander("Expanded Form (Isolated Gain Constant)", expanded=True):
-            num_latex_1 = poly_to_latex(num_monic, scale_type)
+        with st.expander("Transfer Function H(s)", expanded=False):
+            tf_form = st.radio("Form", ["Expanded (Isolated Gain)", "Expanded (Distributed Gain)",
+                                        "Factored (Cascaded Biquads)"],
+                               horizontal=True, key="tf_form_roots", label_visibility="collapsed")
+            if scale_type == "Denormalized":
+                st.caption(f"*Frequencies expressed in {'Hz' if map_unit_choice == 'Hertz' else 'rad/s'}*")
+
             den_latex_1 = poly_to_latex(den_monic, scale_type)
-            
-            tf_1 = f"H(s) = {k_latex} \\cdot \\frac{{{num_latex_1}}}{{{den_latex_1}}}"
-            st.latex(tf_latex(poly_to_latex_lines(num_monic, scale_type),
-                              poly_to_latex_lines(den_monic, scale_type),
-                              k_latex=k_latex))
-            st.code(tf_1, language="latex")
-            
-            st.dataframe(build_coeff_table(num_monic, den_monic, k_disp, scale_type, include_k=True), use_container_width=True)
 
-        # --- FORM 2: Expanded (K Distributed) ---
-        with st.expander("Expanded Form (Distributed Gain Constant)", expanded=False):
-            num_dist = num_monic * k_disp
-            num_latex_2 = poly_to_latex(num_dist, scale_type)
-            
-            tf_2 = f"H(s) = \\frac{{{num_latex_2}}}{{{den_latex_1}}}"
-            st.latex(tf_latex(poly_to_latex_lines(num_dist, scale_type),
-                              poly_to_latex_lines(den_monic, scale_type)))
-            st.code(tf_2, language="latex")
-            
-            st.dataframe(build_coeff_table(num_dist, den_monic, k_disp, scale_type, include_k=False), use_container_width=True)
+            if tf_form == "Expanded (Isolated Gain)":
+                # --- FORM 1: Expanded (K Outside) ---
+                num_latex_1 = poly_to_latex(num_monic, scale_type)
+                
+                tf_1 = f"H(s) = {k_latex} \\cdot \\frac{{{num_latex_1}}}{{{den_latex_1}}}"
+                st.latex(tf_latex(poly_to_latex_lines(num_monic, scale_type),
+                                  poly_to_latex_lines(den_monic, scale_type),
+                                  k_latex=k_latex))
+                st.code(tf_1, language="latex")
+                
+                st.dataframe(build_coeff_table(num_monic, den_monic, k_disp, scale_type, include_k=True), use_container_width=True)
 
-        # --- FORM 3: Factored (Biquad) Form ---
-        with st.expander("Factored Form (Cascaded Biquads)", expanded=False):
-            num_factored = roots_to_biquad_latex(clean_z, scale_type)
-            den_factored = roots_to_biquad_latex(clean_p, scale_type)
-            
-            tf_3 = f"H(s) = {k_latex} \\cdot \\frac{{{num_factored}}}{{{den_factored}}}"
-            st.latex(tf_latex(roots_to_biquad_lines(clean_z, scale_type),
-                              roots_to_biquad_lines(clean_p, scale_type),
-                              k_latex=k_latex))
-            st.code(tf_3, language="latex")
-            
-            # Reusing the Form 1 Monic table for reference
-            st.dataframe(build_coeff_table(num_monic, den_monic, k_disp, scale_type, include_k=True), use_container_width=True)
+            elif tf_form == "Expanded (Distributed Gain)":
+                # --- FORM 2: Expanded (K Distributed) ---
+                num_dist = num_monic * k_disp
+                num_latex_2 = poly_to_latex(num_dist, scale_type)
+                
+                tf_2 = f"H(s) = \\frac{{{num_latex_2}}}{{{den_latex_1}}}"
+                st.latex(tf_latex(poly_to_latex_lines(num_dist, scale_type),
+                                  poly_to_latex_lines(den_monic, scale_type)))
+                st.code(tf_2, language="latex")
+                
+                st.dataframe(build_coeff_table(num_dist, den_monic, k_disp, scale_type, include_k=False), use_container_width=True)
 
-    else:
-        st.info("Run a synthesis setup in the sidebar to generate Roots & Transfer Function data.")
+            else:
+                # --- FORM 3: Factored (Biquad) Form ---
+                num_factored = roots_to_biquad_latex(clean_z, scale_type)
+                den_factored = roots_to_biquad_latex(clean_p, scale_type)
+                
+                tf_3 = f"H(s) = {k_latex} \\cdot \\frac{{{num_factored}}}{{{den_factored}}}"
+                st.latex(tf_latex(roots_to_biquad_lines(clean_z, scale_type),
+                                  roots_to_biquad_lines(clean_p, scale_type),
+                                  k_latex=k_latex))
+                st.code(tf_3, language="latex")
+                
+                # Reusing the Form 1 Monic table for reference
+                st.dataframe(build_coeff_table(num_monic, den_monic, k_disp, scale_type, include_k=True), use_container_width=True)
 
 # ------------------------------------------------------------
 # 4. RENDER TAB: BIQUAD PAIRING & CASCADING (VISUAL MNEMOSCHEME)
 # ------------------------------------------------------------
-with tab_pairing:
+with tab_pairing, st.container(key="bp_body"):   # key -> CSS 7b. (FS-004 compact)
     if engine_results:
         # --- UI CONTROLS ---
         map_unit_choice = st.radio(
             "Hardware Target Units", ["rad/s", "Hertz"], horizontal=True, key="unit_pair"
         )
-        
+
         # Force Denormalized math for the entire hardware pairing tab!
         scale_type_pair = "Denormalized"
-        
-        st.markdown("---")
-        
+
+        # FS-004: no horizontal rules in this tab; headings separate sections.
         st.markdown("#### Interactive Mnemoscheme: Stage Assignments")
 
         # --- MANUAL ROUTING MEMORY REGISTERS ---
@@ -1499,7 +1527,6 @@ with tab_pairing:
                 value=st.session_state.absorb_checked
             )
             do_absorb = st.session_state.absorb_checked
-            pair_box.markdown("---")
         else:
             # If no real poles exist, force absorption to False for the engine
             do_absorb = False
@@ -1579,12 +1606,9 @@ with tab_pairing:
                 st.session_state.selected_brick_id = None
                 st.rerun()
 
-        # --- FIXED: Isolate the unit labels and axis scaling from tab_roots ---
-        if scale_type == "Normalized":
-            map_unit_label_p = "rad/s"
-        else:
-            map_unit_label_p = "Hz" if map_unit_choice == "Hertz" else "rad/s"
-
+        # Axis unit label = map_unit_label_p, set with plot_scale above from this
+        # tab's own Hardware Target Units radio (the tab is always Denormalized;
+        # the Response Plots Domain Scale must not override it).
         p_base_scaled = engine_results['poles'] / plot_scale
         z_base_scaled = engine_results['zeros'] / plot_scale
         
@@ -1731,7 +1755,6 @@ with tab_pairing:
         # ==========================================================
         # 7. STAGE GAIN DISTRIBUTION & HARDWARE SECTIONS
         # ==========================================================
-        st.markdown("---")
         st.markdown("#### Hardware Stage Parameters")
         
         # Only run the math if there are no floating zeros!
@@ -1882,11 +1905,10 @@ with tab_pairing:
                     'peak_mag': (float(peak_mags[_i])
                                  if _i < len(peak_mags) else None)})
             st.session_state['report_pairing'] = {'stages': _rep_stages}
-            
-            st.markdown("---")
-            
+
             # --- 7B. Render the Minimalist Sections ---
-            st.caption(f"*Frequencies expressed in {map_unit_choice}*")
+            # FS-004: body-size note (was st.caption), still italic
+            st.markdown(f"*Frequencies expressed in {map_unit_choice}*")
                 
             for idx, stage in enumerate(st.session_state.stage_routing):
                 st.markdown(f"##### Section {stage['stage_num']}")
@@ -1970,7 +1992,6 @@ with tab_pairing:
                 table_data["Peak Mag (V/V)"] = [f"{s_peak:.4f}"]
                 
                 st.dataframe(pd.DataFrame(table_data), hide_index=True, use_container_width=False)
-                st.markdown("<br>", unsafe_allow_html=True)
 
 with tab_topology:                               # the missing block
     render_topology_tab()
