@@ -1,0 +1,912 @@
+# FS-008 — LTspice export (AC + Monte Carlo) — design note
+
+Purpose: the reasoning and the build plan for FS-008. The tool writes LTspice schematics of the
+whole solved cascade: sections in series, op-amps taken from a local library, component values
+from the snapped BOM, and Monte Carlo pre-set from the tool's MC settings. The files open and
+simulate directly. This note is for a coding session with the project open. It records the
+maintainer's decisions (2026-09-27/28), the caveats of generating LTspice schematics, how each
+caveat is handled, and what has to be checked in LTspice itself.
+
+No code was written for this note. LTspice was not available where it was planned, so every
+LTspice behaviour below that is not certain is marked **[verify]** and listed again in §15.2.
+Phase 1b (§14) runs those checks before any output is trusted.
+
+Conventions:
+- A *row* is the snapped Solution dict of one section, `st.session_state.bom_picks[n]`. It holds
+  R in MΩ and C in µF (`tf_symbols.py:33-35`).
+- The *IR* is the netlist intermediate representation introduced here (§2).
+- A *template* is a hand-drawn LTspice `.asc` file read by the exporter (§3).
+- A *dummy* is a template that holds exactly one op-amp (§5).
+- *Superset* means one family's full nodal model. Its cells are gated subsets of it.
+- Line numbers refer to HEAD `ffc8067`. Re-grep them before editing.
+
+---
+
+## 0. Decisions and answers (summary)
+
+| Question | Answer (section) |
+|---|---|
+| Direction | The tool **exports** and LTspice opens the files (answers the ROADMAP open question). |
+| Netlist or schematic? | **Schematic `.asc`** for the user. Internally a **netlist IR** is the single source of truth. It is checked numerically against every cell's transfer function, and it drives the drawing, the self-check and the fallback (§2). |
+| Where does the drawing come from? | **Hybrid** (*maintainer decision*). One **superset template per cell family**, hand-drawn in LTspice. Each variant is derived from it by gating. An exact-variant template may override the superset. Cells without a template get an **auto-layout** from the IR, so every cell exports from day one (§3, §4). |
+| Optional parts and parts replaced by a short | Must be **reliable** (*maintainer requirement*). The IR marks each absent part `open` or `short` per variant. The transform deletes open parts and replaces shorted parts by a wire. The exported drawing's connectivity is re-extracted and must equal the IR; otherwise that section falls back to auto-layout. A wrong schematic is never written (§4). |
+| File scope | **One file holds the whole cascade in series**, so inter-stage loading is simulated. Sections are stacked **in a column**: section 1 at the top, the last one at the bottom. Sections connect **by net labels** (*maintainer decision*, §4.5). |
+| Op-amps | **A local op-amp library of dummy `.asc` files**, one op-amp each. The op-amp is either an LTspice built-in part, a part with an external `.lib`, or a model in a directive text block. The export **copies each section's op-amp instance and its directives from the dummy**. The user can swap op-amps in the output (*maintainer decision*). UniversalOpamp is not offered, because it adds nothing over the tool's own model (*maintainer*). Recommendation: an **FS generic** dummy with the tool's A_ol/GBWP/Ro model, used for Ideal, Custom and unmapped parts and for validation (§5). |
+| Mapping from a tool part to a dummy | The `opamp_library` field `spice_model` holds the dummy's file stem. It is null today, and then FS generic is used (§5.2). |
+| Supply | The **total supply Vs is entered in the tool**. It is drawn as **two sources of Vs/2**, positive and negative, with GND at the common node (*maintainer decision*, §6). |
+| Inter-stage loading | **Real cascade only** (*maintainer decision*). The tool's realized curve ignores loading. The difference is explained and validated against an MNA solve of the loaded cascade (§10). |
+| One file or several? | **Several.** In v1 these are `<spec>_AC.asc` (nominal) and `<spec>_AC_MC.asc` (Monte Carlo), zipped with a README. There are two reasons. LTspice runs one analysis type per simulation. And `mc()` / `gauss()` never return the nominal value, even with one run or without `.step` (*maintainer's reasoning, confirmed*, §7). |
+| Transient | **Not in v1.** A follow-up item, **FS-026**, comes after FS-024 (the tool's own time-domain evaluation), which supplies the window and presets. It uses a step (mandatory) and an impulse derived from the small-signal step. There is no Monte Carlo in the time domain (*maintainer*). v1 already builds the hooks (§11). |
+| MC mapping | Gaussian `nom*(1+gauss(tol/3))` or Uniform `nom*(1+flat(tol))`, through one `.func`. There is one `.param` per resistor band plus one for caps, and `.step param run 1 N 1` with `.save V(out)`. Band membership comes from `hw_plots._r_tol_frac` itself (§9). |
+| Designators | `R201` = section 2, R1. Split caps are `C202A`/`C202B`, op-amps `U201…U203`, and AM/BP3 aliases R0/C0 become `R200`/`C200` (*recommendation*, open question §17). |
+| Where in the UI | Resulting Response tab, in a block after the Monte Carlo settings: Vs, the op-amp→SPICE model table and a zip download (§13). |
+
+---
+
+## 1. What FS-008 is — and is not
+
+FS-008 is **Tier D post-processing**. It reads what the Resulting Response tab already assembles:
+- `sections_data`, which holds the row, the section spec `sec` and `eval_opamp` per section (`response_tab.py:390`);
+- the MC settings mirror `mc_params` (`response_tab.py:482`);
+- the op-amp choice per section, `hw_opamp_choice_{n}` (`_eval_opamp`, `response_tab.py:133`).
+
+It then writes text files. It does not change the engine, pairing, cells, solvers, scoring, the
+TF cache or `verify.py`. Tier B is read only: `tf_derivation_v2.topo_for_name` (L160),
+`derive_nonideal` (L125), `make_response_func` (L266) and `cells_first_order.parse_name` (L51),
+all called from the dev check and from the IR's topo lookup.
+
+v1 is AC nominal and AC Monte Carlo. Transient is FS-026 (§11), noise is FS-009, and QSpice is
+FS-010 (§16).
+
+---
+
+## 2. Architecture: one netlist IR, several consumers
+
+### 2.1 Why an IR
+
+The code has **no machine-readable netlist**. Each `cells_*.py` writes hand-coded sympy KCL, one
+equation per node, over a family superset. Absent parts are removed by `_gates()`, which sets
+their conductance to 0 (`cells_lp.py:88-99`). Netlists appear only as prose in docstrings
+(`cells_am_core.py:125-127`, `cells_mfb.py:307-309`).
+
+Every consumer in this feature needs connectivity:
+- the template transform (what to delete or short);
+- the export-time self-check;
+- the auto-layout fallback;
+- the validation MNA;
+- later, the `.cir` netlist (FS-010) and noise sources (FS-009).
+
+One table per superset serves all of them.
+
+### 2.2 Content
+
+A section IR is:
+
+```text
+Section IR  = { stage, topology, nodes: [in, out, internal…],
+                parts: [ {key: "R2", kind: R|C, n1, n2, value_ohm|value_f} … ],
+                opamps: [ {slot: "U1", inp, inn, out} … ] }
+Superset    = { parts: [ {key, kind, n1, n2, present(topo), absent_as: open|short} … ],
+                opamps: [ {slot, inp, inn, out} ], in_node, out_node(topo) }
+```
+
+The following conventions apply:
+- Node names are the IR node names (`a, b, c, m, out` for Sallen-Key; `m1, p2, out1…out3, m3`
+  for AM). The section input is `in`.
+- A `short` merges n1 and n2 in the variant (union-find). An `open` drops the part.
+- Split caps expand after gating. When the row has `C2_parallel` (or both `C2a` and `C2b`), `C2`
+  becomes two parts `C2a` and `C2b` on the same nodes. `C1a/C1b` works the same way (AM `-C1s`).
+- A part that is present with a value that is not > 0 (0.0 or None in the row) is an **error**,
+  never a silent open.
+- The op-amp slot is the tool's model: input pins draw no current, and the output is a Thevenin
+  source behind Ro. The IR stores only pins. The model comes from the dummy (§5).
+
+### 2.3 Where the tables come from
+
+The tables are written by hand, one per superset, **read off the KCL** of the non-ideal model
+(`build_nonideal`). The non-ideal model keeps every node, unlike the ideal path, which merges V−
+into V+. The `present` / `absent_as` rules are copied from `_gates` and the order branches.
+
+Two real examples show why the IR must distinguish open from short:
+- **Open.** An absent `R6` in the Sallen-Key LP (`g6 = 0` unless the gain is "gained") and an
+  absent `R7` (`g7 = 0`) mean the part is not there.
+- **Short.** In a unity-gain LP without a notch, `shorted_r5` is set: the equation becomes
+  `Vm − V2 = 0` (`cells_lp.py:212-213`), so R5 is a wire. In a 2nd-order cell the prefilter goes
+  away with `Va → V1` (`cells_lp.py:231-232`). That means R1 is a short and C1 is open.
+
+Superset count: LP, HP, notch and BP Sallen-Key; LP, HP, BP and notch MFB (with the MFB2 / LS
+structures inside them); the shared Ackerberg-Mossberg core (`am_eqs`, covering 20 cells through
+`kind` / `tap` / `c1_split`); and first order (ni / inv). That is **about 13–16 tables of
+roughly 6–12 lines each**, against 92 variants. Correctness does not rest on reading the tables
+carefully. **§15.1 check 1 proves every variant numerically.**
+
+Rejected alternative: extracting the netlist automatically from the KCL. A two-terminal
+admittance y between nodes p and q stamps +y on (p,p) and (q,q) and −y on (p,q) and (q,p), so a
+sympy pass could recover it. It is attractive, because no table would need upkeep. But it is
+fragile against the actual equation shapes: fused terms, `Vm` substitutions, the op-amp term
+divided by Ro, and AM `R8 = R7` in the ideal path. A wrong extraction would also be as silent as
+a wrong table, while a table plus the numeric check is transparent. The idea can come back later
+if the table count grows.
+
+### 2.4 Placement
+
+The new module is **`spice_cells.py`**, Tier D with no Streamlit. It holds the IR tables,
+`section_ir(row)` (built on `topo_for_name` / `FO.parse_name`), a **small complex MNA solver
+`mna_ac(ir, w, opamp_params)`** and a DC-path check. The MNA serves the dev check and the
+README's "expected values" (§8.3). It is about 80 lines of numpy.
+
+Tier B stays untouched, so there is no CONTRACTS §1 change and no cache bump. The cost is that a
+new cell now also needs an IR entry. That goes into the CLAUDE.md new-cell checklist, and the
+check fails for a registered cell without an entry, so nobody can forget it.
+
+---
+
+## 3. Templates: what they can and cannot do
+
+### 3.1 Why op-amp templates plus programmatic passives alone does not scale
+
+The first sketch said "copy the op-amp from a template, generate the passives and wires from the
+topology knowledge behind the SVG anchors". It does not scale, for three reasons:
+- **The SVG anchors are label positions only.** They are `(x, y, align)` per designator in the
+  827×583 viewBox (`schematic_svg.py:62-522`). They hold no pins, no wires and no orientation,
+  so nothing in them can be turned into LTspice wiring.
+- **The op-amp is the small part.** Drawing passives and wires programmatically means
+  hand-coding coordinates for every variant. That is 92 variants (80 registry cells plus 12
+  first-order), with no visual feedback while coding them. It is the same work as drawing them,
+  only blind.
+- **Pin positions live in LTspice's `.asy` files**, not in the `.asc`. Any programmatic wiring
+  needs them per symbol and per orientation.
+
+The instinct to use dummy `.asc` files is right. Their job is to carry what code cannot guess:
+exact SYMBOL/SYMATTR text, pin geometry, the header and the encoding. They do that in three
+roles.
+
+### 3.2 Three kinds of template file (all plain LTspice-saved `.asc`)
+
+1. **Symbol calibration, `symbols.asc`.** One `res`, `cap`, `voltage`, `bv` and `opamp2`
+   in every orientation used. Each pin is stubbed by a short wire to a FLAG named
+   `<symbol>_<orient>_<pin>`. Parsing it gives pin offsets per orientation, LTspice's rotation
+   convention, the exact SYMBOL line text and the file header. It is verified once with LTspice's
+   own netlister: every device must land on its named nets and no `N00x` net may appear (§15.2).
+   The `bv` (B-source) entry is for FS-026 (§11.4).
+2. **Cell templates** (§4). There is one per superset, and optionally one per exact variant.
+   - InstNames are the tool's internal keys (`R1`, `C2`, `C2b`, `U1`).
+   - Port FLAGs are `IN` and `OUT`, and the supply FLAGs are `VCC` and `VEE`.
+   - Each internal net carries a FLAG with its IR node name. That makes LTspice's own netlist of
+     the template directly comparable to the IR.
+   - The op-amp placeholder is an `opamp2`.
+   - Split caps get a parallel slot (`C2b`).
+3. **Op-amp dummies** (§5). There is one per SPICE model, and together they form the local op-amp
+   library.
+
+### 3.3 Lookup per section
+
+The exporter tries, in order:
+1. `cells/<topology>.asc`, an exact-variant override. The maintainer draws one where gating a
+   superset looks awkward.
+2. `cells/<superset>.asc` with gating.
+3. **Auto-layout** from the IR (§4.4).
+
+The UI shows which one each section used.
+
+### 3.4 Folder and packaging
+
+The folder is `LTspice_Library/` with `symbols.asc`, `cells/` and `opamps/`. It follows the SVG
+pattern:
+- It is bundled in `FilterSynthesizer.spec` `datas`.
+- `build.bat` copies it next to the exe as a user-editable copy.
+- `launcher.py` points `FILTERSYNTHESIZER_LTSPICE_DIR` at the exe-adjacent copy, falling back to
+  the bundled one (like `launcher.py:219-237`).
+- User dummies go in a per-user overlay, `%LOCALAPPDATA%\FilterSynthesizer\LTspice_Library\opamps\`,
+  where a file of the same stem overrides a built-in one. That mirrors `opamp_library_user.json`,
+  so the user's own models survive upgrades.
+
+Root `*.py` modules are picked up by the `.spec` glob automatically. Proposed convention for
+CLAUDE.md (like the SVGs): cell templates are hand-drawn in LTspice and are never regenerated or
+reformatted programmatically.
+
+---
+
+## 4. Template transform — optional parts and shorts, reliably
+
+### 4.1 Operations on a cell template, per section
+
+The transform does the following to each section's template:
+1. **Parse** into records: SYMBOL (plus its WINDOW/SYMATTR lines), WIRE, FLAG, IOPIN, TEXT and
+   drawing lines (LINE, RECTANGLE, CIRCLE, ARC). Any unknown record type rejects the template, in
+   the dev check as well.
+2. **Gate.** For each IR part that is absent in this variant:
+   - `open` means removing the SYMBOL block;
+   - `short` means removing the SYMBOL block and adding a WIRE between its two pin points (known
+     from `symbols.asc`). R and C pins are collinear along the symbol axis, so one straight
+     segment always suffices.
+3. **Split caps.** Keep or delete the `C1b` / `C2b` slot.
+4. **Prune** dangling wires: repeatedly remove a segment whose endpoint touches no pin, FLAG or
+   other wire. This is cosmetic only, because a dangling stub is electrically harmless.
+5. **Values.** Set SYMATTR Value to the formatted nominal (§12), or to the MC expression (§9).
+6. **Rename.** InstName becomes the stage designator (`R201`). Internal FLAGs become `S2_a`,
+   `S2_m`, and so on. `IN` / `OUT` become the cascade nets of §4.5.
+7. **Op-amps.** Replace each placeholder with the section's dummy (§5.4).
+8. **Strip** the template's own TEXT directives. The exporter owns all directives. It adds a
+   section title comment instead.
+9. **Translate** into the column (§4.5).
+
+### 4.2 Connectivity model
+
+To re-extract nets from geometry, the exporter needs LTspice's joining rules:
+- wire endpoints that coincide connect;
+- an endpoint lying on another wire's interior connects (a T-junction);
+- a pin connects when a wire endpoint sits on it;
+- FLAGs with the same name connect.
+
+Two points are **[verify]**: whether a pin lying on the interior of a wire connects, and whether
+two crossing wires stay separate.
+
+The templates are drawn so that neither case arises: every pin gets a wire *endpoint*, and there
+are no crossings. The engine treats either case as an error.
+
+### 4.3 Self-check at export time (the reliability guarantee)
+
+After the transform, the exporter re-extracts the section's nets and compares them with the
+section IR, part by part. Each part must have the same two nets (up to renaming), every op-amp
+pin must be on the right net, and there must be no extra parts. On any mismatch that section
+falls back to auto-layout and the UI shows a warning naming the template. **A schematic whose
+netlist differs from the IR is never written.** The dev check (§15.1) runs the same comparison
+for every template and every variant, so a bad template is caught before release. The export
+check is the second line of defence.
+
+### 4.4 Auto-layout fallback
+
+It is generated from the IR and needs only `symbols.asc`.
+- Parts are placed on a grid: op-amps on the first row, resistors on the next, capacitors below.
+- Every pin gets a short stub to a FLAG carrying its net name.
+- The result is electrically exact and editable in LTspice. It reads like a drawn netlist, not a
+  textbook figure.
+- It is what cells without a template show until their family's template exists.
+- It goes through the same §4.3 self-check.
+
+### 4.5 Column assembly
+
+Sections are placed top to bottom in stage order. Stage order is the physical order that matters
+once loading is real, and it is the Pairing order.
+
+- **Offsets.** Each block is translated by `(0, y_k)`. `y_k` is the running sum of block
+  bounding-box heights plus a 64-unit gap. Offsets are multiples of 16 to stay on LTspice's grid.
+- **Nets.** The input net is `IN` (driven by `VIN`). The output of section k is `S{k}`, and the
+  next section's `IN` port is renamed to `S{k}` too. The last section's output is `OUT`.
+- **Port labels.** Whether IOPIN arrows (`In` / `Out`) can mark the ports in a flat schematic and
+  still join by name is **[verify]**; otherwise plain FLAGs are used.
+- **Titles.** Each block gets a title comment: `;Section 2 - 2LPn-gained  f0=1.234kHz Q=0.707`.
+- **Top of the sheet.** `VIN`, the supply pair `VPOS` / `VNEG` (§6), a `.param` block and the
+  analysis directives go above section 1.
+- **Sheet size.** `SHEET 1 W H` comes from the overall bounding box.
+
+---
+
+## 5. Op-amps: the local library of dummy files
+
+### 5.1 Dummy file contract
+
+A dummy is a normal LTspice-saved `.asc` containing:
+- **Exactly one op-amp SYMBOL**, with any symbol: an LTspice built-in part (for example
+  `Opamps\\LT1001`), the generic `opamp2` with Value set to a subckt name, or a custom `.asy`
+  (see §5.5).
+- **Pin stubs**: a wire from each pin to a FLAG named `INP`, `INN`, `OUT`, `VCC` and `VEE`.
+  3-pin symbols omit the supplies. Extra pins, such as shutdown or compensation, are handled
+  *inside* the dummy (tied to a supply flag, or left open) the way the datasheet requires.
+- **Directives, optional**: TEXT lines `!.lib …`, `!.include …`, or a whole `!.subckt … .ends`
+  block.
+- **Metadata, optional**: a comment TEXT line
+  `;FS: vs_min=4.5 vs_max=36 note=TI model, download from ti.com`.
+- **Nothing else.** Any other element fails the dummy check.
+
+Because the pin positions are *read from the FLAG positions*, the exporter never needs the
+symbol's `.asy` geometry. Any op-amp symbol works.
+
+### 5.2 Mapping a tool part to a dummy
+
+The `opamp_library.json` field `spice_model` (FS-005; null for every part and read by nothing
+today, `opamp_library.py:48`) is defined as **the dummy's file stem**. For example,
+`"TL072": {…, "spice_model": "TL072"}` maps to `opamps/TL072.asc`.
+
+- A part with no mapping, `Custom…` and `Ideal` all use **FS generic** (§5.3). The UI shows the
+  fallback for each section.
+- The export block has a per-section **override selectbox** listing every dummy in the library
+  and the user overlay, so any section can use any model.
+- Filling in `spice_model` for shipped parts is Phase 3 and touches the same JSON as FS-018
+  (provenance fields), so coordinate the two.
+
+### 5.3 FS generic dummy (recommendation)
+
+`opamps/_FS_generic.asc` holds an `opamp2` symbol and a directive text block with **the tool's
+own op-amp model**, `A(s) = A_ol/(1+s·A_ol/(2π·GBWP))` behind Ro (`cells_lp.py:193-194`).
+
+```text
+.subckt FS_OA_<id> inp inn vp vn out
+G1 0 x inp inn 1
+R1 x 0 {A_ol}              ; V(x) = A_ol·(V+ − V−) at DC
+C1 x 0 {1/(2*pi*GBWP)}     ; R1·C1 = A_ol/(2π·GBWP) → pole at GBWP/A_ol
+E1 y 0 x 0 1
+Ro y out {Ro}              ; omitted when Ro < 1 mΩ
+.ends
+```
+
+- **Baked numbers.** The exporter substitutes its own placeholders (`%A_OL%`, `%GBWP%`, `%RO%`,
+  `%ID%`) and writes one subckt per distinct parameter set. It uses no LTspice parameter passing
+  into subckts, so there is no dialect risk.
+- **No supply dependence.** `vp` and `vn` are pins with no elements. They are driven by the
+  supply sources outside, so they do not float. The model is linear with no rails, and the README
+  says so.
+- **Ideal needs clamping.** `IDEAL_PARAMS` (A_ol = 1e12, GBWP = 1e15 Hz, Ro = 1e-6 Ω) would put a
+  1e12 Ω resistor in the matrix. So Ideal maps to A_ol = 1e8, GBWP = 1e12 Hz and no Ro. The
+  deviation from the tool's ideal is about 1e-8 × the noise gain, which is invisible. The dev
+  check asserts it at ≤ 1e-6 dB.
+- **Why ship it**, although the maintainer ruled out "the tool model as a mode":
+  - It is the only model with which LTspice *can* reproduce the tool's numbers, so validation
+    (§15) needs it.
+  - Ideal and Custom picks have no real part behind them.
+  - It fits the maintainer's third dummy form, "a model in a directive text block". It is just
+    one more dummy in the library, labelled *"FS generic (A_ol/GBWP/Ro) — replace with a real
+    model"*.
+
+### 5.4 Putting a dummy into a cell
+
+The cell template has an `opamp2` placeholder per slot, and its pin offsets are known from
+`symbols.asc`. The dummy's port offsets are known from its FLAGs.
+
+- **In place.** If the dummy's port offsets, after applying the placeholder's orientation, equal
+  the placeholder's pin offsets, the dummy's SYMBOL block replaces the placeholder at the same
+  origin and orientation. The template's wires then reach the pins directly. This holds for
+  `opamp2`-shaped symbols and the FS generic dummy.
+- **Label mode.** Otherwise the placeholder is removed and a FLAG goes on each former pin point,
+  carrying that pin's net name. The dummy block (symbol, stubs and FLAGs) is placed beside the
+  cell with its port FLAGs renamed to the same nets. The result is electrically exact but visually
+  looser. This covers built-in parts whose symbol has a different shape or extra pins.
+- The orientation group (R0…R270, M0…M270) is composed onto the dummy's SYMBOL and its
+  wire/flag coordinates are transformed. **[verify]** LTspice's rotation convention using
+  `symbols.asc`.
+- Either way, §4.3 re-checks the result.
+
+### 5.5 Directives, external model files and symbols
+
+- **Directives.** Each dummy's directive TEXT is copied **once per file**, however many sections
+  use it (deduplicated by content).
+- **Relative `.lib` / `.include` paths** resolve relative to the *output* `.asc`, not the dummy.
+  The exporter rewrites them to absolute paths in the library folder. An option, *"Include model
+  files in the zip"*, instead copies the referenced files into the bundle and uses bare names.
+  That is portable to another machine, and it is the user's own local file, so the copy is theirs
+  to make. Missing referenced files are reported before download.
+- **LTspice built-in parts** carry their model link in the symbol (a ModelFile/SpiceModel
+  attribute). Copying the SYMBOL block verbatim keeps it, and nothing else is needed.
+- **Custom `.asy` symbols** are only found by LTspice in its library paths or next to the
+  schematic. Prefer built-in symbols, for example `opamp2` plus a `.lib`. If a dummy uses a custom
+  `.asy`, the zip includes it and the README says to keep it beside the `.asc`.
+
+### 5.6 Licensing
+
+The repo ships only its own text and references:
+- **FS generic** is our own model text.
+- **Built-in ADI dummies** reference the symbol only; the user's LTspice supplies the model.
+- **External-model dummies** hold a `.lib` *reference*, and their `;FS:` note says where to get
+  the file.
+
+Vendor model files are never shipped or embedded by the project. This matches the existing FS-008
+note ("store only the model name"). Encrypted models are never read or embedded; a built-in part
+is used through its symbol.
+
+### 5.7 Swapping later
+
+This is the maintainer's use case. A user replaces an op-amp in the output by
+right-click → Pick New Symbol, or by editing its Value / SpiceModel. Label mode and in-place mode
+both allow this. Labelled nets (`S2_m`, `S2_out`, …) make it easy to rewire a symbol with a
+different shape.
+
+---
+
+## 6. Supply
+
+- **UI.** One **total supply Vs** for the whole cascade.
+- **Netlist.** `.param Vs=<value>`, `VPOS VCC 0 {Vs/2}` and `VNEG 0 VEE {Vs/2}`. GND (`0`) is the
+  midpoint and the signal reference, so single-supply parts see a virtual ground at mid-rail,
+  which is how the tool's model already treats every signal. Editing `Vs` in LTspice changes both
+  sources.
+- **Default.** Use the smallest `vs_max` among the dummies used, when their metadata gives one,
+  otherwise 10 V. The UI warns when Vs is outside any used dummy's `vs_min…vs_max`.
+- **Real models need a sane DC operating point.** The offset times the cascade's DC gain can drive
+  an output into a rail, and then the AC result, a linearization around that point, is
+  meaningless. The AC files carry a commented `;.op` directive, and the README says to run it once
+  and check the section outputs sit near 0 V.
+- **Real models need a DC path from every op-amp input** (bias current). A capacitor-only input
+  node is fine in the tool's model but singular or saturating in SPICE. §15.1 check 2 runs a
+  DC-path analysis over the IR for all 92 cells. Any cell that fails is a real hardware issue, to
+  report rather than patch around.
+
+---
+
+## 7. Files: why separate, and what is in the bundle
+
+**Why separate files:**
+- **One analysis type per simulation.** Several analysis directives in one file force the user to
+  comment and uncomment them by hand.
+- **Random functions are always random** (the maintainer's point). `mc()`, `gauss()` and `flat()`
+  draw on every evaluation, whether there is a single `.step` run or no `.step` at all. So a file
+  with MC expressions can never show the nominal circuit. A multiplier switch
+  (`{nom*(1+mcon*gauss(tol/3))}` with `.param mcon=0`) would work, but it is an edit the user must
+  know to make, and it hides the numeric values behind expressions.
+- **Readable values.** The nominal file shows plain values (`4.99k`, `10n`), which is what a user
+  copies to a BOM or edits.
+- **No extra cost.** The drawing is generated once and reused for every file, so extra files cost
+  nothing and cannot drift apart.
+
+**v1 bundle:** `FS_LTspice_<spec>_<yyyymmdd_hhmm>.zip`, with `<spec>` from `report_spec_short`
+like the PDF. It contains:
+- `<spec>_AC.asc`: nominal values and `.ac`.
+- `<spec>_AC_MC.asc`: MC expressions, `.step`, `.save` and `.meas` (§9).
+- `README.txt`:
+  - what each file is;
+  - the op-amp model per section;
+  - the supply;
+  - the tolerance settings;
+  - how to view group delay and the MC `.meas` table;
+  - how LTspice's result differs from the tool's curve and why (§10);
+  - the expected values (§8.3).
+- The copied model files and `.asy` files, if needed (§5.5).
+
+FS-026 adds `<spec>_TRAN.asc` to the same builder (§11.4).
+
+Rejected alternatives:
+- one file with an `mcon` switch (above);
+- one file with commented alternative directives.
+
+Optional (open question §17): **MC run 1 = nominal**, via
+`.func TOL(nom,tol) {if(run==1, nom, nom*(1+gauss(tol/3)))}`. The nominal trace then sits inside
+the MC plot as step 1 (View → Select Steps). The cost is N−1 random runs instead of N.
+
+---
+
+## 8. AC analysis
+
+### 8.1 Directives
+
+- **Source.** `VIN IN 0 AC 1`, so V(out) *is* H(jω).
+- **Sweep.** `.ac dec <ppd> <fmin> <fmax>` from the tool's grid, `_freq_grid`
+  (`response_tab.py:145-156`): fmin = max(1e-3, 0.1·min f), fmax = 50·max f, over the section f0,
+  fz and f1. There ppd = ⌈600 / log10(fmax/fmin)⌉. For example, a 1 kHz LP (fmin = 100 Hz,
+  fmax = 50 kHz, 2.7 decades) gets about 222 points per decade.
+- **Phase and group delay.** LTspice plots dB and phase by default. Group delay is available from
+  the phase axis (right-click the axis), which Bessel and Equiripple Delay users will want.
+
+### 8.2 Probes
+
+`.meas AC` lines give numbers that can be compared with the tool, not just curves:
+
+```text
+.meas AC G_ref FIND V(out) AT <f_ref>
+.meas AC G_f1  FIND V(out) AT <f1>
+```
+
+- `f_ref` is the passband reference: DC for LP, f0 for BP, the HF passband for HP, and DC for BR.
+- The band edges are `f1` / `f2`.
+- One stopband frequency is `f_s`, when defined.
+- Each line is followed by a comment with **the tool's unloaded prediction** at that frequency.
+
+In the MC file the same `.meas` lines give one value per run. The LTspice log then shows the
+spread and can plot it against `run`. That is the only percentile-like view LTspice offers (§9).
+
+### 8.3 Expected values in the README
+
+When **every** section uses FS generic, the exporter runs `spice_cells.mna_ac` on the *loaded*
+cascade IR (the same netlist LTspice will solve) at the probe frequencies. It prints those
+expected values next to the tool's unloaded values. The user can then check the LTspice run
+without any tooling (§15.2), and the size of the loading effect is visible for every design.
+With real models these rows are omitted, because the models differ.
+
+---
+
+## 9. Monte Carlo
+
+### 9.1 What the tool does (to mirror)
+
+`hw_plots.monte_carlo` (`hw_plots.py:241`):
+- It varies every symbol starting with R or C except Ro. The op-amp stays fixed.
+- **A split cap is one part**: `comp_dict` reads `C2`, the total (`hw_plots.py:27-43`).
+- Resistor tolerance comes from value bands (`_r_tol_frac`, `hw_plots.py:231`, first match,
+  inclusive ends), with a default for values outside every band.
+- Gaussian means tol = 3σ, untruncated. Uniform means ±tol.
+- A value ≤ 0 is replaced by nom·1e-3.
+- It uses one `default_rng(seed)`.
+- The output is a percentile envelope.
+
+### 9.2 LTspice mapping
+
+The directives in the MC file:
+
+```text
+.param tC=0.05                    ; capacitors ±5 %
+.param tR1=0.01                   ; resistors 0 … 10 kΩ     (band 1)
+.param tR2=0.001                  ; resistors > 10 kΩ       (band 2)
+.param tR0=0.01                   ; resistors outside every band (tool default)
+.func TOL(nom,tol) {nom*(1+gauss(tol/3))}     ; Gaussian, tol = 3σ, untruncated
+; .func TOL(nom,tol) {nom*(1+flat(tol))}      ; Uniform ±tol (swap the comment to switch)
+.step param run 1 2000 1
+.save V(out)
+```
+
+Component values read `{TOL(4.99k,tR1)}`.
+- **Band membership** is computed by calling `hw_plots._r_tol_frac` on each nominal. The
+  semantics are then identical by construction, including inclusive ends and the default.
+- **Editability.** The user can change a tolerance, the distribution or N in one place.
+
+### 9.3 Traps and differences
+
+- **A `.func` must draw independently on every call.** Each component must get its own draw.
+  Whether a `.func` body containing `gauss()` is re-evaluated per call site is **[verify]**, with a
+  two-resistor test (§15.2). If it is not, the exporter writes the expression inline:
+  `{4.99k*(1+gauss(tR1/3))}`.
+- **Never put the random draw in a `.param`.** A `.param d=gauss(…)` is (very likely) evaluated
+  once per step and *shared* by everything that uses it, which correlates all parts. That is the
+  classic LTspice MC mistake.
+- **Raw-file size.** An AC run stores complex doubles, 16 B per vector per point. With N = 2000 and
+  600 points, V(out) alone is about 19 MB. Saving every node voltage and device current of a
+  4-section cascade (about 40 vectors) is about 0.8 GB. So **`.save V(out)`** is mandatory in the
+  MC file. The nominal file has no `.save`, so every node can be probed.
+- **Run count.** The default is the tool's `resp_runs` (2000). AC runs are fast, but LTspice gets
+  slow *plotting* thousands of traces. The UI shows a note above 1000 runs, and the value can be
+  edited there.
+- **Seed.** LTspice's RNG is not numpy's, so runs can match the tool only statistically. Whether
+  LTspice repeats the same sequence on every run and honours `.option seed=` is **[verify]**; it
+  is informational only.
+- **Envelope.** LTspice draws all traces and has no percentile band. The `.meas` table (§8.2) is
+  the quantitative comparison.
+- **Split caps** are two physical parts in the file, `C202A` and `C202B`, each with its own draw.
+  That is physically right, but narrower than the tool, which draws the sum as one part. For two
+  equal halves the sum's σ drops by 1/√2. The README mentions it (finding §16).
+- **Negative tail.** An untruncated Gaussian can give a negative value. The tool clamps it; LTspice
+  would not. At tol = 3σ ≤ 50 % that needs a 6σ event, so it is ignored and documented.
+- **Op-amps are not varied**, as in the tool. With real models the model's own typical values
+  apply.
+
+---
+
+## 10. Inter-stage loading (real cascade only)
+
+The tool's realized curve is a **plain product** of per-section responses. Each section is solved
+with an ideal source and an unloaded output (`response_tab.py:378-407`, `hw_plots.cascade`
+L136, `cells_lp.py:191` V1 = 1). The exported file is the physical cascade:
+- Section k's output is the op-amp's Thevenin output. Its closed-loop output impedance is roughly
+  Ro/(1+T(jω)), where T is the loop gain.
+- It drives section k+1's input impedance.
+
+In the passband T is large, so the effect is negligible. For example, TL072 with Ro = 50 Ω and
+GBWP = 3 MHz, as a unity follower at 1 kHz, gives about 0.02 Ω against a 10 kΩ input.
+
+Where T falls, at high frequency in the stopband, Z_out approaches Ro. For high-Ro parts this is
+comparable to the next stage's input resistance: LMV358A has 1.2 kΩ and AD8505 has 1 kΩ, against
+typical 1–10 kΩ inputs. That can reach dB level in the far stopband. It is the same region the
+tool's "HF rise" warning is about (`response_tab.py:430-450`).
+
+Consequences:
+- **LTspice ≠ the tool** in the far stopband, by design. The README explains it.
+- **Validation** does not compare LTspice with the tool's product. It compares LTspice (with FS
+  generic) with the **MNA of the loaded IR**, which must agree to numerical precision (§15.2). The
+  IR MNA with and without loading gives the tool-vs-SPICE difference as a number (§15.1 check 6).
+- **The tool's model gap is real** (finding §16). With the IR and `mna_ac`, a loaded realized
+  response inside the tool becomes cheap later.
+
+---
+
+## 11. Transient (FS-026) — impulse theory and practice, and the base built now
+
+### 11.1 What "impulse response" means for a circuit with real op-amps
+
+- **h(t) is defined for LTI systems only.** A circuit with real op-amp models is LTI only in
+  small-signal operation around its DC operating point: away from the rails, below slew limits,
+  inside the input common-mode range.
+- **So a real circuit's "impulse response" means the linearized circuit's response.** The exact
+  version of that is the tool's own linear model, which FS-024 computes from poles, zeros and the
+  section transfer functions.
+- A SPICE transient is worth running for what the linear model cannot show: slew, clipping,
+  recovery and model-specific dynamics. A step does that.
+
+### 11.2 How it is done in practice
+
+1. **From the linear model.** This is the usual way. Datasheets, filter handbooks and design tools
+   quote h(t) and the step response computed from H(s). It is exact and has no amplitude issues.
+   In this project, that is FS-024.
+2. **SPICE, derivative of a small-signal step: h(t) ≈ (1/A)·dv_out/dt.**
+   - The step amplitude A is small enough to stay linear.
+   - It uses one moderate edge, so it is gentle on slew.
+   - The DC offset baseline disappears, since the derivative of a constant is 0. With real models
+     the output sits on Vos·gain.
+   - The same run also gives the step response.
+   - Costs: the derivative amplifies timestep noise, so use `.options plotwinsize=0` (no waveform
+     compression) and a bounded max timestep.
+   - For HP, BR and notch cells with H(∞) ≠ 0 the step response jumps by A·H(∞) at t₀. Its
+     derivative is a spike of width ≈ t_rise, which is the Dirac term H(∞)·δ(t). It must be clipped
+     in the display and reported as its weight H(∞), as FS-024 must also do.
+3. **SPICE, narrow small-area pulse ("quasi-impulse"): v_out ≈ A·T·h(t).**
+   - The width T must be short: the pulse spectrum is flat to 1 % up to f_max only if
+     T ≤ ~0.08/f_max, where f_max is the highest frequency that matters (for example 10·f_c).
+   - The amplitude A must stay linear. HP and BR feed A·H(∞) straight through to the output, and
+     A/t_rise must stay below the slew rate.
+   - The response is small, so it must stay well above LTspice's absolute tolerances (`vntol`
+     1 µV default).
+   - The offset baseline must be subtracted by hand. An LTspice plot cannot subtract a `.meas`
+     result.
+   - It is workable for LP with modest settings. For example, a 1 kHz LP with f_max = 10 kHz gets
+     T = 8 µs, and A = 1 V gives an output peak of about 24 mV. But it is fiddlier than (2) and
+     gains nothing.
+4. **AC analysis, then inverse FFT.** This is post-processing outside LTspice. It is equivalent to
+   (1), so it belongs in the tool.
+
+**Practice therefore:** the step is the standard SPICE time-domain test, at realistic levels. The
+impulse response is taken from the linear model (1), or from SPICE as the derivative of a
+small-signal step (2).
+
+### 11.3 Recommendation for FS-026
+
+- **One `<spec>_TRAN.asc`**, nominal only, with **no MC in the time domain** (*maintainer*).
+- **Source:** `VIN IN 0 PULSE(0 {Astep} {t0} {tr})`, a step.
+- **Two amplitudes in one run:** `.step param Astep list <A_small> <A_large>`.
+  - `A_small` is linear. With FS generic dummies it must reproduce FS-024's realized step
+    response. The loaded vs unloaded caveat of §10 applies, but it is tiny in the passband.
+  - `A_large` is about 70–80 % of the available output swing, divided by the peak output per unit
+    step. It shows slew, clipping and recovery with the real models.
+- **Normalized plot:** plot `V(out)/Astep` so the two runs overlay when linear. Any visible
+  separation *is* the non-linearity.
+- **Impulse node:** `BIMP IMP 0 V=ddt(V(out))/Astep`, a behavioural source that draws no current
+  and is ignored by the circuit. **[verify]** `ddt()` in `bv` and `d()` in plot expressions. The
+  README notes the H(∞)·δ spike for HP, BR and notch.
+- **Presets from FS-024:**
+  - window t_stop and settling, with a starting guess of t₀ + ~10·max(2Q/ω₀, 1/ω₁) over the
+    sections;
+  - max timestep ≤ 1/(20·f_hi);
+  - peak output per unit step (for `A_large`);
+  - max slope per unit step (for the slew check, once the op-amp library has a slew-rate field).
+- **Directives:** `.tran 0 {tstop} 0 {dtmax}`, `.options plotwinsize=0`, and no `startup` / `uic`.
+  With supplies present, the DC operating point is the right starting state.
+
+### 11.4 Base built in v1 (so FS-026 is small)
+
+- A **source abstraction** in `spice_export.py`: `{kind: "ac" | "step" | "pulse", …}` produces the
+  `VIN` Value string. Only `ac` is used in v1.
+- A **per-analysis directive generator**: `directives("ac", …)` is implemented;
+  `directives("tran", window, …)` raises `NotImplementedError` until FS-024 provides `window`.
+- A **bundle builder** that takes a list of `(filename, analysis spec)`. FS-026 appends one entry.
+- **`symbols.asc`** already calibrates `bv` (the impulse node), so FS-026 needs no new
+  LTspice calibration round.
+- **Interface requested from FS-024.** A Streamlit-free helper returns, for the realized cascade:
+  `{t_stop, dt_max, t_settle, peak_per_unit_step, max_slope_per_unit_step, h_inf}`. This is
+  recorded in the FS-024 Notes.
+
+---
+
+## 12. LTspice format caveats (checklist for the writer)
+
+- **Suffixes.** SPICE `M` is **milli**, so write `Meg` (1 MΩ = `1Meg`). `F` is **femto**
+  (`1F` = 1e-15), so never write a bare `F`; a trailing `F` after a scale letter (`10nF`) is
+  harmless, but emit `10n`. `µ` becomes `u`.
+- **Number format.** Engineering form with at most 4 significant digits for snapped E-series
+  values (`4.99k`, `12.1k`, `680p`, `1.5u`). Continuous values get 6 significant digits, with no
+  float noise such as `4.7000000001n`. A round-trip test is in §15.1.
+- **Values in the row** are MΩ and µF. Convert R_Ω = R·1e6 and C_F = C·1e-6 in one place.
+- **Encoding.**
+  - Output is ASCII: no `µ`, `Ω` or `σ`. Transliterate in comments and refuse non-ASCII in values
+    or directives.
+  - Templates may have been saved by LTspice as UTF-16LE or cp1252. Read them with BOM detection.
+  - Whether LTspice 24 writes UTF-16 is **[verify]**.
+- **Line endings.** CRLF, which is harmless everywhere.
+- **Header.** Copy `Version …` from `symbols.asc` (whatever the maintainer's LTspice wrote), then
+  `SHEET 1 W H`.
+- **Grid.** Keep coordinates on multiples of 16.
+- **Multi-line TEXT** (an embedded `.subckt`): copy LTspice's own encoding of the newlines from
+  the dummy verbatim. **[verify]** it when generating the FS generic block.
+- **InstName.** Start it with the symbol's prefix letter (`R201`, `C202A`), so the netlist names
+  stay predictable. Op-amp `X` symbols take `U201`, which LTspice netlists as `XU201`. What
+  LTspice does with an InstName that doesn't start with the prefix is **[verify]**, and the design
+  avoids the case.
+- **Net names.**
+  - Never use LTspice's auto pattern `N###`.
+  - Ground is the FLAG `0`.
+  - Labels are ASCII identifiers (`S2_m`, `VCC`, `VEE`, `IN`, `OUT`).
+- **Zero ohms.** Shorts are wires, never 0-Ω resistors (LTspice rejects R = 0 **[verify]**).
+  FS generic omits Ro when Ro < 1 mΩ, and the library allows `Ro_ohm = 0`.
+- **Floating nodes** give a singular matrix at `.op`. The DC-path check covers them (§6).
+- **Symbol paths** in SYMBOL lines are written as LTspice writes them (`Opamps\\opamp2`). They are
+  always copied from a template, never typed.
+- **One analysis per file**, as in §7.
+- **Opening from the zip.** Windows Explorer can open an `.asc` inside the zip by extracting it
+  alone. That works because the files are self-contained, unless a dummy needs external files.
+  Then the README and the UI say "extract first".
+- **LTspice versions.** The target is LTspice 24.x. XVII is best effort **[verify]**; see the open
+  question in §17.
+
+---
+
+## 13. UI (Resulting Response tab)
+
+The block sits in `response_tab.py`, **after the Monte Carlo settings** (`response_tab.py:455-501`),
+because it needs `mc_params` and `sections_data`. It goes before or beside the report section.
+The Streamlit code lives in a new **`spice_ui.py`** (like `report_ui.py`), and `response_tab.py`
+gets one call.
+
+- **Header:** "LTspice export".
+- **Supply Vs (V)** input with a caption *"drawn as ±Vs/2, GND at midpoint"*. Supply-range
+  warnings come from the dummies' metadata.
+- **Table:** section, the tool's op-amp choice, the SPICE model (dummy stem, or "FS generic
+  (fallback)"), and a template status (exact / superset / auto-layout). A per-section override
+  selectbox lists the library dummies.
+- **MC settings** shown read-only from `mc_params`: runs (editable, defaulting to `resp_runs`),
+  distribution, capacitor tolerance and resistor bands. A note says they are taken from the
+  settings above.
+- **Checkbox:** "Include model files in the zip" (§5.5).
+- **Download:** a `st.download_button` for the zip, with mime `application/zip`. Generation is
+  string building (milliseconds), so the bytes are built on every render, with no Generate
+  button. It is wrapped in try/except, and any error becomes a message, never a broken tab.
+- **Gate:** the button is disabled, with the reason shown, when any section has no pick or is
+  `pending` (dispatch gate, `topology_tab.section_kind`, L213).
+- **Designators:** `spice_ui` builds the display-designator map with the helpers the report and
+  schematic already use (`schematic_svg.bp3_alias` L304, `_am_labels` L422, and
+  `topology_tab._am_row_designators`). It passes that map in, so `spice_export.py` stays free of
+  Streamlit.
+- **New widget keys** (for ROADMAP §7): `spice_vs`, `spice_opamp_{n}`, `spice_mc_runs`,
+  `spice_include_models`.
+
+---
+
+## 14. Build plan (files, order, phases)
+
+### Phase 1 (Claude; everything verifiable without LTspice)
+
+1. **`spice_cells.py`**: the superset IR tables (§2), including the first-order module (which is
+   not in `REGISTRY`), plus `section_ir(row)`, `cascade_ir(rows)`, `mna_ac` and `dc_paths`.
+2. **`dev/fs008/check_spice_export.py`** §1–§3 (IR vs transfer function, DC path, formatting).
+   It **must pass before any writer work.**
+3. **`spice_export.py`** (no Streamlit), containing:
+   - value formatting and the MC expression and parameter blocks;
+   - the directive generator and source abstraction (§11.4);
+   - the FS generic subckt;
+   - the `.asc` model: parse, serialize, geometry transforms and connectivity extraction;
+   - auto-layout and column assembly;
+   - the §4.3 self-check;
+   - the zip and README builder.
+4. **`LTspice_Library/`**: a provisional `symbols.asc` and `opamps/_FS_generic.asc`, written as
+   text following LTspice's format. They are confirmed in Phase 1b.
+5. **`spice_ui.py`**, plus the one-call hook in `response_tab.py`.
+6. **Packaging**: the `FilterSynthesizer.spec` `datas` line, the `build.bat` copy, and the
+   `launcher.py` env var.
+7. **Docs**:
+   - `docs/ARCHITECTURE.md`: new modules and data dir; the Tier D table.
+   - `docs/CONTRACTS.md` §6: correct the stale Solution schema (R8; `C1a/C1b/C1_parallel`;
+     absent = 0.0 or None).
+   - `CLAUDE.md`: new-cell checklist gets "+ IR entry in `spice_cells.py`, + optional LTspice
+     template"; the template folder is hand-drawn.
+   - `dev/ROADMAP.md`: FS-008 state and the §7 entry.
+
+### Phase 1b (maintainer, in LTspice 24 on Windows)
+
+- Open `symbols.asc` and run the netlister (`LTspice -netlist symbols.asc`, **[verify]** the flag
+  in 24.x). Every device must sit on its named nets. Save it back if LTspice rewrote anything.
+- Open `_FS_generic.asc`.
+- Export a design and open both files.
+- Run through §15.2.
+
+### Phase 2 (maintainer draws; Claude wires them in)
+
+This goes one family at a time: the Sallen-Key LP superset first, since it is the most used, then
+HP, MFB LP/HP, AM, BP/notch and first order.
+- **Maintainer:** draws the superset per §3.2 and runs `-netlist` on it.
+- **Claude:** adds the template path (gating, shorts, prune, placeholder swap), extends the check
+  to all variants of that family, and confirms that every variant's transformed drawing equals
+  its IR.
+
+The families that already have a template switch from auto-layout to the template.
+
+### Phase 3 (op-amp library content)
+
+- Dummies for the built-in library parts where LTspice ships a model, by symbol only.
+- External-model dummies with `;FS:` download notes, for the rest.
+- `spice_model` values in `opamp_library.json`, coordinated with FS-018 / FS-019.
+
+---
+
+## 15. Validation
+
+### 15.1 Automated (Claude, here): `python dev/fs008/check_spice_export.py`
+
+The check needs `pip install -r requirements.txt`, for sympy.
+
+1. **IR vs cell transfer function, all 92 cells.** This covers every `all_cells()` of every
+   `REGISTRY` module plus the 12 first-order cells.
+   - Draw random values: R log-uniform 1 kΩ–1 MΩ; C 100 pF–1 µF; A_ol 1e4–1e7; GBWP 1e5–1e8 Hz;
+     Ro 10–2000 Ω.
+   - Take 5 draws × 30 frequencies from 1 Hz to 10 MHz.
+   - Compare `mna_ac(section_ir)` with `make_response_func(derive_nonideal(topo))` (or the
+     first-order non-ideal).
+   - Pass: |ΔH| ≤ 1e-9 · max|H| per draw.
+   - Also run the split-cap variants (`C2a/C2b`, `C1a/C1b`) and AM `R8 ≠ R7`.
+2. **DC path.** Every node and every op-amp input reaches ground through R, sources or op-amp
+   outputs with capacitors removed. Any failure is reported per cell, as a hardware finding.
+3. **Formatting.** Values round-trip through SPICE parsing within 1e-12 relative. There is never a
+   bare `M` or `F` suffix, and the output is ASCII only.
+4. **`.asc` round trip.** For auto-layout (Phase 1) and each template × variant (Phase 2), the
+   re-extracted connectivity of the written file must equal the IR, per section and for the
+   cascade.
+5. **MC mapping.** Each resistor's band parameter must equal `_r_tol_frac`'s choice. A 0 % band
+   is written as it appears in `r_bands`; see finding §16.
+6. **Loading, informational.** Compare `mna_ac(cascade_ir)` loaded with and without ideal buffers
+   against the tool's product on two designs:
+   - buffered must equal the product within 1e-9;
+   - print the loaded deviation (dB) at the probe frequencies.
+7. **FS generic Ideal clamp.** The response with the clamped parameters must equal the tool's
+   `IDEAL_PARAMS` response within 1e-6 dB.
+8. `python verify.py` still passes. No Tier B change is expected, so this is a smoke test only.
+
+### 15.2 Maintainer (LTspice 24)
+
+These run on one design per family: Sallen-Key LP / HP / BP / notch; MFB LP / HP / BP / notch;
+AM LP / HP / BP / notch; and first-order LP / HP ni / inv. Where possible, one design mixes
+families in a single cascade.
+
+- **Opens and runs.** Both files open without errors or warnings and run.
+- **Accuracy.** With FS generic, the `.meas` values in the AC file match the README's "expected
+  (loaded MNA)" values within 0.01 dB. The "tool (unloaded)" column differs only in the stopband,
+  as §10 predicts.
+- **MC spread.** The spread of `.meas` over runs at the passband and edge probes is comparable to
+  the tool's p1–p99 band. It is slightly narrower when a split cap is present.
+- **[verify] list:**
+  - `.func` with `gauss()` draws independently per call: two identical resistors with
+    `{TOL(10k,0.3)}` must differ in each run;
+  - seed behaviour;
+  - rotation convention;
+  - pin-on-wire / crossing rules;
+  - IOPIN flags joining by name;
+  - multi-line TEXT encoding;
+  - UTF-16 templates;
+  - InstName prefix handling;
+  - R = 0 is rejected;
+  - the `-netlist` flag;
+  - for FS-026 later, `ddt()` and `d()`.
+- **Real part.** One design with a built-in ADI part dummy and one with an external `.lib` dummy
+  both run at the chosen Vs. The commented `.op` shows the section outputs near 0 V.
+- **Swapping.** Replace one op-amp in the output file by hand. The circuit still simulates, which
+  checks the labelled nets and the label mode.
+
+---
+
+## 16. Findings for other items
+
+- **The tool ignores inter-stage loading** (§10). The realized curve is an unloaded product. The IR
+  and `mna_ac` make a loaded realized response cheap, which suggests a follow-up item (P3,
+  suggested). Until then, the README and §8.3 quantify the difference per design.
+- **MC split-cap correlation.** `hw_plots.comp_dict` varies `C2a+C2b` as one part, so the tool's
+  MC is slightly pessimistic for split caps. It could be a small follow-up that draws each part.
+- **A 0 % resistor tolerance becomes 1 %.** `response_tab.py:207` has
+  `get(f"rtol_tol_{i}", 1.0) or 1.0`. It is a UI quirk that affects the tool's MC and, through
+  `mc_params`, the export. It is a one-line fix, outside this item.
+- **CONTRACTS §6 is stale.** The Solution schema omits R8, `C1a/C1b/C1_parallel` and the
+  0.0-vs-None absent convention. It gets corrected in FS-008's build, since the writer depends on
+  it.
+- **FS-009 (noise).** With dummies, the noise comes from the chosen SPICE model. FS generic can add
+  input noise sources from `en_nV_rtHz` / `in_pA_rtHz` when those library fields get values
+  (FS-018). A `.noise` file then slots into the §11.4 bundle builder.
+- **FS-010 (QSpice).** QSpice's schematic format differs, so its cheap route is **netlist-first**
+  from the IR (`.cir` plus QSpice's MC functions). The template machinery is LTspice-specific.
+- **FS-024.** It must expose the time-window and step-metrics helper (§11.4) for FS-026.
+- **FS-018 / FS-019.** The op-amp JSON gains `spice_model` values (dummy stems). New parts should
+  come with a dummy, or knowingly fall back to FS generic.
+
+---
+
+## 17. Open questions (for the maintainer, before PLANNED)
+
+1. **Designator scheme.** `R201` (section × 100 + index), or something closer to the schematic's
+   `2R1`, such as `R2_1`? InstNames should start with the prefix letter, so `2R1` itself is out.
+2. **Default Vs** when no dummy states a range: 10 V (±5 V) as proposed, or another value?
+3. **Initial dummy set to ship.** Which of the 8 library parts get a dummy in Phase 3? Is it
+   acceptable that TI parts are external-model stubs the user completes?
+4. **LTspice versions.** 24.x only, or keep XVII working too, which means testing both?
+5. **Op-amp placement.** Accept label mode for symbols that are not `opamp2`-shaped, or always use
+   label mode for uniformity?
+6. **MC run 1 = nominal** (§7): yes or no?
+7. **Loaded realized response in the tool** (§16): open a follow-up item now, or later?
