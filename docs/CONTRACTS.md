@@ -123,9 +123,13 @@ Custom H(s) entered with a negative K is used as |K|, with a warning.
   fz_hz, f1_hz, K_radps, sign}`
 - **Case** (`build_ideal` / `build_nonideal`): `{topo, res_eqs, var_list,
   R5_constraint, a1_expr, a2_expr, tf_num, tf_den, tf_var_list, den_degree}`
-- **Solution** (snapped): `{topology, C1–C4 (µF, some None),
-  C2a/C2b/C2_parallel (opt), R1–R7 (MΩ, some None), sens_score, snap_cost,
-  internal_gain, _dc}`
+- **Solution** (snapped): `{topology, C1–C4 (µF), R1–R8 (MΩ),
+  C1a/C1b/C1_parallel (opt; AM -C1s: C1 = C1a + C1b), C2a/C2b/C2_parallel
+  (opt; C2 = C2a + C2b), sign (opt), sens_score, snap_cost, internal_gain,
+  _dc}`. An absent part is 0.0 for C1–C4, R1–R4, R6 and None for R5, R7, R8
+  (`unified_solver_v2._assemble`), so readers test `> 0`, never `is None`. AM
+  rows carry R8 = R7 (the matched pair). `spice_cells.section_ir` (FS-008)
+  raises on a part its netlist needs without a positive value.
 
 ## 7. Performance notes
 

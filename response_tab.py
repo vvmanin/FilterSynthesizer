@@ -33,6 +33,7 @@ from topology_tab import (section_kind, section_dc_gain, opamp_label,
                           _ensure_state, _PICKS)
 import opamp_library as oplib
 import report_ui
+import spice_ui
 from ui_components import design_control
 
 
@@ -564,6 +565,11 @@ def render_response_tab():
                        f"`{schematic.SVG_DIR}`.")
         except Exception as _e:
             st.caption(f"⚠ Schematic render error: {_e}")
+
+    # =================================================================
+    #  LTSPICE EXPORT  (FS-008; reads the MC settings above)
+    # =================================================================
+    spice_ui.render_spice_export(sections_data, mc_params)
 
     # =================================================================
     #  GENERATE REPORT

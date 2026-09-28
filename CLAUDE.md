@@ -60,7 +60,8 @@ When a change touches solver or cell math, say explicitly how it was checked.
   PyInstaller + NumPy on Windows. Treat them as fragile.
 - A new cell topology = copy an existing `cells_*.py` as template, register it
   in `tf_derivation_v2.py`, route it in `topology_tab.section_kind`, add its schematic
-  to `Section_Schematic_Diagrams/`.
+  to `Section_Schematic_Diagrams/`, and add its netlist entry to `spice_cells.py`
+  (`python dev/fs008/check_spice_export.py` fails without it).
 - Schematic SVGs in `Section_Schematic_Diagrams/` are draw.io sources and are
   hand-edited; do not regenerate or reformat them programmatically.
 

@@ -43,6 +43,8 @@ Conventions:
 | Designators | `R201` = section 2, R1. Split caps are `C202A`/`C202B`, op-amps `U201…U203`, and AM/BP3 aliases R0/C0 become `R200`/`C200` (*maintainer decision*). |
 | LTspice version | **LTspice 24.x only** (*maintainer decision*). XVII is not a target. |
 | Where in the UI | Resulting Response tab, in a block after the Monte Carlo settings: Vs, the op-amp→SPICE model table and a zip download (§13). |
+| Staging | **Netlist first** (*maintainer decision*, 2026-09-28, second session): phase 1 writes `.cir` netlists with the FS generic model for fast validation in LTspice; `.asc` drawings (auto-layout, then hand-drawn templates) and real op-amp models follow. The final target is unchanged (§14). |
+| `.cir` alongside `.asc` | **Kept** (*maintainer decision*, 2026-09-28, after phase 1b passed): every export cycle writes the `.cir` netlists **and** the `.asc` schematics from the same IR, in the same zip. The `.cir` format is preserved as is (§7, §14). |
 
 ---
 
@@ -353,9 +355,10 @@ Ro y out {Ro}              ; omitted when Ro < 1 mΩ
   supply sources outside, so they do not float. The model is linear with no rails, and the README
   says so.
 - **Ideal needs clamping.** `IDEAL_PARAMS` (A_ol = 1e12, GBWP = 1e15 Hz, Ro = 1e-6 Ω) would put a
-  1e12 Ω resistor in the matrix. So Ideal maps to A_ol = 1e8, GBWP = 1e12 Hz and no Ro. The
-  deviation from the tool's ideal is about 1e-8 × the noise gain, which is invisible. The dev
-  check asserts it at ≤ 1e-6 dB.
+  1e12 Ω resistor in the matrix. So Ideal maps to A_ol = 1e9, GBWP = 10 THz and no Ro. That
+  is tightened from the planned 1e8 / 1 THz (as built in phase 1). The deviation from the tool's
+  ideal is about noise gain × (1/A_ol + f/GBWP), which is invisible. See §15.1 check 7 for the
+  measured bound.
 - **Why ship it**, although the maintainer ruled out "the tool model as a mode":
   - It is the only model with which LTspice *can* reproduce the tool's numbers, so validation
     (§15) needs it.
@@ -524,6 +527,10 @@ replacement that should be reused goes into the library as a dummy instead (Appe
 like the PDF. It contains:
 - `<spec>_AC.asc`: nominal values and `.ac`.
 - `<spec>_AC_MC.asc`: MC expressions, `.step`, `.save` and `.meas` (§9).
+- `<spec>_AC.cir` and `<spec>_AC_MC.cir`: the phase-1 netlists, unchanged in format, written in
+  the **same export cycle** from the same IR (*maintainer decision*, 2026-09-28). They are the
+  reference each drawing is checked against, a fallback that opens without any symbol or library,
+  and FS-010's starting point. The `.asc` never replaces them.
 - `README.txt`:
   - what each file is;
   - the op-amp model per section;
@@ -838,68 +845,147 @@ gets one call.
 
 ---
 
-## 14. Build plan (files, order, phases)
+## 14. Build plan — netlist first (revised 2026-09-28)
 
-### Phase 1 (Claude; everything verifiable without LTspice)
+*Maintainer decision (2026-09-28, second session):* validate the electrical content before any
+drawing. The first deliverable is a plain SPICE netlist with the FS generic ("universal") op-amp
+model. Graphics and real op-amp models follow once the netlists have run in LTspice. The final
+target is unchanged: `.asc` schematics with real op-amp models, as §0–§13 describe.
 
-1. **`spice_cells.py`**: the superset IR tables (§2), including the first-order module (which is
-   not in `REGISTRY`), plus `section_ir(row)`, `cascade_ir(rows)`, `mna_ac` and `dc_paths`.
-2. **`dev/fs008/check_spice_export.py`** §1–§3 (IR vs transfer function, DC path, formatting).
-   It **must pass before any writer work.**
-3. **`spice_export.py`** (no Streamlit), containing:
-   - value formatting and the MC expression and parameter blocks;
-   - the directive generator and source abstraction (§11.4);
-   - the FS generic subckt;
-   - the `.asc` model: parse, serialize, geometry transforms and connectivity extraction;
-   - auto-layout and column assembly;
-   - the §4.3 self-check;
-   - the zip and README builder.
-4. **`LTspice_Library/`**: a provisional `symbols.asc`, `opamps/_FS_generic.asc` and
-   `opamps/_seat_template.asc`, written as text following LTspice's format. They are confirmed in
-   Phase 1b. The same step adds `check_opamp_dummy()` (Appendix A.4) to `spice_export.py`.
-5. **`spice_ui.py`**, plus the one-call hook in `response_tab.py`.
-6. **Packaging**: the `FilterSynthesizer.spec` `datas` line, the `build.bat` copy, and the
-   `launcher.py` env var.
-7. **Docs**:
-   - `docs/ARCHITECTURE.md`: new modules and data dir; the Tier D table.
-   - `docs/CONTRACTS.md` §6: correct the stale Solution schema (R8; `C1a/C1b/C1_parallel`;
-     absent = 0.0 or None).
-   - `CLAUDE.md`: new-cell checklist gets "+ IR entry in `spice_cells.py`, + optional LTspice
-     template"; the template folder is hand-drawn.
-   - `dev/ROADMAP.md`: FS-008 state and the §7 entry.
+No phase throws work away. The IR is the backbone throughout. The `.asc` phases draw the same IR,
+and their LTspice check is simply "LTspice's netlist of the drawing equals the phase-1 netlist".
 
-### Phase 1b (maintainer, in LTspice 24 on Windows)
+| Phase | Deliverable | Who | Gate to the next phase |
+|---|---|---|---|
+| 1 | Netlists (`.cir`), FS generic model, AC + AC MC, UI block | Claude | dev check passes — **done 2026-09-28** |
+| 1b | Run the netlists in LTspice 24 | maintainer | README checklist + §15.2 "netlist" items — **passed 2026-09-28** |
+| 2 | `.asc` by auto-layout, FS generic in seats; packaging | Claude | dev check: `.asc` round trip |
+| 2b | Calibrate symbols, confirm the seat, compare `.asc` with `.cir` | maintainer | §15.2 "drawing" items |
+| 3 | Hand-drawn family templates | maintainer draws (Appendix B), Claude wires | template × variant check |
+| 4 | Real op-amp models: 4a netlist, 4b dummies in seats | Claude tooling, maintainer content | Appendix A.6 |
 
-- Open `symbols.asc` and run the netlister (`LTspice -netlist symbols.asc`, **[verify]** the flag
-  in 24.x). Every device must sit on its named nets. Save it back if LTspice rewrote anything.
-- Open `_FS_generic.asc` and fix the seat's input order to match `opamp2` in R0 (§5.4).
-- Export a design and open both files.
-- Run through §15.2.
+### Phase 1 — netlists with FS generic (Claude) — built 2026-09-28
 
-### Phase 2 (maintainer draws; Claude wires them in)
+As built:
+- **`spice_cells.py`** (Tier D, no Streamlit):
+  - 26 tables (one per template id, e.g. `SK_LP`, `MFB_HPn2`, `AM_LPn`, `FO_HP_ni`), read off
+    the non-ideal KCL. They cover all 92 cells with the open/short state per variant.
+  - `section_ir`, which expands split caps and exports the AM R8 as R7 when the row has none.
+  - `cascade_ir`, with ideal buffers as an option for the check.
+  - `mna_ac`, `dc_floating_nodes`, `display_alias` and `designator` (`R201`, `C202A`, `R200`).
+  - `python spice_cells.py <TEMPLATE|CELL>` prints the drawing spec (Appendix B).
+- **`spice_export.py`** (Tier D, no Streamlit):
+  - `fmt_value` / `parse_value`.
+  - The FS generic subckt. Its C is written with 9 digits, so GBWP is exact.
+  - The Ideal clamp: A_ol = 1e9, GBWP = 10 THz, Ro < 1 mΩ becomes 0. This is tightened from
+    §5.3's 1e8 / 1 THz, so random high-gain draws stay ≤ 1e-3 dB (check 7).
+  - The MC block (§9.2), the source and directive hooks (§11.4), `build_export` and `zip_bytes`.
+- **Bundle:** `FS_LTspice_<spec>_<stamp>.zip` holds `<spec>_AC.cir`, `<spec>_AC_MC.cir` and
+  `README.txt`. The README covers how to run, sections and models, the MC mapping, the expected
+  probe values and the phase-1b checklist.
+- **Probes** (a change from §8.2, which chose them by filter type). The set is type-agnostic:
+  - the sweep ends;
+  - each section's f0 and fz;
+  - the loaded response's peak.
 
-This goes one family at a time: the Sallen-Key LP superset first, since it is the most used, then
-HP, MFB LP/HP, AM, BP/notch and first order.
-- **Maintainer:** draws the superset per §3.2 and runs `-netlist` on it.
-- **Claude:** adds the template path (gating, shorts, prune, seat insertion), extends the check
-  to all variants of that family, and confirms that every variant's transformed drawing equals
-  its IR.
+  They are deduplicated and kept inside the sweep. Each `.meas` line carries the loaded-MNA
+  expectation (dB, phase) and the tool's unloaded dB as a comment. The README has the same table.
+- **UI:** `spice_ui.render_spice_export` in `response_tab`, placed before *Generate Report*.
+  - Keys: `spice_vs` and `spice_mc_runs`.
+  - A table with the cell, the tool's op-amp, the FS generic parameters and the DC-path status.
+  - A caption with the loading deviation, and the download button.
+  - Not yet: the per-section model override and "include model files" (phase 4).
+- **Not needed yet:** `LTspice_Library/` and packaging, since netlists carry no data files.
+- **Checks:** `python dev/fs008/check_spice_export.py` passes 1–7 (§15.1), and `verify.py`
+  still passes.
 
-The families that already have a template switch from auto-layout to the template.
+### Phase 1b — maintainer: the netlists in LTspice 24
 
-### Phase 3 (op-amp library content — the maintainer's call, Appendix A)
+**Result (2026-09-28): checked, OK** (maintainer). Both `.cir` files run in LTspice 24 as
+written, so the phase-1 `.cir` format is frozen: later phases add files, they do not change it.
 
-Which parts get dummies, and in what order, is the **maintainer's decision**. It cannot be fully
-automated: it depends on which models the maintainer trusts and has obtained legally, and on pin
-orders and supply ranges read from datasheets. Claude supplies the tooling:
-- **`dev/fs008/make_opamp_dummy.py`** writes an `opamp2`-based dummy from a subckt name, model
-  file, vendor pin order and supply range. It reuses the FS generic adapter wiring and adds a
-  pin-order wrapper when needed (Appendix A.7). No drawing is involved.
-- **`tools/opamp_openloop.asc`**, an open-loop harness with one seat. The exporter writes
-  `<stem>_openloop.asc` for any dummy, so its A_ol, GBWP and Ro can be compared with the library
-  entry (Appendix A.6).
-- **`spice_model` values** in `opamp_library.json` as dummies land, coordinated with FS-018 /
-  FS-019.
+1. Export two designs:
+   - (i) a mixed cascade with Ideal op-amps, for example SK LP + MFB HP + an AM notch;
+   - (ii) the same with a high-Ro part (LMV358A, 1.2 kΩ), so the loading shows.
+2. Open `<spec>_AC.cir` (File > Open, file type *Netlists*) and run it. Compare every `.meas`
+   in the SPICE Error Log with the README's *loaded dB*. They must agree within 0.01 dB.
+3. Open `<spec>_AC_MC.cir` and run it. Compare the spread with the tool's band, and run the
+   README's TOL independence test.
+4. Report back:
+   - how the log prints a complex `.meas` (dB and phase?);
+   - any warning about the subckt pins `vp` / `vn`, which have no elements;
+   - the run time for 2000 runs;
+   - anything LTspice rewrote or rejected.
+
+This resolves these §15.2 [verify] items:
+- `.func` draws per call;
+- `.save` in a stepped AC run;
+- the seed behaviour (informational);
+- R = 0 (not written anyway).
+
+### Phase 2 — `.asc` by auto-layout (Claude, after 1b)
+
+- **`LTspice_Library/`**, written as text:
+  - `symbols.asc` (§3.2);
+  - `opamps/_FS_generic.asc` and `opamps/_seat_template.asc`, whose terminal FLAGs sit exactly at
+    the seat offsets by construction;
+  - `cells/_cell_template.asc`: IN / OUT / VCC / VEE flags and one seat U1 with the FS generic
+    placeholder, the starting point for Appendix B.
+- **Packaging** (§3.4): the `FilterSynthesizer.spec` `datas` line, the `build.bat` copy and the
+  `launcher.py` env var.
+- **The `.asc` model:**
+  - parse, serialize, transforms and connectivity (§4.2);
+  - auto-layout (§4.4) and the column (§4.5);
+  - seat insertion (§5.4);
+  - the export-time self-check (§4.3).
+- **Bundle:** `<spec>_AC.asc` and `<spec>_AC_MC.asc` join the `.cir` files in the same zip,
+  built in the **same export cycle** from the same IR (*maintainer decision*, 2026-09-28). The
+  `.cir` format stays exactly as validated in phase 1b. The netlists are the reference each
+  drawing is checked against, and they are FS-010's starting point. If a section's drawing fails
+  the §4.3 self-check, that section falls back to auto-layout; the `.cir` is written regardless.
+- **Dev check:** the `.asc` round trip. Re-extracted connectivity must equal the IR for every
+  cell and for a cascade.
+
+### Phase 2b — maintainer: drawings in LTspice 24
+
+- **Calibrate `symbols.asc`** (Appendix A.3a). View > SPICE Netlist must put every device on its
+  named nets. Save it back if LTspice rewrote anything.
+- **Confirm the seat** with `_FS_generic.asc`: its X line reads `XU1 INP INN VCC VEE OUT …`.
+- **Open an exported `.asc`** and use View > SPICE Netlist:
+  - the R/C/X lines equal the phase-1 `.cir` up to line order;
+  - the `.meas` values equal phase 1b's.
+- Run the remaining §15.2 "drawing" [verify] items:
+  - rotation;
+  - pin-on-wire and crossings;
+  - IOPIN;
+  - multi-line TEXT;
+  - UTF-16;
+  - InstName prefix;
+  - the `-netlist` flag.
+
+### Phase 3 — hand-drawn family templates (maintainer draws; Claude wires them in)
+
+- **Order:** SK LP, SK HP, MFB LP, MFB HP, the AM kinds, BP / notch, first order.
+- **Maintainer:** draws one template per Appendix B.
+- **Claude, once, with the first template:** adds the template path (§4.1: gating, shorts, prune,
+  seat insertion).
+- **Claude, per template:** extends the check to every variant of that template. The families
+  with a template switch from auto-layout to it.
+
+### Phase 4 — real op-amp models (Claude tooling; which parts is the maintainer's call)
+
+- **4a — netlist form** (no drawing).
+  - `spice_model` maps a part to a model entry: file, subckt name, vendor pin order, supply range.
+  - The netlist gets `.lib` / `.include` and a pin-order wrapper subckt, and the X line uses
+    the wrapper.
+  - This validates model files, pin orders, the supply and the `.op` bias with the same fast
+    loop as phase 1b, before any seat is drawn.
+  - The UI adds the per-section override and the "include model files" option.
+- **4b — drawing form.**
+  - Dummies (Appendix A) in seats.
+  - `dev/fs008/make_opamp_dummy.py` and the open-loop harness `tools/opamp_openloop.asc`.
+  - The dummy check (A.4).
+- **Library data:** the `spice_model` values in `opamp_library.json` land with FS-018 / FS-019.
 
 ---
 
@@ -922,7 +1008,17 @@ The check needs `pip install -r requirements.txt`, for sympy.
    outputs with capacitors removed. Any failure is reported per cell, as a hardware finding.
 3. **Formatting.** Values round-trip through SPICE parsing within 1e-12 relative. There is never a
    bare `M` or `F` suffix, and the output is ASCII only.
-4. **`.asc` round trip.** For auto-layout (Phase 1) and each template × variant (Phase 2), the
+4. **Netlist round trip** (phase 1, as built). Each written `.cir` is parsed back with an
+   independent SPICE-semantics reader: R, C, V, G, E, X, `.subckt` and `{TOL(nom,…)}` read as
+   the nominal. It is solved and compared with `mna_ac` of the cascade IR on three mixed
+   cascades (SK, MFB, MFB-LS, MFB2, BP-MFB 3rd order, AM with split C1, first order, Ideal and
+   real op-amps).
+   - Values have 4 significant digits, like E-series values.
+   - Pass: |ΔH| ≤ 1e-6 · max|H|. The floor is round-off from the Ideal clamp's 1e9 gain; a
+     wiring or sign error is O(1).
+   - It also checks ASCII only, CRLF and the closing `.end`.
+
+   **`.asc` round trip** (phase 2 / 3). For auto-layout and for each template × variant, the
    re-extracted connectivity of the written file must equal the IR, per section and for the
    cascade.
 5. **MC mapping.** Each resistor's band parameter must equal `_r_tol_frac`'s choice. A 0 % band
@@ -931,8 +1027,14 @@ The check needs `pip install -r requirements.txt`, for sympy.
    against the tool's product on two designs:
    - buffered must equal the product within 1e-9;
    - print the loaded deviation (dB) at the probe frequencies.
-7. **FS generic Ideal clamp.** The response with the clamped parameters must equal the tool's
-   `IDEAL_PARAMS` response within 1e-6 dB.
+7. **FS generic Ideal clamp.** The response with the clamped parameters must match the tool's
+   `IDEAL_PARAMS` response. As built, the clamp is A_ol 1e9 and GBWP 10 THz. The error scales
+   as noise gain × (1/A_ol + f/GBWP), and random draws reach gains of about 100. So the pass
+   criterion is "invisible", not the 1e-6 dB first planned:
+   - ≤ 1e-3 dB wherever |H| is within 40 dB of its peak;
+   - |ΔH| ≤ 1e-4 · max|H| everywhere.
+
+   Measured: 7e-5 dB and 1.4e-5.
 8. **Dummy and template contracts.** Every shipped dummy passes `check_opamp_dummy`. Every
    template's seats are R0, their interiors hold only the placeholder, and the terminal points
    coincide with wire ends.
@@ -1059,7 +1161,7 @@ The maintainer decides; this is only a suggestion. Criteria:
 
 ### A.3 Step by step in LTspice 24 (kind B; A and C differ only in steps 3–4)
 
-1. Open `LTspice_Library/opamps/_seat_template.asc` and *Save As* `<stem>.asc`. The template has
+1. Read A.3a first (coordinates). Open `LTspice_Library/opamps/_seat_template.asc` and *Save As* `<stem>.asc`. The template has
    the seat box outline and the five terminal FLAGs. Use a plain ASCII stem with no spaces, for
    example `TL072`. The stem is what goes into `spice_model`.
 2. Place the op-amp symbol inside the box, in R0.
@@ -1090,6 +1192,66 @@ The maintainer decides; this is only a suggestion. Criteria:
    it reports.
 8. Run the open-loop harness (A.6).
 9. Set `spice_model` for the part, in the op-amp Edit popover or the JSON.
+
+### A.3a Getting the coordinates right (dummies and seats)
+
+**How LTspice places things.** An `.asc` file is plain text in integer units.
+- x grows to the right and **y grows downward**.
+- The default grid is 16 units. Everything the exporter joins must stay on it, so never draw with
+  grid snap off.
+- `SYMBOL <name> x y R0` puts the symbol's origin (the `(0,0)` of its `.asy`) at `(x,y)`. Each
+  pin sits at origin + pin offset, rotated by `R0/R90/R180/R270` (and mirrored for `M…`).
+- A wire connects to a pin only when one of its **ends** lies on the pin point.
+- Two FLAGs with the same name are one net.
+
+Expected pin offsets in R0, from the stock `.asy` files. They are to be confirmed by
+`symbols.asc` in phase 2b, and `symbols.asc` is the authority:
+
+| Symbol | Pins (x, y) in R0 |
+|---|---|
+| `res` | (16, 16), (16, 96) |
+| `cap` | (16, 0), (16, 64) |
+| `opamp2` | In+ (−32, 80), In− (−32, 48), V+ (0, 32), V− (0, 96), OUT (32, 64) |
+
+**Why no one has to type coordinates.** The seat's five terminal points are the only numbers that
+must be exact. `_seat_template.asc` is written by the tool as text, so its terminal FLAGs sit at
+the seat offsets by construction (§5.4). Everything else is drawn by hand with snap on, and it
+only has to *connect*: the adapter wires absorb whatever geometry the symbol has.
+
+**Procedure for a dummy.**
+1. Start from `opamps/_seat_template.asc` (Save As `<stem>.asc`). **Never move the five terminal
+   FLAGs** (INP, INN, OUT, VCC, VEE). If something is in the way, move the op-amp symbol instead.
+2. Place the op-amp symbol inside the box, in R0.
+3. Draw each adapter wire **starting on the pin**: click exactly on the pin end, where LTspice
+   shows the connection square. End the wire on the matching terminal FLAG. One wire per pin is
+   enough, and bends are fine.
+4. Tie any extra pins (shutdown, compensation) with `VCC` / `VEE` / `0` labels inside the box.
+5. **Check in LTspice: View > SPICE Netlist.** The op-amp line must read, in the symbol's own
+   pin order:
+
+   ```text
+   XU1 INP INN VCC VEE OUT <model>        (opamp2 order: In+ In- V+ V- OUT)
+   ```
+
+   This one line proves every pin. The terminal FLAGs *are* the net names, so:
+   - a pin that misses its wire shows as `N001`-style;
+   - a pin wired to the wrong terminal shows the wrong name in its position;
+   - two terminals that touch merge into one name.
+
+   A built-in part with a different symbol has its own pin order. Its line must still show
+   exactly the five terminal names, each once.
+6. **Check with the tool: the dummy check** (A.4; UI table or dev script). It re-reads the saved
+   file. It rejects terminals off the offsets, pins not on wire ends, crossings, parts outside the
+   box and extra labels.
+7. Optional check in a text editor: the `FLAG x y INP` … lines must read origin + the offsets of
+   §5.4. The dummy check does this arithmetic for you.
+
+**Procedure for a seat in a cell template** (Appendix B). Copy the seat block from
+`cells/_cell_template.asc`: the box outline, its five wire stubs and the `;SEAT U1` comment.
+- Select the whole block, copy, paste and rename the comment to `;SEAT U2`. LTspice pastes on
+  the grid and keeps the relative geometry, so the terminal offsets survive.
+- Then wire the cell's nets to the stub ends from the outside of the box.
+- Never draw inside the box except the placeholder.
 
 ### A.4 What the dummy check enforces
 
@@ -1141,3 +1303,85 @@ The InstName is free, because it is renamed on export.
 - **Hand-drawn:** only unusually shaped symbols, via steps A.3.
 - **Not automatable:** choosing parts, obtaining models legally, and reading pin orders and supply
   ranges from datasheets. That stays with the maintainer.
+
+---
+
+## Appendix B — Drawing cell templates (guidelines for the maintainer, phase 3)
+
+A cell template is one hand-drawn `.asc` per **template id**. It is the superset of every cell
+drawn from it. Each exported section is that drawing with its absent parts deleted (open) or
+replaced by a straight wire (short), and its op-amps copied into seats. A template never has to
+be *right* for the tool to stay correct, because the exporter re-extracts its connectivity and
+falls back to auto-layout on any mismatch. But only a right template is ever used.
+
+### B.1 Get the drawing spec
+
+```text
+python spice_cells.py              # lists the 26 template ids
+python spice_cells.py SK_LP        # the spec for one template (a cell name works too)
+```
+
+The printout gives:
+- the cells drawn from the template;
+- every part with its two nodes (for example `R4  a -- m`);
+- for each part, the cells in which it is `open` or `short`;
+- the op-amp seats with their nets (`U1: c, m, out` means In+ on `c`, In− on `m`, OUT on `out`).
+
+That printout *is* the circuit to draw.
+
+### B.2 Start the file
+
+1. Open `LTspice_Library/cells/_cell_template.asc`. It has the IN, OUT, VCC, VEE and ground flags
+   and one seat U1 with the FS generic placeholder.
+2. Save As `<TEMPLATE>.asc`, for example `SK_LP.asc`.
+3. An **exact-variant override** for one awkward cell is named after the cell instead, for example
+   `3LPn-gained+R7.asc`. It holds only that cell's parts.
+
+### B.3 Place the parts
+
+- Place **every** part in the printout, including the ones that are open or shorted in some
+  cells.
+- The InstName is the key (`R1`, `C2`, …). The Value is anything (`1k`, `1n`), because the export
+  replaces it.
+- Any orientation is fine for R and C.
+- Split caps: for templates whose cells can carry a split (the `-C1s` AM cells, and the LP-notch
+  rows with `C2_parallel`), also place `C1b` / `C2b` in parallel with `C1` / `C2`.
+
+### B.4 Name every net
+
+- Put a FLAG with the **IR node name** on every internal net: `a`, `b`, `c`, `m`, `p`, `x`, `m1`,
+  `out1`, ….
+- The input is `IN`, the section output is `OUT`, and ground is `0`.
+- Each net gets exactly one name. This is what makes LTspice's own netlist of the template
+  directly comparable with the printout.
+
+### B.5 Seats
+
+- Add one seat per op-amp slot (U1; U1–U3 for AM), copied as in A.3a, always in **R0**.
+- Wire the slot's nets to the seat's terminal stubs: In+ net to INP, In− net to INN, the output
+  net to OUT, VCC / VEE to their flags. The printout gives the nets.
+- An input on ground, such as the inverting MFB's In+ = `0`, gets a ground flag on that stub.
+- Nothing but the placeholder goes inside the box.
+
+### B.6 Drawing rules (what the exporter can read)
+
+- Every pin ends on a wire **endpoint**. Never let a pin lie in the middle of a wire.
+- **No crossing wires.** Use a net label to jump.
+- Where three wires meet, let them meet at endpoints. Do not end a wire on the middle of another.
+  This is conservative until phase 2b settles how LTspice treats T-junctions.
+- **Give each gated part its own wire segments.** A shorted part becomes one straight wire between
+  its two pins, and an open part is deleted with its dangling wires pruned. So never route
+  another net's wire through a gated part's pin points.
+- Stay on the 16-unit grid.
+- No SPICE directives: the export strips them and writes its own. Comments are fine.
+
+### B.7 Check in LTspice, then hand it over
+
+1. View > SPICE Netlist. Every R/C line must read the printout's nodes (in either order), for
+   example `R4 a m 1k`.
+2. The op-amp line reads the seat's nets, and there is no `N00x` net.
+3. Save the file. Do not hand-edit it in a text editor afterwards; templates are never
+   regenerated or reformatted by code (CLAUDE.md convention).
+4. Hand it over. Claude runs the template × variant check. It re-extracts the connectivity of
+   every cell drawn from the template after gating, and names any part whose nets differ from
+   the IR.
