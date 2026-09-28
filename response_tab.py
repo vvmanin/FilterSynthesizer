@@ -33,6 +33,7 @@ from topology_tab import (section_kind, section_dc_gain, opamp_label,
                           _ensure_state, _PICKS)
 import opamp_library as oplib
 import report_ui
+from ui_components import design_control
 
 
 # ---------------------------------------------------------------------
@@ -452,11 +453,13 @@ def render_response_tab():
     # =================================================================
     #  MONTE-CARLO CONTROLS  (upper section)
     # =================================================================
-    st.markdown("##### Monte-Carlo tolerances")
-    st.caption("Per-component tolerance spread of the cascade. Resistors use "
+    # FS-001: tolerance inputs + Run drive the MC band -> design-control box
+    mc_box = design_control("mc")
+    mc_box.markdown("##### Monte-Carlo tolerances")
+    mc_box.caption("Per-component tolerance spread of the cascade. Resistors use "
                "value-banded tolerances (rows below); op-amp parameters are held fixed.")
 
-    cc = st.columns([2.2, 1])
+    cc = mc_box.columns([2.2, 1])
     with cc[0]:
         r_bands = _rtol_bands_ui()
     with cc[1]:
@@ -474,7 +477,7 @@ def render_response_tab():
     lo, hi = {"p1–p99": (1.0, 99.0), "p5–p95": (5.0, 95.0),
               "min–max": (0.0, 100.0)}[band_lbl]
     if n_runs > 1000:
-        st.caption(f"⚠ {n_runs} runs may take a few seconds.")
+        mc_box.caption(f"⚠ {n_runs} runs may take a few seconds.")
 
     params = (round(c_tol, 6), tuple(r_bands), n_runs, dist_key, seed, lo, hi)
     key = _mc_key(sections_data, params)
@@ -482,7 +485,7 @@ def render_response_tab():
     mc_params = dict(r_bands=list(r_bands), c_tol_pct=float(c_tol),
                      n_runs=int(n_runs), dist=dist_key, seed=int(seed),
                      lo_pct=float(lo), hi_pct=float(hi), n_sigma=3.0)
-    run = st.button("Run Monte-Carlo", type="primary", key="resp_mc_run")
+    run = mc_box.button("Run Monte-Carlo", type="primary", key="resp_mc_run")
     store = st.session_state.get("resp_mc")
     if run:
         try:

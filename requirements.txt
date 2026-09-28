@@ -13,7 +13,7 @@
 # smoke-tested against numpy >= 2.4 on Windows (both `streamlit run app.py` and
 # the PyInstaller EXE). Raise it deliberately, not by deleting the bound.
 
-streamlit>=1.37,<2          # st.fragment(run_every=...), st.dataframe(on_select=...), st.rerun(scope=...)
+streamlit>=1.39,<2          # st.fragment(run_every=...), st.dataframe(on_select=...), st.rerun(scope=...), st.container(key=...) CSS hook (FS-001)
 numpy>=2.1,<2.4
 scipy>=1.13,<2
 sympy>=1.12,<2

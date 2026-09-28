@@ -54,6 +54,7 @@ import pairing_utils                               # classify_section / family_f
 import first_order_solver as fos                   # closed-form 1st-order realizer
 import solvability_probe as solvprobe              # failure-path global feasibility probe
 import opamp_library as oplib                      # op-amp parts (JSON-backed)
+from ui_components import design_control           # FS-001 styled input boxes
 
 # Module-level durable pick store: stage_num -> chosen BOM row. Survives even a
 # full st.session_state reset / clear (single-user web demo). Mirrored into
@@ -734,7 +735,7 @@ def _convergence_inputs():
     suffix so a value left over under the old fraction-based keys can never be
     re-read as a percent — 0.01 would silently become a 100x tighter gate.
     """
-    with st.expander("Convergence Settings", expanded=False):
+    with design_control("conv"), st.expander("Convergence Settings", expanded=False):
         level = st.select_slider(
             "Search thoroughness", options=list(SEARCH_PRESETS.keys()),
             value="Balanced", key="hw_effort",
@@ -1240,7 +1241,9 @@ def _render_results(res, n, opamp, cfg=None, topos=None, dc_gain=None):
     paired = [(snapped[i], continuous[i] if i < len(continuous) else {})
               for i in range(len(snapped))]
 
-    cc = st.columns([2, 1])
+    # FS-001: sort + BOM table = picking a solver result -> amber select box
+    sel = design_control(f"bom_{n}", variant="select")
+    cc = sel.columns([2, 1])
     _glabel = _gain_label_for(snapped[0].get("topology")) if snapped else "DC gain"
 
     # Build the sort menu. Metric columns are listed first; component columns
@@ -1286,16 +1289,20 @@ def _render_results(res, n, opamp, cfg=None, topos=None, dc_gain=None):
     rows = [p[0] for p in paired]
 
     df = _bom_dataframe(rows)
+    # Zebra rows (FS-001): a translucent grey reads on light and dark themes.
+    df = df.style.apply(
+        lambda r: ["background-color: rgba(128, 128, 128, 0.12)" if r.name % 2 else ""]
+        * len(r), axis=1)
     try:
-        event = st.dataframe(df, hide_index=True, use_container_width=True,
-                             on_select="rerun", selection_mode="single-row",
-                             key=f"hw_df_{n}")
+        event = sel.dataframe(df, hide_index=True, use_container_width=True,
+                              on_select="rerun", selection_mode="single-row",
+                              key=f"hw_df_{n}")
         picked = list(event.selection.rows)
     except Exception:
         # Fallback for older Streamlit: pick by the index shown in column '#'.
-        st.dataframe(df, hide_index=True, use_container_width=True)
-        idx = st.number_input("Select solution #", min_value=0, max_value=len(rows) - 1,
-                              value=0, step=1, key=f"hw_pick_{n}")
+        sel.dataframe(df, hide_index=True, use_container_width=True)
+        idx = sel.number_input("Select solution #", min_value=0, max_value=len(rows) - 1,
+                               value=0, step=1, key=f"hw_pick_{n}")
         picked = [int(idx)]
 
     # Resolve the active pick. The BOM table is inside a run_every fragment and
@@ -1420,11 +1427,13 @@ def _render_first_order(sec, n):
     name the cell, solve via first_order_solver (bypasses unified_solver_v2),
     and hand the LP-shaped result to the shared _render_results."""
     fam = pairing_utils.family_from_section(sec)            # 'LP' or 'HP'
-    env, opamp = _first_order_settings(sec)
+    box = design_control(f"sec_{n}")                        # FS-001 styled input box
+    with box:
+        env, opamp = _first_order_settings(sec)
     g_default = abs(float(section_dc_gain(sec)))            # Pairing Remaining-Gain-Distribution
     glabel = "HF gain" if fam == "HP" else "DC gain"
 
-    c = st.columns([1.3, 1.0, 1.0, 1.4])
+    c = box.columns([1.3, 1.0, 1.0, 1.4])
     with c[0]:
         realz = st.radio("Realization", ["Non-inverting", "Inverting"],
                          horizontal=True, key=f"hw_fo_real_{n}",
@@ -1492,14 +1501,17 @@ def _render_section(sec, conv, gen):
     is_notch = (kind == "notch")    # VCVS 2N pure-notch cells
     is_bp = (kind == "bp")          # VCVS Sallen-Key band-pass cells
 
-    family, env, opamp, mfb_ls, elim_r1, mfb_gained = _section_settings(sec)
+    # FS-001: settings expander + gain/Ki/Solve row share one design-control box.
+    box = design_control(f"sec_{n}")
+    with box:
+        family, env, opamp, mfb_ls, elim_r1, mfb_gained = _section_settings(sec)
     vcvs = family.startswith("VCVS")
     mfb = family.startswith("MFB")           # Multiple-Feedback (LP/LPn, HP/HPn, BP, pure-notch)
     am = family.startswith("AM")             # Ackerberg–Mossberg 3-op-amp state-variable biquad
 
     cfg_k_override = None            # band-pass: effective Ki injected into cfg["K"]
 
-    cols = st.columns([1.6, 1.0, 1.0, 1.4])
+    cols = box.columns([1.6, 1.0, 1.0, 1.4])
 
     if is_bp:
         # ---- Band-pass: per-section Ki override (replaces the gain control) ----

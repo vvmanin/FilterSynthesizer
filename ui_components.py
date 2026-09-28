@@ -109,6 +109,19 @@ def _mem_widget(widget, label, key, default, **kw):
     st.session_state[mem] = cur
     return widget(label, value=cur, key=key, on_change=_sync, **kw)
 
+
+def design_control(key, variant="input"):
+    """FS-001: a keyed container styled as a design-control section — its
+    controls change the design result (read-only sections stay plain). The
+    look lives in app.py's CSS, which targets the `st-key-dctl_*` /
+    `st-key-dcsel_*` classes Streamlit (>= 1.39) puts on keyed containers.
+    variant "input" = blue (design inputs), "select" = amber (picking one of
+    the solver's results, e.g. the BOM table). `key` must be app-unique.
+    Use as a context manager, or hold it and re-enter / call its methods to
+    add later elements to the same box."""
+    prefix = "dcsel_" if variant == "select" else "dctl_"
+    return st.container(key=prefix + key)
+
 # ============================================================
 # UI COMPONENT BLOCKS
 # ============================================================

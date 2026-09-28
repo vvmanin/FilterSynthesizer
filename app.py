@@ -28,7 +28,8 @@ from _version import __version__, APP_NAME
 
 # Import all UI components
 from ui_components import (
-    draw_order_block, 
+    design_control,
+    draw_order_block,
     draw_delay_order_block,
     draw_filter_type,
     draw_frequency_block, 
@@ -222,6 +223,24 @@ st.markdown("""
     [data-testid="stSidebar"] [data-testid="stExpander"],
     [data-testid="stSidebar"] div[data-testid="stNumberInput"] div[data-baseweb="input"] {
         max-width: none;
+    }
+
+    /* 7. FS-001 design-control sections (ui_components.design_control):
+          controls that change the design result sit in an accent-bordered,
+          faintly tinted box; read-only sections stay plain. Translucent
+          colours so one rule reads on both the light and dark theme.
+          Blue = design inputs, amber = picking a solver result (BOM row). */
+    [class*="st-key-dctl_"], [class*="st-key-dcsel_"] {
+        border: 1px solid rgba(46, 123, 207, 0.30);
+        border-left: 4px solid #2e7bcf;
+        border-radius: 0.5rem;
+        background: rgba(46, 123, 207, 0.06);
+        padding: 0.6rem 0.9rem 0.7rem 0.9rem;
+    }
+    [class*="st-key-dcsel_"] {
+        border-color: rgba(214, 142, 26, 0.35);
+        border-left-color: #d68e1a;
+        background: rgba(214, 142, 26, 0.07);
     }
     </style>
 """, unsafe_allow_html=True)
@@ -1120,151 +1139,152 @@ with tab_plots:
     st.markdown("---")
 
     # --- C. MANUAL NOTCH GRID ---
-    if response in ["Elliptic", "Inverse Chebyshev"]:
-        st.markdown("#### Manual Notch Tuning")
-    else:
-        st.markdown("#### Manual Notch Placement")
+    with design_control("notch"):  # FS-001
+        if response in ["Elliptic", "Inverse Chebyshev"]:
+            st.markdown("#### Manual Notch Tuning")
+        else:
+            st.markdown("#### Manual Notch Placement")
 
-    if filter_type in ["Lowpass", "Highpass"]:
-        if P_eff > 0:
-            # Enforce the strict UI-level safety guardrail for Elliptics
-            is_elliptic_over_limit = (response == "Elliptic") and (
-                (filter_type == "Lowpass" and final_lp_order > 8) or 
-                (filter_type == "Highpass" and final_hp_order > 8)
-            )
+        if filter_type in ["Lowpass", "Highpass"]:
+            if P_eff > 0:
+                # Enforce the strict UI-level safety guardrail for Elliptics
+                is_elliptic_over_limit = (response == "Elliptic") and (
+                    (filter_type == "Lowpass" and final_lp_order > 8) or 
+                    (filter_type == "Highpass" and final_hp_order > 8)
+                )
             
-            if is_elliptic_over_limit:
-                st.warning(f"Manual Notch Tuning for Elliptic {filter_type} filters is safely disabled for Order > 8 to prevent extreme numerical distortion.")
-            else:
-                if is_delay and filter_type == "Lowpass":   # FS-021 mode switch
-                    if ems_ok:
-                        _mem_widget(st.checkbox, "Equiripple Magnitude Stopband", "widget_ems", False,
-                                    help="Place the active notches automatically so that every "
-                                         "stopband hump sits at −A_s (Inverse-Chebyshev-like "
-                                         "magnitude). The corner stays at f_c: the poles are "
-                                         "scaled up, so τ₀ drops by the reported factor while "
-                                         "the delay keeps its shape.")
-                    else:
-                        st.caption("Equiripple Magnitude Stopband: needs manual order and the "
-                                   "corner anchor.")
-                if ems_on:
-                    st.caption(
-                        "Notches placed so every stopband hump sits at −A_s. Tick **Active** to "
-                        "choose how many: each one costs 40 dB/dec of far-stopband roll-off. "
-                        "The poles are scaled to hold the corner: the delay keeps its shape and "
-                        "τ₀ shrinks by the scale. Your pins come back when the mode is off.")
-                elif is_delay:
-                    st.caption(
-                        "Stopband only: a pinned notch must lie above the corner (passband "
-                        "notches are ignored). Notches add no group "
-                        "delay: the poles keep their delay shape"
-                        + ("; with the τ₀ anchor the corner moves instead of the delay."
-                           if delay_anchor == "delay" else
-                           " and are scaled to hold the corner, so τ₀ shrinks slightly."))
-                for i in range(P_eff):
-                    col_pin, col_val, col_unit = st.columns([1, 3, 6])
-                    if ems_on:   # FS-021: Active column, solved frequencies read-only
-                        if col_pin.checkbox(f"Active {i}", key=f"ems_active_{i}") and engine_results:
-                            col_val.number_input(f"Notch {i} freq", value=float(free_notches_display.get(i, 0.0) / multiplier),
-                                                 format="%.4f", disabled=True, label_visibility="collapsed")
+                if is_elliptic_over_limit:
+                    st.warning(f"Manual Notch Tuning for Elliptic {filter_type} filters is safely disabled for Order > 8 to prevent extreme numerical distortion.")
+                else:
+                    if is_delay and filter_type == "Lowpass":   # FS-021 mode switch
+                        if ems_ok:
+                            _mem_widget(st.checkbox, "Equiripple Magnitude Stopband", "widget_ems", False,
+                                        help="Place the active notches automatically so that every "
+                                             "stopband hump sits at −A_s (Inverse-Chebyshev-like "
+                                             "magnitude). The corner stays at f_c: the poles are "
+                                             "scaled up, so τ₀ drops by the reported factor while "
+                                             "the delay keeps its shape.")
                         else:
-                            col_val.text_input(f"Notch {i} freq", value="∞", disabled=True, label_visibility="collapsed")
+                            st.caption("Equiripple Magnitude Stopband: needs manual order and the "
+                                       "corner anchor.")
+                    if ems_on:
+                        st.caption(
+                            "Notches placed so every stopband hump sits at −A_s. Tick **Active** to "
+                            "choose how many: each one costs 40 dB/dec of far-stopband roll-off. "
+                            "The poles are scaled to hold the corner: the delay keeps its shape and "
+                            "τ₀ shrinks by the scale. Your pins come back when the mode is off.")
+                    elif is_delay:
+                        st.caption(
+                            "Stopband only: a pinned notch must lie above the corner (passband "
+                            "notches are ignored). Notches add no group "
+                            "delay: the poles keep their delay shape"
+                            + ("; with the τ₀ anchor the corner moves instead of the delay."
+                               if delay_anchor == "delay" else
+                               " and are scaled to hold the corner, so τ₀ shrinks slightly."))
+                    for i in range(P_eff):
+                        col_pin, col_val, col_unit = st.columns([1, 3, 6])
+                        if ems_on:   # FS-021: Active column, solved frequencies read-only
+                            if col_pin.checkbox(f"Active {i}", key=f"ems_active_{i}") and engine_results:
+                                col_val.number_input(f"Notch {i} freq", value=float(free_notches_display.get(i, 0.0) / multiplier),
+                                                     format="%.4f", disabled=True, label_visibility="collapsed")
+                            else:
+                                col_val.text_input(f"Notch {i} freq", value="∞", disabled=True, label_visibility="collapsed")
+                            col_unit.markdown(f"**{freq_unit}**")
+                            continue
+                        is_pinned = col_pin.checkbox(f"Pin {i}", key=f"pin_notch_{i}")
+                    
+                        safe_fallback = f2_val if f2_val is not None else (f1_val * 2.0 if filter_type == "Lowpass" else f1_val * 0.5)
+                    
+                        if is_pinned:
+                            initial_val = st.session_state.get(f"val_notch_{i}", st.session_state.get('_last_free_notches', {}).get(i, safe_fallback) if response in ["Elliptic", "Inverse Chebyshev"] else safe_fallback)
+                            col_val.number_input(f"Notch {i} freq", value=float(initial_val), format="%.4f", key=f"val_notch_{i}", label_visibility="collapsed")
+                        else:
+                            if engine_results and response in ["Elliptic", "Inverse Chebyshev"]:
+                                display_val = free_notches_display.get(i, 0.0) / multiplier
+                                col_val.number_input(f"Notch {i} freq", value=float(display_val), format="%.4f", disabled=True, label_visibility="collapsed")
+                            else:
+                                col_val.text_input(f"Notch {i} freq", value="∞", disabled=True, label_visibility="collapsed")
                         col_unit.markdown(f"**{freq_unit}**")
-                        continue
-                    is_pinned = col_pin.checkbox(f"Pin {i}", key=f"pin_notch_{i}")
-                    
-                    safe_fallback = f2_val if f2_val is not None else (f1_val * 2.0 if filter_type == "Lowpass" else f1_val * 0.5)
-                    
-                    if is_pinned:
-                        initial_val = st.session_state.get(f"val_notch_{i}", st.session_state.get('_last_free_notches', {}).get(i, safe_fallback) if response in ["Elliptic", "Inverse Chebyshev"] else safe_fallback)
-                        col_val.number_input(f"Notch {i} freq", value=float(initial_val), format="%.4f", key=f"val_notch_{i}", label_visibility="collapsed")
-                    else:
-                        if engine_results and response in ["Elliptic", "Inverse Chebyshev"]:
-                            display_val = free_notches_display.get(i, 0.0) / multiplier
-                            col_val.number_input(f"Notch {i} freq", value=float(display_val), format="%.4f", disabled=True, label_visibility="collapsed")
-                        else:
-                            col_val.text_input(f"Notch {i} freq", value="∞", disabled=True, label_visibility="collapsed")
-                    col_unit.markdown(f"**{freq_unit}**")
-                if ems_on and engine_results:
-                    _render_ems_readout(engine_results, final_lp_order, final_as_lp, freq_unit)
-        else:
-            st.info("Order is too low to support finite transmission zeros.")
-
-    elif filter_type == "Bandpass":
-        if response == "Elliptic":
-            st.info("Manual Notch Tuning is disabled for Elliptic Bandpass filters to preserve twin equiripple passband integrity.")
-        elif is_delay:
-            st.info(f"Manual notches are not available for {response} bandpass filters.")
-        else:
-            col_grid_hp, col_grid_lp = st.columns(2)
-            
-            with col_grid_hp:
-                st.markdown("**Lower Stopband Notches**")
-                if P_eff_hp > 0:
-                    for i in range(P_eff_hp):
-                        c_pin, c_val, c_unit = st.columns([1, 2, 2])
-                        is_pinned = c_pin.checkbox(f"Pin {i}", key=f"pin_notch_hp_{i}")
-                        safe_fb = f1_val * 0.5
-                        
-                        if is_pinned:
-                            init_val = st.session_state.get(f"val_notch_hp_{i}", st.session_state.get('_last_free_notches_hp', {}).get(i, safe_fb) if response in ["Elliptic", "Inverse Chebyshev"] else safe_fb)
-                            c_val.number_input(f"Notch HP {i}", value=float(init_val), format="%.4f", key=f"val_notch_hp_{i}", label_visibility="collapsed")
-                        else:
-                            if engine_results and response in ["Elliptic", "Inverse Chebyshev"]:
-                                disp_val = free_notches_display_hp.get(i, 0.0) / multiplier
-                                c_val.number_input(f"Notch HP {i}", value=float(disp_val), format="%.4f", disabled=True, label_visibility="collapsed")
-                            else:
-                                c_val.text_input(f"Notch HP {i}", value="0", disabled=True, label_visibility="collapsed")
-                        c_unit.markdown(f"**{freq_unit}**")
-                else:
-                    st.info("Order too low.")
-                    
-            with col_grid_lp:
-                st.markdown("**Upper Stopband Notches**")
-                if P_eff_lp > 0:
-                    for i in range(P_eff_lp):
-                        c_pin, c_val, c_unit = st.columns([1, 2, 2])
-                        is_pinned = c_pin.checkbox(f"Pin {i}", key=f"pin_notch_lp_{i}")
-                        safe_fb = f2_val * 2.0
-                        
-                        if is_pinned:
-                            init_val = st.session_state.get(f"val_notch_lp_{i}", st.session_state.get('_last_free_notches_lp', {}).get(i, safe_fb) if response in ["Elliptic", "Inverse Chebyshev"] else safe_fb)
-                            c_val.number_input(f"Notch LP {i}", value=float(init_val), format="%.4f", key=f"val_notch_lp_{i}", label_visibility="collapsed")
-                        else:
-                            if engine_results and response in ["Elliptic", "Inverse Chebyshev"]:
-                                disp_val = free_notches_display_lp.get(i, 0.0) / multiplier
-                                c_val.number_input(f"Notch LP {i}", value=float(disp_val), format="%.4f", disabled=True, label_visibility="collapsed")
-                            else:
-                                c_val.text_input(f"Notch LP {i}", value="∞", disabled=True, label_visibility="collapsed")
-                        c_unit.markdown(f"**{freq_unit}**")
-                else:
-                    st.info("Order too low.")
-
-    elif filter_type == "Band-Reject":
-        if response == "Elliptic":
-            st.info("Manual Notch Tuning is disabled for Elliptic Band-Reject filters to preserve twin equiripple passband integrity. (Coincident Stopband Notches are still supported via the sidebar).")
-        else:
-            P_tot = (final_lp_order + final_hp_order) // 2
-            P_eff_br = P_tot - 1 if sb_roll_lp and response in ["Inverse Chebyshev", "Elliptic"] else P_tot
-            
-            if P_eff_br > 0:
-                for i in range(P_eff_br):
-                    col_pin, col_val, col_unit = st.columns([1, 3, 6])
-                    is_pinned = col_pin.checkbox(f"Pin {i}", key=f"pin_notch_{i}")
-                    safe_fb = np.sqrt(f1_val * f2_val)
-                    
-                    if is_pinned:
-                        init_val = st.session_state.get(f"val_notch_{i}", st.session_state.get('_last_free_notches', {}).get(i, safe_fb) if response in ["Elliptic", "Inverse Chebyshev"] else safe_fb)
-                        col_val.number_input(f"Notch {i} freq", value=float(init_val), format="%.4f", key=f"val_notch_{i}", label_visibility="collapsed")
-                    else:
-                        if engine_results and response in ["Elliptic", "Inverse Chebyshev"]:
-                            disp_val = free_notches_display.get(i, 0.0) / multiplier
-                            col_val.number_input(f"Notch {i} freq", value=float(disp_val), format="%.4f", disabled=True, label_visibility="collapsed")
-                        else:
-                            col_val.text_input(f"Notch {i} freq", value="∞", disabled=True, label_visibility="collapsed")
-                    col_unit.markdown(f"**{freq_unit}**")
+                    if ems_on and engine_results:
+                        _render_ems_readout(engine_results, final_lp_order, final_as_lp, freq_unit)
             else:
                 st.info("Order is too low to support finite transmission zeros.")
+
+        elif filter_type == "Bandpass":
+            if response == "Elliptic":
+                st.info("Manual Notch Tuning is disabled for Elliptic Bandpass filters to preserve twin equiripple passband integrity.")
+            elif is_delay:
+                st.info(f"Manual notches are not available for {response} bandpass filters.")
+            else:
+                col_grid_hp, col_grid_lp = st.columns(2)
+            
+                with col_grid_hp:
+                    st.markdown("**Lower Stopband Notches**")
+                    if P_eff_hp > 0:
+                        for i in range(P_eff_hp):
+                            c_pin, c_val, c_unit = st.columns([1, 2, 2])
+                            is_pinned = c_pin.checkbox(f"Pin {i}", key=f"pin_notch_hp_{i}")
+                            safe_fb = f1_val * 0.5
+                        
+                            if is_pinned:
+                                init_val = st.session_state.get(f"val_notch_hp_{i}", st.session_state.get('_last_free_notches_hp', {}).get(i, safe_fb) if response in ["Elliptic", "Inverse Chebyshev"] else safe_fb)
+                                c_val.number_input(f"Notch HP {i}", value=float(init_val), format="%.4f", key=f"val_notch_hp_{i}", label_visibility="collapsed")
+                            else:
+                                if engine_results and response in ["Elliptic", "Inverse Chebyshev"]:
+                                    disp_val = free_notches_display_hp.get(i, 0.0) / multiplier
+                                    c_val.number_input(f"Notch HP {i}", value=float(disp_val), format="%.4f", disabled=True, label_visibility="collapsed")
+                                else:
+                                    c_val.text_input(f"Notch HP {i}", value="0", disabled=True, label_visibility="collapsed")
+                            c_unit.markdown(f"**{freq_unit}**")
+                    else:
+                        st.info("Order too low.")
+                    
+                with col_grid_lp:
+                    st.markdown("**Upper Stopband Notches**")
+                    if P_eff_lp > 0:
+                        for i in range(P_eff_lp):
+                            c_pin, c_val, c_unit = st.columns([1, 2, 2])
+                            is_pinned = c_pin.checkbox(f"Pin {i}", key=f"pin_notch_lp_{i}")
+                            safe_fb = f2_val * 2.0
+                        
+                            if is_pinned:
+                                init_val = st.session_state.get(f"val_notch_lp_{i}", st.session_state.get('_last_free_notches_lp', {}).get(i, safe_fb) if response in ["Elliptic", "Inverse Chebyshev"] else safe_fb)
+                                c_val.number_input(f"Notch LP {i}", value=float(init_val), format="%.4f", key=f"val_notch_lp_{i}", label_visibility="collapsed")
+                            else:
+                                if engine_results and response in ["Elliptic", "Inverse Chebyshev"]:
+                                    disp_val = free_notches_display_lp.get(i, 0.0) / multiplier
+                                    c_val.number_input(f"Notch LP {i}", value=float(disp_val), format="%.4f", disabled=True, label_visibility="collapsed")
+                                else:
+                                    c_val.text_input(f"Notch LP {i}", value="∞", disabled=True, label_visibility="collapsed")
+                            c_unit.markdown(f"**{freq_unit}**")
+                    else:
+                        st.info("Order too low.")
+
+        elif filter_type == "Band-Reject":
+            if response == "Elliptic":
+                st.info("Manual Notch Tuning is disabled for Elliptic Band-Reject filters to preserve twin equiripple passband integrity. (Coincident Stopband Notches are still supported via the sidebar).")
+            else:
+                P_tot = (final_lp_order + final_hp_order) // 2
+                P_eff_br = P_tot - 1 if sb_roll_lp and response in ["Inverse Chebyshev", "Elliptic"] else P_tot
+            
+                if P_eff_br > 0:
+                    for i in range(P_eff_br):
+                        col_pin, col_val, col_unit = st.columns([1, 3, 6])
+                        is_pinned = col_pin.checkbox(f"Pin {i}", key=f"pin_notch_{i}")
+                        safe_fb = np.sqrt(f1_val * f2_val)
+                    
+                        if is_pinned:
+                            init_val = st.session_state.get(f"val_notch_{i}", st.session_state.get('_last_free_notches', {}).get(i, safe_fb) if response in ["Elliptic", "Inverse Chebyshev"] else safe_fb)
+                            col_val.number_input(f"Notch {i} freq", value=float(init_val), format="%.4f", key=f"val_notch_{i}", label_visibility="collapsed")
+                        else:
+                            if engine_results and response in ["Elliptic", "Inverse Chebyshev"]:
+                                disp_val = free_notches_display.get(i, 0.0) / multiplier
+                                col_val.number_input(f"Notch {i} freq", value=float(disp_val), format="%.4f", disabled=True, label_visibility="collapsed")
+                            else:
+                                col_val.text_input(f"Notch {i} freq", value="∞", disabled=True, label_visibility="collapsed")
+                        col_unit.markdown(f"**{freq_unit}**")
+                else:
+                    st.info("Order is too low to support finite transmission zeros.")
                 
 # ------------------------------------------------------------
 # 3. RENDER TAB: ROOTS & TRANSFER FUNCTION
@@ -1471,15 +1491,18 @@ with tab_pairing:
             st.session_state.absorb_checked = False
             
         do_absorb = False
-        
+        # FS-001: the 3rd-order checkbox, Auto-Pair row and clickable
+        # mnemoscheme all change the pairing -> one design-control box.
+        pair_box = design_control("pairing")
+
         if real_pole_count > 0:
             # Render the checkbox and tie it to our persistent memory
-            st.session_state.absorb_checked = st.checkbox(
-                "Enable 3rd-Order Sections (Absorb 1st-Order Poles)", 
+            st.session_state.absorb_checked = pair_box.checkbox(
+                "Enable 3rd-Order Sections (Absorb 1st-Order Poles)",
                 value=st.session_state.absorb_checked
             )
             do_absorb = st.session_state.absorb_checked
-            st.markdown("---")
+            pair_box.markdown("---")
         else:
             # If no real poles exist, force absorption to False for the engine
             do_absorb = False
@@ -1546,7 +1569,7 @@ with tab_pairing:
             })
 
         # 5. Render the Visual Web & Interactive Controls
-        col_title, col_reset = st.columns([3, 1])
+        col_title, col_reset = pair_box.columns([3, 1])
         with col_title:
             if st.session_state.manual_routing_active:
                 st.warning("⚠️ **Manual Override Active:** Background auto-router is currently bypassed.")
@@ -1575,8 +1598,8 @@ with tab_pairing:
         )
         
         # Capture the click event from Plotly!
-        selection = st.plotly_chart(
-            fig_mnemo, use_container_width=True, 
+        selection = pair_box.plotly_chart(
+            fig_mnemo, use_container_width=True,
             key="pz_mnemo_chart", on_select="rerun"
         )
         
@@ -1597,7 +1620,7 @@ with tab_pairing:
                         st.session_state.selected_brick_id = clicked_id
                         st.rerun()
                     else:
-                        st.warning("⚠️ Please click a **Pole** first to initiate routing.")
+                        pair_box.warning("⚠️ Please click a **Pole** first to initiate routing.")
                         
                 # --- STATE 2: A POLE IS CURRENTLY SELECTED ---
                 else:
@@ -1631,7 +1654,7 @@ with tab_pairing:
                         # Only allow mixing Real + Complex
                         if p1['type'] != p2['type']:
                             if not do_absorb:
-                                st.error("🚫 Cannot merge poles: 'Enable 3rd-Order Sections' is unchecked.")
+                                pair_box.error("🚫 Cannot merge poles: 'Enable 3rd-Order Sections' is unchecked.")
                             else:
                                 complex_id = selected_id if p1['type'] == 'Complex Pair' else clicked_id
                                 real_id = selected_id if p1['type'] == 'Real' else clicked_id
@@ -1701,12 +1724,12 @@ with tab_pairing:
 
         # UI Feedback for the first click
         if st.session_state.selected_brick_id:
-            st.info("📍 **Pole Selected:** Click a zero to assign it, click a real pole to absorb it, or click the pole again to cancel/detach.")
+            pair_box.info("📍 **Pole Selected:** Click a zero to assign it, click a real pole to absorb it, or click the pole again to cancel/detach.")
             
         # UI Warning if there are unassigned zeros on the board
         assigned_zero_ids = [z_id for s in st.session_state.stage_routing for z_id in s.get('zero_ids', [])]
         if len(z_bricks) > len(assigned_zero_ids):
-            st.error("⚠️ **Pairing Incomplete:** There are floating zeros on the board (drawn in gray). Please assign them to a stage.")
+            pair_box.error("⚠️ **Pairing Incomplete:** There are floating zeros on the board (drawn in gray). Please assign them to a stage.")
 
         # ==========================================================
         # 7. STAGE GAIN DISTRIBUTION & HARDWARE SECTIONS
@@ -1718,7 +1741,8 @@ with tab_pairing:
         if len(z_bricks) == len(assigned_zero_ids):
             
             # --- 7A. Gain Distribution Logic ---
-            col_gain_ui, col_gain_info = st.columns([2, 1])
+            # FS-001: the distribution radio sets every stage's Ki -> design control
+            col_gain_ui, col_gain_info = design_control("gain_dist").columns([2, 1])
             with col_gain_ui:
                 # The "Equalize DC and HF gains" strategy is meaningful only for a
                 # Band-Reject (two passbands straddling the stop-band); it appears
