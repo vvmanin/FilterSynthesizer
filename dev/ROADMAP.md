@@ -129,10 +129,9 @@ first.
 
 | ID | Title | P | State | Effort | Depends on |
 |---|---|---|---|---|---|
-| FS-001 | Design-control section style (all tabs) | P2 *(s)* | VALIDATING | medium | — |
-| FS-002 | Response Plots: phase/GD on main plot, compact sections | P2 *(s)* | PROPOSED | medium | FS-001 (soft) |
+| FS-002 | Response Plots: phase/GD on main plot, compact sections | P2 *(s)* | PROPOSED | medium | FS-001 (soft, done) |
 | FS-003 | Fold "Roots & Transfer Function" tab into Response Plots | P2 *(s)* | PROPOSED | medium | FS-002 (hard) |
-| FS-004 | Biquad Pairing tab: compact layout, rad/s note font | P2 *(s)* | PROPOSED | medium | FS-001 (soft) |
+| FS-004 | Biquad Pairing tab: compact layout, rad/s note font | P2 *(s)* | PROPOSED | medium | FS-001 (soft, done) |
 | FS-007 | Custom filter design (coefficients or poles/zeros) | P1 | PLANNED | plan xhigh / build high | FS-003 (soft), FS-016 (soft) |
 | FS-008 | LTspice export with Monte Carlo presets (AC + MC; design note) | P1 | PLANNED | plan xhigh / build high | FS-005 (hard, done) |
 | FS-009 | Noise analysis in LTspice output | P2 *(s)* | PROPOSED | medium | FS-008 (hard) |
@@ -158,7 +157,7 @@ first.
 
 Suggested order: FS-008 (the P1 track; FS-005 and FS-006 are
 done) and FS-007 (PLANNED; build after FS-016 if convenient); UI polish
-FS-001 → FS-002 → FS-003 → FS-004 can be interleaved as low-risk
+FS-002 → FS-003 → FS-004 (FS-001 is done) can be interleaved as low-risk
 medium-effort sessions.
 
 Non-urgent follow-ups added 2026-09-27, ranked by implementation convenience
@@ -181,21 +180,6 @@ FS-008 and FS-024; FS-009 / FS-010 plug into FS-008's bundle builder and IR;
 FS-027 (loaded realized response) reuses FS-008's IR and MNA.
 
 ---
-
-### FS-001 — Design-control section style (all tabs)
-- **State:** VALIDATING
-- **Priority:** P2 (suggested)
-- **Effort:** medium
-- **Tiers:** D
-- **Depends on:** —
-- **Contracts:** —
-- **Files:** `app.py` (CSS block + tab sections), `ui_components.py` (shared helper), `topology_tab.py`, `response_tab.py`, `requirements.txt`
-- **Goal:** Every in-tab section whose controls change the design result is visually distinct (colour/border/background) from read-only sections, so the user can see at a glance what affects outputs.
-- **Scope:** In — `ui_components.design_control(key, variant)` (keyed `st.container`) plus its CSS, applied to: Manual Notch Tuning/Placement (Response Plots); the 3rd-order checkbox + Auto-Pair row + clickable mnemoscheme, and the Remaining Gain Distribution row of Hardware Stage Parameters (Biquad Pairing); Convergence Settings, each section's settings expander + gain/Ki/Solve row, and each section's Sort + BOM table (Topology); Monte-Carlo tolerances + Run (Resulting Response). BOM table rows zebra-striped. Out — the left sidebar (unchanged); view-only toggles (Phase/GD/Linear, probes, units radios); read-only tables/TF displays; layout compaction (FS-002/003/004).
-- **Validation:** Visual check of all tabs in light and dark themes; every design-affecting section styled, no read-only section styled; controls still work (change one in each styled section and confirm outputs update).
-- **Open questions:** — (answered 2026-09-28: accent border + tint; Streamlit floor raised to 1.39 for `st.container(key=)`; Topology: all four parts count — settings, Ki/gain row, Convergence, BOM selection — with BOM selection in a second colour and zebra rows; Monte-Carlo tolerances count.)
-- **Notes:** Style = 4 px left accent + 1 px border + translucent tint, one rule for both themes. Blue `#2e7bcf` = design inputs (`st-key-dctl_*`); amber `#d68e1a` = picking a solver result (`st-key-dcsel_*`). Zebra = `rgba(128,128,128,0.12)` via pandas Styler on odd rows. The Manual Notch block was re-indented under one `with` (use `git diff -w`). Checked on branch `claude/fs-001-design-control-style` (Streamlit 1.55, browser pane): Elliptic LP 4 — pinning notch 0 at 2.5 kHz moved f_s 1.5155 → 1.9030 kHz; Elliptic LP 5 — 3rd-order checkbox 3 → 2 sections; Topology solve + BOM row pick updates "Selected #…" and the Overall-filter pending list; Butterworth LP 5 — Run Monte-Carlo gives the DC-gain spread; light and dark themes both legible; no server errors. Not exercised: gain-distribution radio with a non-unity remainder (code path only moved into the box).
-- **Updated:** 2026-09-28
 
 ### FS-002 — Response Plots: phase/GD on main plot, compact sections
 - **State:** PROPOSED
@@ -566,6 +550,7 @@ One line per item: `FS-NNN — title — DONE|DROPPED YYYY-MM-DD — commit/reas
 FS-005 — Op-amp library as a separate module/data file — DONE 2026-09-27 — 6f17ca2
 FS-006 — Bessel and equiripple-delay responses — DONE 2026-09-27 — 3899437 (design note `dev/FS-006_bessel_eqdelay_design_note.md`, checks `dev/fs006/check_delay_solvers.py`)
 FS-021 — Equiripple-magnitude stopband for delay responses — DONE 2026-09-27 — 6b59732 (checks `dev/fs006/check_delay_solvers.py` §11)
+FS-001 — Design-control section style (all tabs) — DONE 2026-09-28 — e3b1ab6 (`ui_components.design_control`; blue = design inputs, amber = BOM pick; streamlit >= 1.39)
 
 ---
 
