@@ -129,8 +129,7 @@ first.
 
 | ID | Title | P | State | Effort | Depends on |
 |---|---|---|---|---|---|
-| FS-002 | Response Plots: phase/GD on main plot, compact sections | P2 *(s)* | VALIDATING | medium | FS-001 (soft, done) |
-| FS-003 | Fold "Roots & Transfer Function" tab into Response Plots | P2 *(s)* | PROPOSED | medium | FS-002 (hard) |
+| FS-003 | Fold "Roots & Transfer Function" tab into Response Plots | P2 *(s)* | PROPOSED | medium | FS-002 (hard, done) |
 | FS-004 | Biquad Pairing tab: compact layout, rad/s note font | P2 *(s)* | PROPOSED | medium | FS-001 (soft, done) |
 | FS-007 | Custom filter design (coefficients or poles/zeros) | P1 | PLANNED | plan xhigh / build high | FS-003 (soft), FS-016 (soft) |
 | FS-008 | LTspice export with Monte Carlo presets (AC + MC; design note) | P1 | PLANNED | plan xhigh / build high | FS-005 (hard, done) |
@@ -157,7 +156,7 @@ first.
 
 Suggested order: FS-008 (the P1 track; FS-005 and FS-006 are
 done) and FS-007 (PLANNED; build after FS-016 if convenient); UI polish
-FS-002 → FS-003 → FS-004 (FS-001 is done) can be interleaved as low-risk
+FS-003 → FS-004 (FS-001 and FS-002 are done) can be interleaved as low-risk
 medium-effort sessions.
 
 Non-urgent follow-ups added 2026-09-27, ranked by implementation convenience
@@ -180,21 +179,6 @@ FS-008 and FS-024; FS-009 / FS-010 plug into FS-008's bundle builder and IR;
 FS-027 (loaded realized response) reuses FS-008's IR and MNA.
 
 ---
-
-### FS-002 — Response Plots: phase/GD on main plot, compact sections
-- **State:** VALIDATING
-- **Priority:** P2 (suggested)
-- **Effort:** medium
-- **Tiers:** D
-- **Depends on:** FS-001 (soft — reuse its style for Manual Notch Tuning)
-- **Contracts:** —
-- **Files:** `app.py` (Response Plots tab; `show_phase`/`show_gd` checkboxes ~L694), `plot_utils.py` (magnitude figure), `hw_plots.py` (reference line styles only)
-- **Goal:** The Phase and Group Delay checkboxes overlay their curves on the main magnitude plot instead of opening separate plots.
-- **Scope:** In — remove the separate phase/GD plots; keep both checkboxes; draw phase and GD on the main plot with secondary axes; magnitude style unchanged; phase/GD styles copied from the Ideal traces on the "Resulting Response & Schematic" tab; reduce vertical space of Calculated Stopband Edges, Frequency Probes and Manual Notch Tuning without smaller fonts; Manual Notch Tuning gets the design-control style. Out — changes to computed data.
-- **Validation:** For LP/HP/BP/BR (one design each): toggle each checkbox alone and both together; curves match the old separate plots numerically (spot-check a few frequencies); axes/legend readable; hover works; section heights visibly reduced, font sizes unchanged.
-- **Open questions:** With both phase and GD on, use two right-hand axes, or one shared right axis with GD normalized? — **Answered:** two right-hand axes, as `hw_plots.bode_figure` already does (phase y2, GD y3 floating right of it); GD stays in real ms, no normalization.
-- **Notes:** Built 2026-09-28. `plot_utils.plot_main_magnitude(..., show_phase, show_gd)` calls a new `_overlay_phase_gd`; `plot_phase_delay` removed (no other caller). Same data as the old plot (unit-gain phase, analytic GD in ms) but on the main plot's grid, so HP/BP/BR now get their own frequency window (the old plot always used an LP-style window). Styles: phase `#1f6fb2` dash, GD `#2e8b57` dot, width 1.5 (Ideal traces of `hw_plots`); coloured axis titles/ticks; legend appears only with an overlay on. GD axis window = min/max of the finite GD ±20 %. Right axes use `tickmode="auto"` (Streamlit's theme otherwise syncs them to the magnitude grid → non-round ticks); the 3rd axis uses `autoshift` + `shift=22` px so the phase title never collides with GD ticks. Compaction: the three `---` rules below the plots removed; each probe readout (Gain / Phase, still `st.caption`) sits beside its input → one row; notch rows `vertical_alignment="center"` and CSS "8." halves the block gap inside `st-key-dctl_notch`. Manual Notch Tuning already had the design-control style (FS-001). Claude's checks: scratch comparison old vs new traces (Chebyshev-5 and Elliptic-4 LP, phase and GD at 0.1/0.5/0.9/1/1.5/3 × fc — equal up to grid interpolation); app run: LP/HP/BP/BR Elliptic with both overlays, LP Butterworth phase-only; no console errors. Hover not visually confirmed (the preview pane showed no tooltip on synthetic hover).
-- **Updated:** 2026-09-28
 
 ### FS-003 — Fold "Roots & Transfer Function" tab into Response Plots
 - **State:** PROPOSED
@@ -552,6 +536,7 @@ FS-005 — Op-amp library as a separate module/data file — DONE 2026-09-27 —
 FS-006 — Bessel and equiripple-delay responses — DONE 2026-09-27 — 3899437 (design note `dev/FS-006_bessel_eqdelay_design_note.md`, checks `dev/fs006/check_delay_solvers.py`)
 FS-021 — Equiripple-magnitude stopband for delay responses — DONE 2026-09-27 — 6b59732 (checks `dev/fs006/check_delay_solvers.py` §11)
 FS-001 — Design-control section style (all tabs) — DONE 2026-09-28 — e3b1ab6 (`ui_components.design_control`; blue = design inputs, amber = BOM pick; streamlit >= 1.39)
+FS-002 — Response Plots: phase/GD on main plot, compact sections — DONE 2026-09-28 — dfd48f2 (phase y2 / GD y3 right-hand axes as in `hw_plots`; `plot_phase_delay` removed)
 
 ---
 
