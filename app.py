@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 
 from filter_engine import synthesize_lowpass, synthesize_highpass, synthesize_bandpass, synthesize_bandreject
-from plot_utils import plot_main_magnitude, plot_passband_magnitude, plot_phase_delay, evaluate_h_complex, plot_pole_zero_map, plot_mnemoscheme_map
+from plot_utils import plot_main_magnitude, plot_passband_magnitude, evaluate_h_complex, plot_pole_zero_map, plot_mnemoscheme_map
 from plot_utils import plot_group_delay_detail, format_seconds
 from tf_utils import clean_roots, poly_to_latex, roots_to_biquad_latex, build_coeff_table, format_val, format_latex_val, poly_to_latex_lines, roots_to_biquad_lines, tf_latex
 from pairing_utils import build_stage_bricks, auto_pair_stages, find_clicked_brick, compute_stage_gains
@@ -241,6 +241,17 @@ st.markdown("""
         border-color: rgba(214, 142, 26, 0.35);
         border-left-color: #d68e1a;
         background: rgba(214, 142, 26, 0.07);
+    }
+
+    /* 8. FS-002 compact Response Plots: the Manual Notch box stacks one
+          row per notch -- halve the 1rem block gap and drop the unit
+          label's paragraph margin (fonts unchanged). */
+    .st-key-dctl_notch,
+    .st-key-dctl_notch [data-testid="stVerticalBlock"] {
+        gap: 0.4rem;
+    }
+    .st-key-dctl_notch [data-testid="stColumn"] [data-testid="stMarkdownContainer"] p {
+        margin-bottom: 0;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -959,7 +970,7 @@ with tab_plots:
     st.markdown("#### Magnitude Response")
     
     col_plot, col_toggles = st.columns([5, 1])
-    with col_toggles:
+    with col_toggles:   # FS-002: overlays on the main plot (right-hand axes)
         show_phase = st.checkbox("Phase")
         show_gd = st.checkbox("Group Delay")
         
@@ -971,23 +982,25 @@ with tab_plots:
                 fig_mag = plot_main_magnitude(
                     engine_results=engine_results, f_corner_ui=f1_val, freq_unit=freq_unit, multiplier=multiplier,
                     alpha_max=final_alpha, as_db=final_as_hp, filter_type=filter_type, target_gain_units=final_gain_units,
-                    f2_corner_ui=f2_val, as_db_2=final_as_lp
+                    f2_corner_ui=f2_val, as_db_2=final_as_lp, show_phase=show_phase, show_gd=show_gd
                 )
             elif filter_type == "Band-Reject":
                 fig_mag = plot_main_magnitude(
                     engine_results=engine_results, f_corner_ui=f1_val, freq_unit=freq_unit, multiplier=multiplier,
                     alpha_max=final_alpha, as_db=final_as_lp, filter_type=filter_type, target_gain_units=final_gain_units,
-                    f2_corner_ui=f2_val 
+                    f2_corner_ui=f2_val, show_phase=show_phase, show_gd=show_gd
                 )
             elif filter_type == "Highpass":
                 fig_mag = plot_main_magnitude(
                     engine_results=engine_results, f_corner_ui=f1_val, freq_unit=freq_unit, multiplier=multiplier,
-                    alpha_max=final_alpha, as_db=final_as_hp, filter_type=filter_type, target_gain_units=final_gain_units
+                    alpha_max=final_alpha, as_db=final_as_hp, filter_type=filter_type, target_gain_units=final_gain_units,
+                    show_phase=show_phase, show_gd=show_gd
                 )
             else: # Lowpass
                 fig_mag = plot_main_magnitude(
                     engine_results=engine_results, f_corner_ui=f1_val, freq_unit=freq_unit, multiplier=multiplier,
-                    alpha_max=final_alpha, as_db=final_as_lp, filter_type=filter_type, target_gain_units=final_gain_units
+                    alpha_max=final_alpha, as_db=final_as_lp, filter_type=filter_type, target_gain_units=final_gain_units,
+                    show_phase=show_phase, show_gd=show_gd
                 )
             st.plotly_chart(fig_mag, use_container_width=True)
             
@@ -1023,20 +1036,13 @@ with tab_plots:
                     engine_results, freq_unit, multiplier, f1_val, f2_val,
                     fd_ui=_fd / multiplier if _fd else None)
                 st.plotly_chart(fig_gdd, use_container_width=True)
-            
-            # 3. Phase / Group Delay (Conditional)
-            if show_phase or show_gd:
-                st.markdown("#### Phase & Group Delay")
-                fig_phase_gd = plot_phase_delay(
-                    engine_results=engine_results, f_corner_ui=f1_val, freq_unit=freq_unit, 
-                    multiplier=multiplier, show_phase=show_phase, show_gd=show_gd
-                )
-                st.plotly_chart(fig_phase_gd, use_container_width=True)
+            # (FS-002: phase / group delay are overlaid on the main plot above.)
         else:
             st.info("[ Placeholder for Interactive Magnitude Plots ]", icon="📈")
-        
-    st.markdown("---")
-    
+
+    # FS-002: no horizontal rules between the sections below (they cost ~4rem
+    # each); the headings and the notch box border separate them.
+
     # --- A2. READ-ONLY ENGINE OUTPUTS ---
     if engine_results is not None:
         if filter_type in ["Lowpass", "Highpass"]:
@@ -1098,18 +1104,16 @@ with tab_plots:
                 st.success(f"**Calculated Stopband Edges:** Lower = {fs_lp_ui:,.4f} {freq_unit}, Upper = {fs_hp_ui:,.4f} {freq_unit}")
             else: 
                 st.info(f"**Calculated Stopband Edges:** Lower = {fs_lp_ui:,.4f} {freq_unit}, Upper = {fs_hp_ui:,.4f} {freq_unit}")
-        
-    st.markdown("---")
-    
+
     # --- B. FREQUENCY PROBES ---
     st.markdown("#### Frequency Probes")
     
     def get_probe_text(f_ui):
-        if not engine_results: return "Gain: **0.00 dB** | Phase: **0.0°**"
+        if not engine_results: return "Gain: **0.00 dB**  \nPhase: **0.0°**"
         h = evaluate_h_complex([f_ui * multiplier], engine_results['poles'], engine_results['zeros'], engine_results['k'] * final_gain_units)[0]
         mag = 20 * np.log10(max(abs(h), 1e-12))
         phase = np.degrees(np.angle(h))
-        return f"Gain: **{mag:.2f} dB** | Phase: **{phase:.1f}°**"
+        return f"Gain: **{mag:.2f} dB**  \nPhase: **{phase:.1f}°**"
     
     if filter_type == "Lowpass":
         p1_def = f1_val
@@ -1124,19 +1128,12 @@ with tab_plots:
         p2_def = f1_val * 1.5
         p3_def = f1_val * 10.0
     
-    col_p1, col_p2, col_p3 = st.columns(3)
-    
-    with col_p1:
-        p1_in = st.number_input(f"Probe 1 ({freq_unit})", value=p1_def, key=f"probe_1_{filter_type}", format="%.3f")
-        st.caption(get_probe_text(p1_in))
-    with col_p2:
-        p2_in = st.number_input(f"Probe 2 ({freq_unit})", value=p2_def, key=f"probe_2_{filter_type}", format="%.3f")
-        st.caption(get_probe_text(p2_in))
-    with col_p3:
-        p3_in = st.number_input(f"Probe 3 ({freq_unit})", value=p3_def, key=f"probe_3_{filter_type}", format="%.3f")
-        st.caption(get_probe_text(p3_in))
-        
-    st.markdown("---")
+    # FS-002: each readout sits beside its input (not under it) -> one row.
+    _pcols = st.columns([3, 2, 3, 2, 3, 2], vertical_alignment="bottom")
+    for _i, _pdef in enumerate((p1_def, p2_def, p3_def)):
+        _p_in = _pcols[2 * _i].number_input(f"Probe {_i + 1} ({freq_unit})", value=_pdef,
+                                            key=f"probe_{_i + 1}_{filter_type}", format="%.3f")
+        _pcols[2 * _i + 1].caption(get_probe_text(_p_in))
 
     # --- C. MANUAL NOTCH GRID ---
     with design_control("notch"):  # FS-001
@@ -1182,7 +1179,7 @@ with tab_plots:
                                if delay_anchor == "delay" else
                                " and are scaled to hold the corner, so τ₀ shrinks slightly."))
                     for i in range(P_eff):
-                        col_pin, col_val, col_unit = st.columns([1, 3, 6])
+                        col_pin, col_val, col_unit = st.columns([1, 3, 6], vertical_alignment="center")
                         if ems_on:   # FS-021: Active column, solved frequencies read-only
                             if col_pin.checkbox(f"Active {i}", key=f"ems_active_{i}") and engine_results:
                                 col_val.number_input(f"Notch {i} freq", value=float(free_notches_display.get(i, 0.0) / multiplier),
@@ -1222,7 +1219,7 @@ with tab_plots:
                     st.markdown("**Lower Stopband Notches**")
                     if P_eff_hp > 0:
                         for i in range(P_eff_hp):
-                            c_pin, c_val, c_unit = st.columns([1, 2, 2])
+                            c_pin, c_val, c_unit = st.columns([1, 2, 2], vertical_alignment="center")
                             is_pinned = c_pin.checkbox(f"Pin {i}", key=f"pin_notch_hp_{i}")
                             safe_fb = f1_val * 0.5
                         
@@ -1243,7 +1240,7 @@ with tab_plots:
                     st.markdown("**Upper Stopband Notches**")
                     if P_eff_lp > 0:
                         for i in range(P_eff_lp):
-                            c_pin, c_val, c_unit = st.columns([1, 2, 2])
+                            c_pin, c_val, c_unit = st.columns([1, 2, 2], vertical_alignment="center")
                             is_pinned = c_pin.checkbox(f"Pin {i}", key=f"pin_notch_lp_{i}")
                             safe_fb = f2_val * 2.0
                         
@@ -1269,7 +1266,7 @@ with tab_plots:
             
                 if P_eff_br > 0:
                     for i in range(P_eff_br):
-                        col_pin, col_val, col_unit = st.columns([1, 3, 6])
+                        col_pin, col_val, col_unit = st.columns([1, 3, 6], vertical_alignment="center")
                         is_pinned = col_pin.checkbox(f"Pin {i}", key=f"pin_notch_{i}")
                         safe_fb = np.sqrt(f1_val * f2_val)
                     

@@ -129,7 +129,7 @@ first.
 
 | ID | Title | P | State | Effort | Depends on |
 |---|---|---|---|---|---|
-| FS-002 | Response Plots: phase/GD on main plot, compact sections | P2 *(s)* | PROPOSED | medium | FS-001 (soft, done) |
+| FS-002 | Response Plots: phase/GD on main plot, compact sections | P2 *(s)* | VALIDATING | medium | FS-001 (soft, done) |
 | FS-003 | Fold "Roots & Transfer Function" tab into Response Plots | P2 *(s)* | PROPOSED | medium | FS-002 (hard) |
 | FS-004 | Biquad Pairing tab: compact layout, rad/s note font | P2 *(s)* | PROPOSED | medium | FS-001 (soft, done) |
 | FS-007 | Custom filter design (coefficients or poles/zeros) | P1 | PLANNED | plan xhigh / build high | FS-003 (soft), FS-016 (soft) |
@@ -182,7 +182,7 @@ FS-027 (loaded realized response) reuses FS-008's IR and MNA.
 ---
 
 ### FS-002 — Response Plots: phase/GD on main plot, compact sections
-- **State:** PROPOSED
+- **State:** VALIDATING
 - **Priority:** P2 (suggested)
 - **Effort:** medium
 - **Tiers:** D
@@ -192,8 +192,9 @@ FS-027 (loaded realized response) reuses FS-008's IR and MNA.
 - **Goal:** The Phase and Group Delay checkboxes overlay their curves on the main magnitude plot instead of opening separate plots.
 - **Scope:** In — remove the separate phase/GD plots; keep both checkboxes; draw phase and GD on the main plot with secondary axes; magnitude style unchanged; phase/GD styles copied from the Ideal traces on the "Resulting Response & Schematic" tab; reduce vertical space of Calculated Stopband Edges, Frequency Probes and Manual Notch Tuning without smaller fonts; Manual Notch Tuning gets the design-control style. Out — changes to computed data.
 - **Validation:** For LP/HP/BP/BR (one design each): toggle each checkbox alone and both together; curves match the old separate plots numerically (spot-check a few frequencies); axes/legend readable; hover works; section heights visibly reduced, font sizes unchanged.
-- **Open questions:** With both phase and GD on, use two right-hand axes, or one shared right axis with GD normalized?
-- **Updated:** 2026-09-26
+- **Open questions:** With both phase and GD on, use two right-hand axes, or one shared right axis with GD normalized? — **Answered:** two right-hand axes, as `hw_plots.bode_figure` already does (phase y2, GD y3 floating right of it); GD stays in real ms, no normalization.
+- **Notes:** Built 2026-09-28. `plot_utils.plot_main_magnitude(..., show_phase, show_gd)` calls a new `_overlay_phase_gd`; `plot_phase_delay` removed (no other caller). Same data as the old plot (unit-gain phase, analytic GD in ms) but on the main plot's grid, so HP/BP/BR now get their own frequency window (the old plot always used an LP-style window). Styles: phase `#1f6fb2` dash, GD `#2e8b57` dot, width 1.5 (Ideal traces of `hw_plots`); coloured axis titles/ticks; legend appears only with an overlay on. GD axis window = min/max of the finite GD ±20 %. Right axes use `tickmode="auto"` (Streamlit's theme otherwise syncs them to the magnitude grid → non-round ticks); the 3rd axis uses `autoshift` + `shift=22` px so the phase title never collides with GD ticks. Compaction: the three `---` rules below the plots removed; each probe readout (Gain / Phase, still `st.caption`) sits beside its input → one row; notch rows `vertical_alignment="center"` and CSS "8." halves the block gap inside `st-key-dctl_notch`. Manual Notch Tuning already had the design-control style (FS-001). Claude's checks: scratch comparison old vs new traces (Chebyshev-5 and Elliptic-4 LP, phase and GD at 0.1/0.5/0.9/1/1.5/3 × fc — equal up to grid interpolation); app run: LP/HP/BP/BR Elliptic with both overlays, LP Butterworth phase-only; no console errors. Hover not visually confirmed (the preview pane showed no tooltip on synthetic hover).
+- **Updated:** 2026-09-28
 
 ### FS-003 — Fold "Roots & Transfer Function" tab into Response Plots
 - **State:** PROPOSED
@@ -612,3 +613,13 @@ screenshots, `--accept`, PDF build); a batch deletes the entries it covered.
     rows are zebra-striped.
   - The manual could explain the colour code once. Stale screenshots: every
     tab that has one of these sections; run `doc_drift.py` for the list.
+- **FS-002** (Response Plots overlays and compaction):
+  - The **Phase** / **Group Delay** checkboxes no longer open a separate
+    "Phase & Group Delay" plot: they overlay dashed phase (deg) and dotted
+    group delay (ms) on the Magnitude Response plot, each on its own
+    right-hand axis, with a legend. The user manual's Phase row (Tab 1 table)
+    is now wrong.
+  - Frequency Probes: Gain and Phase readouts sit beside each probe input on
+    two lines (was one line under it). No horizontal rules between Stopband
+    Edges, Frequency Probes and Manual Notch; notch rows are tighter.
+  - Stale screenshots: Tab 1 (Response Plots); run `doc_drift.py` for the list.

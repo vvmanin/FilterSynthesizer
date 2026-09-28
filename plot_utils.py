@@ -26,7 +26,7 @@ def evaluate_transfer_function(f_hz, poles_rad, zeros_rad, k_gain):
     mag_linear = np.maximum(np.abs(h_complex), 1e-12)
     return 20 * np.log10(mag_linear)
 
-def plot_main_magnitude(engine_results, f_corner_ui, freq_unit, multiplier, alpha_max, as_db, filter_type, target_gain_units, f2_corner_ui=None, as_db_2=None):
+def plot_main_magnitude(engine_results, f_corner_ui, freq_unit, multiplier, alpha_max, as_db, filter_type, target_gain_units, f2_corner_ui=None, as_db_2=None, show_phase=False, show_gd=False):
     import plotly.graph_objects as go
     import numpy as np
     from plot_utils import evaluate_transfer_function
@@ -158,10 +158,68 @@ def plot_main_magnitude(engine_results, f_corner_ui, freq_unit, multiplier, alph
 
     fig.update_layout(
         xaxis_type="log", xaxis_title=f"Frequency ({freq_unit})", yaxis_title="Magnitude (dB)",
-        xaxis_range=[np.log10(safe_min_f), np.log10(safe_max_f)], 
+        xaxis_range=[np.log10(safe_min_f), np.log10(safe_max_f)],
         yaxis_range=[target_gain_db - min_as - 20, target_gain_db + 5], margin=dict(l=20, r=20, t=30, b=20), height=450, showlegend=False
     )
+    if show_phase or show_gd:
+        _overlay_phase_gd(fig, f_ui_array, multiplier, p_rad, z_rad, show_phase, show_gd)
     return fig
+
+
+# FS-002: phase / group-delay overlay styles, copied from the Ideal traces of
+# hw_plots.bode_figure ("Resulting Response & Schematic" tab).
+_C_PHASE = "#1f6fb2"
+_C_GD = "#2e8b57"
+
+
+def _overlay_phase_gd(fig, f_ui_array, multiplier, p_rad, z_rad, show_phase, show_gd):
+    """FS-002: draw phase (deg) and/or group delay (ms) on right-hand axes of the
+    main magnitude figure -- phase on y2, group delay on y2 alone or y3 beside it
+    (same axis layout as hw_plots.bode_figure). Same data as the former separate
+    Phase & Group Delay plot: phase of the unit-gain H(jw), analytic group delay."""
+    f_hz = f_ui_array * multiplier
+    fig.data[0].name = "Magnitude"
+    fig.data[0].showlegend = True
+    layout = dict(showlegend=True, margin=dict(l=20, r=20, t=40, b=20),
+                  legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+    if show_phase:
+        phase = np.degrees(np.unwrap(np.angle(evaluate_h_complex(f_hz, p_rad, z_rad, 1.0))))
+        fig.add_trace(go.Scattergl(x=f_ui_array, y=phase, mode='lines', yaxis='y2', name='Phase',
+                                   line=dict(color=_C_PHASE, width=1.5, dash='dash'),
+                                   hovertemplate='%{y:.1f}°<extra>Phase</extra>'))
+        layout['yaxis2'] = dict(title=dict(text='Phase (deg)', font=dict(color=_C_PHASE)),
+                                tickfont=dict(color=_C_PHASE), tickmode='auto', overlaying='y', side='right',
+                                showgrid=False)
+    if show_gd:
+        jw = 2j * np.pi * f_hz
+        gd_ms = np.zeros_like(f_hz)
+        if len(p_rad) > 0: gd_ms += np.sum(np.real(1.0 / (jw[:, None] - p_rad)), axis=1)
+        if len(z_rad) > 0: gd_ms -= np.sum(np.real(1.0 / (jw[:, None] - z_rad)), axis=1)
+        gd_ms *= 1000.0
+        gd_axis = 'y3' if show_phase else 'y2'
+        fig.add_trace(go.Scattergl(x=f_ui_array, y=gd_ms, mode='lines', yaxis=gd_axis,
+                                   name='Group delay',
+                                   line=dict(color=_C_GD, width=1.5, dash='dot'),
+                                   hovertemplate='%{y:.4g} ms<extra>Group delay</extra>'))
+        # Axis window from the finite bulk (+20 %), as on the hardware tab.
+        finite = gd_ms[np.isfinite(gd_ms)]
+        gd_range = None
+        if finite.size:
+            lo, hi = float(np.min(finite)), float(np.max(finite))
+            span = max(hi - lo, 1e-3)
+            gd_range = [lo - 0.2 * span, hi + 0.2 * span]
+        ax = dict(title=dict(text='Group delay (ms)', font=dict(color=_C_GD)),
+                  tickfont=dict(color=_C_GD), tickmode='auto', overlaying='y', side='right',
+                  showgrid=False, range=gd_range)
+        if show_phase:
+            # third axis floats just right of the phase axis: autoshift clears
+            # the phase ticks, `shift` (px) the phase title; shrink the plot to fit
+            layout['xaxis'] = dict(domain=[0.0, 0.86])
+            ax.update(anchor='free', position=0.86, autoshift=True, shift=22)
+            layout['yaxis3'] = ax
+        else:
+            layout['yaxis2'] = ax
+    fig.update_layout(**layout)
 
 def plot_passband_magnitude(engine_results, f_corner_ui, freq_unit, multiplier, alpha_max, target_gain_units, filter_type, f2_corner_ui=None):
     import plotly.graph_objects as go
@@ -220,57 +278,6 @@ def plot_passband_magnitude(engine_results, f_corner_ui, freq_unit, multiplier, 
         yaxis_range=[target_gain_db - alpha_max - 0.25, target_gain_db + 0.25], 
         margin=dict(l=20, r=20, t=30, b=10), height=300, showlegend=False
     )
-    return fig
-    
-def plot_phase_delay(engine_results, f_corner_ui, freq_unit, multiplier, show_phase, show_gd):
-    p_rad, z_rad = engine_results['poles'], engine_results['zeros']
-    
-    # --- CALCULATE SAFE VIEWPORT LIMITS FIRST ---
-    safe_max_f = f_corner_ui * 100.0
-    fs_hz = engine_results.get('f_stop_hz')
-    if fs_hz is not None:
-        fs_ui = fs_hz / multiplier
-        if fs_ui < f_corner_ui * 10000.0:
-            safe_max_f = max(safe_max_f, fs_ui * 1.5)
-
-    # NOW generate the array so it perfectly fills the viewport
-    f_ui_array = np.logspace(np.log10(f_corner_ui * 0.01), np.log10(safe_max_f), 1500)
-    w = 2 * np.pi * (f_ui_array * multiplier)
-    jw = 1j * w
-    
-    fig = go.Figure()
-    
-    if show_phase:
-        h_complex = evaluate_h_complex(f_ui_array * multiplier, p_rad, z_rad, 1.0)
-        phase_deg = np.degrees(np.unwrap(np.angle(h_complex)))
-        fig.add_trace(go.Scattergl(x=f_ui_array, y=phase_deg, mode='lines', line=dict(color='orange', width=2), name='Phase (deg)'))
-
-    if show_gd:
-        gd_s = np.zeros_like(w)
-        if len(p_rad) > 0: gd_s += np.sum(np.real(1.0 / (jw[:, None] - p_rad)), axis=1)
-        if len(z_rad) > 0: gd_s -= np.sum(np.real(1.0 / (jw[:, None] - z_rad)), axis=1)
-        gd_ms = gd_s * 1000.0
-        fig.add_trace(go.Scattergl(x=f_ui_array, y=gd_ms, mode='lines', line=dict(color='green', width=2), name='Group Delay (ms)', yaxis='y2' if show_phase else 'y'))
-    
-    layout_kwargs = dict(
-        xaxis_type="log", xaxis_title=f"Frequency ({freq_unit})", 
-        xaxis_range=[np.log10(f_corner_ui * 0.01), np.log10(safe_max_f)], # <--- THIS LOCKS THE VIEWPORT
-        margin=dict(l=20, r=20, t=30, b=20), height=350,
-        showlegend=True, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-    )
-    
-    if show_phase and show_gd:
-        layout_kwargs['yaxis'] = dict(title='Phase (deg)', color='orange')
-        layout_kwargs['yaxis2'] = dict(title='Group Delay (ms)', color='green', overlaying='y', side='right')
-    elif show_phase: layout_kwargs['yaxis'] = dict(title='Phase (deg)', color='orange')
-    elif show_gd: layout_kwargs['yaxis'] = dict(title='Group Delay (ms)', color='green')
-        
-    fig.update_layout(**layout_kwargs)
-    
-    fig.add_vline(x=f_corner_ui, line_dash="dot", line_color="black", opacity=0.7, line_width=1)
-    if fs_hz is not None:
-        fig.add_vline(x=fs_hz / multiplier, line_dash="dot", line_color="magenta", opacity=0.6, line_width=1, annotation_text=f"fs ({freq_unit})")
-    
     return fig
 
 
