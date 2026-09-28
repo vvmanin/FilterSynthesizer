@@ -15,10 +15,6 @@
       "Edit(docs/*.pdf)",
       "Edit(tf_cache_v6.json)"
     ],
-    "ask": [
-      "Write(**)",
-      "Edit(**)"
-    ],
     "allow": [
       "Read(**)",
       "Grep(**)",
