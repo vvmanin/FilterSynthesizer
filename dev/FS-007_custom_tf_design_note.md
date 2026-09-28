@@ -877,3 +877,60 @@ this planning go to FS-016's Notes, by code reading, to be confirmed there:
 Build FS-007 after them if convenient, or move the panel when they land.
 
 **FS-013 / FS-014.** They receive the gate rows of §12.
+
+---
+
+## 14. Build notes (2026-09-28)
+
+What the build changed against this note, and why. `check_custom_tf.py` asserts each point.
+
+- **Conditioning (§4.4, §11.1-7).** The diagnostic draws 8 perturbations *uniform* in ±u_in, the
+  statistics of rounding. The §4.4 table rounds once. Butterworth BP 2×5, b = 0.1 at 6 digits
+  crosses into the RHP in 88 % of such draws (the single rounding happened to land stable), so it
+  is an **error**, like 2×6. The warning case in the checks is 2×6 at 9 digits (0.54 dB in §4.4;
+  the diagnostic reports 1.9 dB). LP 8 at 6 digits: 8.6e-4 dB, no warning.
+- **Precision floor (§4.3).** u_in uses at least 6 significant digits (`MIN_DIGITS`). With the
+  plain rule, "1 0.5 1" has 1-digit precision (τ = 2), and the merge fused the Q = 2 conjugate
+  pair into a double real pole. Short typed values are exact in practice.
+- **Typed digits survive.** The panel's table cells are text, and the paste box stores its tokens.
+  `custom_tf` counts the digits in the text, so `1.02010` counts 6 digits; the float repr would
+  count 5. An explicit `coeff.digits` block still overrides the text when present.
+- **Merge selection.** Agglomeration keeps the *most merged* partition within τ, not the last one
+  before the first rejection: partial merges of a ring can exceed τ before the full cluster is
+  back under it.
+- **Prototype edge.** |H(j1)| more than 40 dB below the prototype's peak is an **error**, not only a
+  warning; a notch at ω = 1 gave α = ∞.
+- **G < 1 warning** only below −0.01 dB, so 6-digit roots with G = 0.999999 stay quiet.
+- **Keys.** K / A₀ have one key per form (`custom_K_f0q`, `custom_K_roots`, `custom_A0`). The
+  Custom α and A_s are keyed (`widget_custom_alpha`, `widget_custom_as`), so they persist.
+- **Engine-run placement.** The panel is its own keyed container `rp_custom`, above FS-003's
+  `rp_plots`. The manual notch box uses `contextlib.nullcontext()` for Custom, so no empty blue
+  box is drawn.
+
+### 14.1 Refinements (maintainer, 2026-09-28)
+
+These supersede §0 rows "Type in complete mode" and "Where does the input live?" where they
+differ.
+- **Complete mode: type = detection.** There is no Filter Type radio. `design_custom(…,
+  filter_type=None)` detects the type (§5.3 table, at the sidebar α) and uses it for the gate,
+  the edges and the pairing router. `info['target']` carries it, and the sidebar shows it. A
+  shape detected as "other" is an **error**. All-pass detection is left to FS-013 (see its
+  Notes).
+- **Sidebar order:** Response → Custom Transfer Function (mode; default **Lowpass prototype**)
+  → Scale (complete mode; moved from the panel) → Filter Type → Frequency (complete: Unit +
+  "Norm. frequency f_n" when normalized, nothing when absolute) → Gain (default **As
+  entered**) → α / A_s.
+- **Prototype BP/BR "Passband definition":** Corners, or Normalized width. Normalized width
+  uses the centre f₀ (the same box and value as f_n) and Δ = (f₂ − f₁)/f₀ with a geometric
+  centre, giving f₁,₂ = f₀(√(1 + Δ²/4) ∓ Δ/2).
+- **Normalize greys out K / A₀.** The panel shows the value that puts the peak at the Passband
+  Gain: gain · |k_entered| / G, where `info['k_entered']` is the typed K (or A₀). Under
+  Normalize a blank, zero or unreadable K counts as 1 (`parse_spec(k_required=False)`), since it
+  cannot matter and the field cannot be edited.
+- **Prototype mode hides n₀,** and `parse_spec(prototype=True)` ignores a stale value.
+- **Tables** have a fixed row count, so there are no row-selection checkboxes. ＋ / − buttons
+  add or remove the last row through `_custom_spec`. The coefficient table keeps its blank
+  rows; the parser trims them.
+- **Reset** also resets n₀ and K. Keyed panel widgets are seeded from `_custom_spec` without
+  `value=`, and the reset writes the new values into `st.session_state`, which reaches the
+  browser. Only deleting the keys left the old value on screen.

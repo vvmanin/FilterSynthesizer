@@ -6,6 +6,12 @@
       "runtimeExecutable": "build_venv/Scripts/python.exe",
       "runtimeArgs": ["-m", "streamlit", "run", "app.py", "--server.headless", "true", "--server.port", "8511"],
       "port": 8511
+    },
+    {
+      "name": "streamlit-alt",
+      "runtimeExecutable": "build_venv/Scripts/python.exe",
+      "runtimeArgs": ["-m", "streamlit", "run", "app.py", "--server.headless", "true", "--server.port", "8512"],
+      "port": 8512
     }
   ]
 }

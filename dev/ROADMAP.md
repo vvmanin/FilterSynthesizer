@@ -129,11 +129,10 @@ first.
 
 | ID | Title | P | State | Effort | Depends on |
 |---|---|---|---|---|---|
-| FS-007 | Custom filter design (coefficients or poles/zeros) | P1 | PLANNED | plan xhigh / build high | FS-003 (soft, done), FS-016 (soft) |
 | FS-008 | LTspice export with Monte Carlo presets (AC + MC; design note) | P1 | PLANNED | plan xhigh / build high | FS-005 (hard, done) |
 | FS-009 | Noise analysis in LTspice output | P2 *(s)* | PROPOSED | medium | FS-008 (hard) |
 | FS-010 | QSpice compatibility | P3 | PROPOSED | medium | FS-008 (hard) |
-| FS-011 | Project save / load | P2 | PROPOSED | high | FS-003 (done), FS-007 (soft) |
+| FS-011 | Project save / load | P2 | PROPOSED | high | FS-003 (done), FS-007 (soft, done) |
 | FS-012 | AI integration (external API/MCP or built-in assistant) | P2 | PROPOSED | plan xhigh / build high | FS-011 (soft) |
 | FS-013 | All-pass (phase) responses + all-pass cells | P3 | PROPOSED | max | FS-006 (soft) |
 | FS-014 | Topology family expansion — research | P3 | PROPOSED | max | — |
@@ -153,7 +152,7 @@ first.
 *(s)* = suggested priority, awaiting maintainer confirmation.
 
 Suggested order: FS-008 (the P1 track; FS-005 and FS-006 are
-done) and FS-007 (PLANNED; build after FS-016 if convenient). The UI polish
+done); FS-007 is done (built before FS-016, whose gaps it gates). The UI polish
 track FS-001 → FS-004 is done.
 
 Non-urgent follow-ups added 2026-09-27, ranked by implementation convenience
@@ -165,7 +164,7 @@ families; research first).
 Defect items FS-015/016/017 have no hard dependencies and block nothing; slot
 them between feature items. File-overlap notes (to avoid rework, not
 blockers): FS-016 before taking BOM baselines for other items' validation (it can change
-stage assignments); FS-016 before FS-007 build (custom designs reuse pairing).
+stage assignments); FS-007 gates today's pairer gaps (FS-016 may relax its gate rows).
 
 Op-amp data items: FS-018 before FS-009 (it defines how the noise fields are
 sourced) and before FS-019 (additions follow its curation rule).
@@ -175,36 +174,6 @@ FS-008 and FS-024; FS-009 / FS-010 plug into FS-008's bundle builder and IR;
 FS-027 (loaded realized response) reuses FS-008's IR and MNA.
 
 ---
-
-### FS-007 — Custom filter design (coefficients or poles/zeros)
-- **State:** PLANNED
-- **Priority:** P1
-- **Effort:** plan xhigh / build high
-- **Tiers:** A, D
-- **Depends on:** FS-003 (soft, done — the editor panel sits at the top of Response Plots, which FS-002/003 reshape), FS-016 (soft — pairing fixes; FS-007's realizability gate and pairing pre-flight cover the known pairer gaps meanwhile). FS-006 is done.
-- **Contracts:** §2 (new producer rule: a custom producer emits only origin / jω / ∞ zeros with exact conjugates and strictly-LHP poles — what the classifier and pairers assume; relaxed only by FS-013/FS-014), §5 (an entered negative K is used as |K|; sign stays a realization property), §6 (`engine_results` gains `custom_info`; Brick / Stage / Section schemas unchanged)
-- **Files:** new `custom_tf.py` (Tier A, no Streamlit: parse the input forms, balanced root finding + even-part numerator + precision-aware repeated-root merge, exact snapping, realizability gate, pairing pre-flight, LP-prototype transforms via `scipy.signal.lp2{lp,hp,bp,bs}_zpk`, peak / type / edge measurement, conditioning diagnostic, `custom_info`); `filter_engine.py` (thin `synthesize_custom` entry); `ui_components.py` (Custom branches: mode radio, Unit-radio split-out, gain-mode radio, α / A_s labels and placeholders, editor panel `draw_custom_editor`, `validate_filter_specs` bypass); `app.py` (Response list, sidebar chassis, editor panel + resolution step before `real_fc` L441, engine-dispatch bypass, gating of L689-768 / L1021-1083 / L1122-1267, Tab 2 and report `w_norm`, Tab 3 signature, BR-equalize hide, `hw_pb_gain`, report rows); new `dev/fs007/check_custom_tf.py`; `docs/ARCHITECTURE.md`; `docs/CONTRACTS.md` §2 / §6; this file §7. Not touched: `pairing_utils.py`, `tf_utils.py`, `filter_solvers.py`, cells, Tier C, `topology_tab.py`, `response_tab.py`, `report_pdf.py`, TF cache.
-- **Goal:** The user specifies H(s) directly — polynomial coefficients, factored (f₀, Q) or Tietze–Schenk rows, or root coordinates; normalized to a frequency f_n or absolute — either as a complete filter or as a lowpass prototype mapped to LP/HP/BP/BR, and continues through pairing, topology and response exactly as for a synthesized filter.
-- **Scope:**
-  - In — sidebar Response "Custom H(s)" with a Mode radio (Complete H(s) / Lowpass prototype), Filter Type (all four), target frequencies (prototype), gain-mode radio (Normalize → peak 0 dB + Passband Gain / As entered → entered peak gain G, may be < 1), α as edge level (complete) or measured prototype edge attenuation (prototype), A_s as plot reference.
-  - In — editor panel at the top of Response Plots, rendered before the engine run: forms Coefficients (table by power, or paste with ascending/descending toggle), Factored (f₀, Q) (pole pairs, real poles, jω zero pairs, origin-zero count, K), Factored Tietze–Schenk (aᵢ, bᵢ, A₀), Roots (σ, ω ≥ 0; ω > 0 = conjugate pair) + K; Normalized / Absolute scale; diagnostics (counts, detected type, edges, peak gain, conditioning, merges, gate errors, pre-flight warnings); state kept in `_custom_spec`.
-  - In — transmission zeros only (origin, jω, ∞); the input formats already carry off-axis and RHP zeros (σ > 0, Q_z < 0) and the gate rejects them with a message naming FS-013 / FS-014.
-  - In — prototype transforms (geometric-symmetric; k carried exactly); complete-mode type detection (warning on mismatch with the radio) and passband-edge measurement written into `f1_val` / `f2_val`.
-  - In — realizability gate (design note §7.1), pairing pre-flight (§7.2), coefficient-conditioning diagnostic (§4.4); gating of stopband-edge readout, manual notch tuning and notch-display mapping; Custom report rows; Tab 3 signature from a roots hash; `hw_pb_gain` written for every design.
-  - Out — off-axis / RHP zeros (FS-014 / FS-013); asymmetric or arithmetic (pole-translation) prototype transforms (use complete mode); manual notch tuning and stopband-edge readout for Custom; changes to pairing algorithms (FS-016) or to the Topology BR readout (FS-015); file import of H(s) (FS-011); "load current design into Custom" (follow-up idea); any Tier B/C change.
-- **Validation:**
-  - `python dev/fs007/check_custom_tf.py` (new, asserts; numbers in the design note §11.1): Butterworth n = 4 from 6-digit coefficients → Q 0.541193 / 1.306574, passband deviation ≤ 3e-5 dB, and identical zpk from (f₀, Q), Tietze–Schenk and roots forms; elliptic n = 6 numerator via the even-part method → Re z = 0 exactly, ω_z error ≤ 1e-14; normalized vs absolute scale identical; LP/HP/BP/BR transform identities ≤ 1e-14 with HP/BR k = H_proto(0), BP k = K·B^(n_p−n_z); prototype transforms vs the engine's Chebyshev symmetric BP/BR → equal roots ≤ 1e-9; repeated zeros (s²+1)^m, m = 1…10, and 6-digit (s²+ω₀²)^m merged (ω_z error ≤ 2e-6) while notches 1 % apart stay distinct; conditioning: Butterworth BP 2×5 b = 0.1 at 6 digits warns, 2×6 errors, LP 8 does not; every gate row fires with its message; pre-flight catches a jω pair + origin zero in a 2nd-order BP stage; type detection on even-order elliptic LP / HP and a shelving biquad.
-  - `python verify.py` still passes (no Tier B change).
-  - App: Custom LP/HP/BP/BR in complete mode (one per input form) and a Butterworth n = 4 prototype → LP / HP / BP 800–1250 Hz / BR 800–1250 Hz: every tab renders, one section solves in Topology, Resulting Response overlays, PDF shows the Custom rows; prototype designs match the synthesized Butterworth plots and stages; round trip of the tool's own Tab-2 coefficients (Butterworth LP 4 / 1 kHz, Elliptic LP 5) → same stages and top BOM; As entered with G < 1 → Topology overall readout shows G and the sidebar gain of a standard design is unchanged afterwards; Custom → Butterworth → Custom restores the tables.
-  - Regression: default Butterworth LP and one Elliptic BP give identical Tab-3 pairing and Topology results vs `main`.
-- **Open questions:** none (answered 2026-09-27 — see Notes).
-- **Notes:**
-  - Decisions (maintainer, 2026-09-27): editor panel at the top of Response Plots with the sidebar "Custom H(s)" Response holding the design intent; gain radio Normalize / As entered; Filter Type radio authoritative in complete mode, detection only warns; both Lowpass-prototype and Complete modes; transmission zeros only now, RHP zeros representable for FS-013.
-  - Recommendations adopted with this plan (design note §0): Tietze–Schenk as a fourth form; order limits n_p ≤ 30 (complete), prototype n ≤ 20 LP/HP, ≤ 15 BP/BR, coefficient form bounded by the conditioning diagnostic; peak-relative type detection; outermost −α edges; stopband keys omitted from `engine_results`; custom results built in the main process (no pool).
-  - Math base, measured numerics, gate table, Streamlit mechanics and the consumer-by-consumer gating table: `dev/FS-007_custom_tf_design_note.md`.
-  - Measured here (numpy 2.3.5 / scipy 1.17.1, scratch): `scipy.signal.lp2*_zpk` k equals the closed forms, substitution identities ≤ 9e-16, wideband BP small root ≤ 2.1e-11 relative at f₂/f₁ = 1e6 (so the private `filter_solvers` transforms, which carry no k and drop BR origin zeros, are not reused); repeated roots scatter by ~ε^(1/m) (5 % at m = 10) with exact centroids; expanded coefficients are unusable for narrow-band BP beyond ~2×5 poles at 6 digits (4.1 dB error at 2×5, RHP poles at 2×6) while LP is fine to n ≈ 15.
-  - Pairer gaps found while planning are recorded in FS-016 Notes; FS-007 gates them instead of fixing them.
-- **Updated:** 2026-09-27
 
 ### FS-008 — LTspice export with Monte Carlo presets
 - **State:** PLANNED
@@ -299,7 +268,9 @@ FS-027 (loaded realized response) reuses FS-008's IR and MNA.
 - **Goal:** Design all-pass (phase-equalizer) responses and realize them with 1st- and 2nd-order all-pass sections in the existing families.
 - **Scope:** Research first: target specification (group-delay equalization of an existing design vs standalone phase response), then cells per family. Out — until research concludes.
 - **Validation:** |H| flat within tolerance across band; group delay matches target; `verify.py` extended for new cells; TF cache version bumped.
-- **Updated:** 2026-09-26
+- **Notes:**
+  - From FS-007 (maintainer, 2026-09-28): Custom H(s) complete mode takes its type **only** from `custom_tf.detect_type` and refuses a shape it does not recognise. An all-pass (|H| flat, |H(0)| = |H(∞)| = peak, no dip) is detected as "other" today and is also stopped earlier by the RHP-zero gate. When all-pass lands, extend `detect_type` with an all-pass class (and the Custom gate rows named in the FS-007 design note §12) — do not change the detector before then.
+- **Updated:** 2026-09-28
 
 ### FS-014 — Topology family expansion — research
 - **State:** PROPOSED
@@ -507,6 +478,7 @@ FS-001 — Design-control section style (all tabs) — DONE 2026-09-28 — e3b1a
 FS-002 — Response Plots: phase/GD on main plot, compact sections — DONE 2026-09-28 — dfd48f2 (phase y2 / GD y3 right-hand axes as in `hw_plots`; `plot_phase_delay` removed)
 FS-003 — Fold "Roots & Transfer Function" tab into Response Plots — DONE 2026-09-28 — commit "feat(ui): FS-003/FS-004 …" (4 tabs; grey-framed `rp_roots` block with Domain Scale + Root Locations / Pole-Zero Map / H(s) expanders, `tf_form_roots` radio; CSS 7b compaction; fixed mnemoscheme axis units ignoring `unit_pair`)
 FS-004 — Biquad Pairing tab: compact layout, rad/s note font — DONE 2026-09-28 — same commit (`bp_body` container under CSS 7b; rules and `<br>` removed; units note body-size)
+FS-007 — Custom filter design (coefficients or poles/zeros) — DONE 2026-09-28 — commit "feat(custom): FS-007 Custom H(s) …" (`custom_tf.py`, Response "Custom H(s)" + editor panel; design note `dev/FS-007_custom_tf_design_note.md` incl. §14 build notes / maintainer refinements; checks `dev/fs007/check_custom_tf.py`)
 
 ---
 
@@ -598,3 +570,46 @@ screenshots, `--accept`, PDF build); a batch deletes the entries it covered.
     mnemoscheme box, Hardware Stage Parameters and the Section blocks (fonts
     unchanged). "Frequencies expressed in …" is now body-size italic text.
   - Stale screenshots: Biquad Pairing tab; run `doc_drift.py`.
+- **FS-007** (Custom H(s)):
+  - Response radio: + **Custom H(s)**. Its sidebar, in order: **Custom Transfer
+    Function** — Mode Complete H(s) / Lowpass prototype (default); **Scale**
+    Normalized / Absolute (complete mode only; always Normalized for
+    Tietze–Schenk); **Filter Type** — radio in prototype mode, in complete mode
+    the line "Filter Type: … (detected from H(s))" (no radio; an unrecognised
+    shape stops with an error); **Frequency Specifications** — complete: Unit +
+    "Norm. frequency f_n" (Normalized) or nothing (Absolute), plus the measured
+    edges; prototype LP/HP: Corner Frequency; prototype BP/BR: "Passband
+    definition" Corners (Lower / Upper Passband Corner) / Normalized width
+    ("Centre frequency f₀" + "Normalized width Δ = (f₂ − f₁)/f₀", derived
+    corners shown); **Gain** Normalize / As entered (default; shows "G = … V/V
+    from H(s)"); "Passband edge level α (dB below peak)" (complete) or the
+    measured prototype edge attenuation (prototype); "Stopband reference A_s
+    (dB, plot only)". No Order or Response Modifications block.
+  - Response Plots starts with a blue **Custom Transfer Function H(s)** panel:
+    Input form (Coefficients / Factored (f₀, Q) / Factored (Tietze–Schenk) /
+    Roots (σ, ω)), the form's tables (fixed rows; ＋ adds and − removes the
+    last row), n₀ (complete mode, (f₀, Q) form), K / A₀ (greyed and
+    recalculated to the Passband Gain under Normalize), Paste expanders
+    (coefficients with Descending / Ascending order; roots), "Reset to the
+    example", and diagnostics (counts, edges, entered peak gain G, detected
+    type, conditioning, |H(jω_n)| and f₋₃dB/f_n, gate errors, warnings, pairing
+    pre-flight). Errors stop the run under the panel.
+  - For Custom: no Calculated Stopband Edges readout and no Manual Notch box;
+    Roots & TF "Normalized" uses ω_n (2π·f_n); Biquad Pairing hides "Equalize DC
+    and HF gains" for an asymmetric band-reject; Topology's overall target gain
+    is the entered G.
+  - Report: rows Mode, Entry, Structure, Passband / Target edges, Gain mode,
+    Entered peak gain G, Warnings; α / A_s labels as in the sidebar; no
+    modification or manual-notch rows; file stem `Custom_<type>_n<poles>`.
+  - New widget keys: `widget_custom_mode`, `widget_custom_scale`,
+    `widget_custom_scale_ts`, `widget_custom_fn`, `widget_custom_pbdef`,
+    `widget_custom_bw`, `widget_custom_gain_mode`, `widget_custom_alpha`,
+    `widget_custom_as`, `custom_form`, `custom_n0`, `custom_K_f0q`,
+    `custom_K_roots`, `custom_A0`, `custom_paste_num`, `custom_paste_den`,
+    `custom_paste_order`, `custom_paste_poles`, `custom_paste_zeros`,
+    `custom_paste_apply`, `custom_paste_apply_roots`, `custom_reset`,
+    `custom_add_<table>`, `custom_del_<table>`, editors
+    `custom_tbl_<table>_<rev>`; non-widget `_custom_spec`, `_custom_rev`,
+    `_custom_seen`, `_custom_sig`, `_custom_base_*`, `_custom_paste_msg`; and
+    `hw_pb_gain` (now written for every design).
+  - Stale screenshots: sidebar (Response list); run `doc_drift.py`.

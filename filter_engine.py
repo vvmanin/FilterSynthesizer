@@ -781,7 +781,17 @@ def synthesize_bandreject(response, order_lp, order_hp, f1_hz, f2_hz,
         "sb_status_lp": stat_br,
         "actual_as_db": actual_as_db # Pass the physical hump height to the UI
     }
-       
+
+
+def synthesize_custom(spec, filter_type, mode, f1_hz=None, f2_hz=None, alpha_db=3.0103,
+                      gain_mode="normalize"):
+    """Custom H(s) (FS-007): the user's transfer function as engine_results (+ custom_info).
+    Thin entry over custom_tf.design_custom -> {"errors", "warnings", "preflight", "info",
+    "engine_results"}; milliseconds of numpy, so the app runs it in the main process."""
+    import custom_tf
+    return custom_tf.design_custom(spec, filter_type, mode, f1_hz=f1_hz, f2_hz=f2_hz,
+                                   alpha_db=alpha_db, gain_mode=gain_mode)
+
 # =====================================================================
 # ISOLATED TESTING ENVIRONMENT
 # =====================================================================

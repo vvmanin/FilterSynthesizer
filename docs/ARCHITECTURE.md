@@ -20,7 +20,8 @@ Streamlit app for analog active-filter design: spec → poles/zeros → biquad c
 ### Tier A — Approximation Math
 | File | Size | Purpose |
 |---|---|---|
-| `filter_engine.py` | 32K | Top-level `synthesize_{lowpass,highpass,bandpass,bandreject}()` — calls solvers, returns engine_results dict |
+| `filter_engine.py` | 32K | Top-level `synthesize_{lowpass,highpass,bandpass,bandreject}()` — calls solvers, returns engine_results dict; `synthesize_custom()` = thin entry over `custom_tf.design_custom` (FS-007) |
+| `custom_tf.py` | 44K | **Custom H(s) (FS-007), no Streamlit.** `parse_spec` (forms coeff / f0q / ts / roots → normalized zpk + ω_n; table cells may be typed text), `poly_roots` (balanced `np.roots` + precision-aware repeated-root `_merge`), `zeros_from_numerator` (even-part method), `snap_roots`, gate (`gate_poles` / `gate_zeros` / `gate_structure`), `lp_prototype_to` (`scipy.signal.lp2*_zpk`), `peak_gain` / `detect_type` / `measure_edges` (log-magnitude sums), `conditioning`, `preflight_pairing` (read-only `pairing_utils`), `roots_sig`, entry `design_custom` → `{errors, warnings, preflight, info, engine_results}`. Checks: `python dev/fs007/check_custom_tf.py` |
 | `filter_solvers.py` | 92K | **Largest file.** All prototype solvers: Butterworth/Chebyshev/InvCheby/Elliptic for LP, plus BP transforms. Key fns: `solve_butterworth_lp`, `solve_chebyshev_lp`, `solve_inv_chebyshev_lp`, `solve_elliptic_lp`, `synthesize_bgb`, `synthesize_asym_cheby1_bp`, `synthesize_slot_based_inv_cheby`. Lines ~1-700 = LP solvers; ~700-1000 = BP helpers; ~1000+ = BP/BR asymmetric synthesis |
 | `delay_solvers.py` | 46K | **Delay responses (FS-006): Bessel + Equiripple Delay, lowpass and bandpass only (`DELAY_FILTER_TYPES`).** Delay-normalized prototypes (`bessel_poles_delay` via `scipy.signal.besselap`; `eqdelay_poles` = seeded Remez/Newton, `lru_cache`d), corner product W_α = ω_α·τ (`corner_product`), engine drop-ins `design_delay_lp` (corner-normalized LP + stopband notches on fixed poles, corner held by `_corner_hold_scale`; `ems_m` > 0 = FS-021 Equiripple Magnitude Stopband: `solve_delay_stopband_notches` places the notches so every stopband hump (`_stopband_humps`) sits at −A_s) and `synthesize_delay_bp` (pole-translation or classic BP), `select_delay_order` (order from specs), `make_delay_info` (the `delay_info` summary). Checks: `python dev/fs006/check_delay_solvers.py` (§11 = FS-021) |
 | `filter_utils.py` | 4K | Tiny: `evaluate_h()`, `find_crossing()` |
@@ -64,8 +65,8 @@ Streamlit app for analog active-filter design: spec → poles/zeros → biquad c
 ### Tier D — UI & Visualization
 | File | Size | Purpose |
 |---|---|---|
-| `app.py` | 100K, 2003 lines | **Main Streamlit app.** Sidebar (L298-334): response/type/order/freq/gain/ripple/delay. 4 tabs below (FS-003 folded Roots & TF into Response Plots). |
-| `ui_components.py` | 23K | Sidebar widget blocks: `draw_filter_type` (drops HP/BR for the delay responses), `draw_order_block`, `draw_delay_order_block`, `draw_frequency_block` (+ delay anchor / τ₀ for delay LP), `draw_gain_block`, `draw_ripple_block`, `draw_delay_block`, `draw_modifications_block`, `validate_filter_specs`; `_mem_widget` = keyed widget whose value survives being hidden; `design_control(key, variant)` = keyed container styled as a design-control box (FS-001; CSS in `app.py` targets `st-key-dctl_*` blue / `st-key-dcsel_*` amber), used by all tabs |
+| `app.py` | 107K, 2170 lines | **Main Streamlit app.** Sidebar (L311-387): response/type/order/freq/gain/ripple/delay (Custom H(s): mode, scale, detected-type line, freq/gain/ripple blocks). 4 tabs below (FS-003 folded Roots & TF into Response Plots). |
+| `ui_components.py` | 23K | Sidebar widget blocks: `draw_filter_type` (drops HP/BR for the delay responses), `draw_order_block`, `draw_delay_order_block`, `draw_frequency_block` (+ delay anchor / τ₀ for delay LP), `draw_gain_block`, `draw_ripple_block`, `draw_delay_block`, `draw_modifications_block`, `validate_filter_specs`; `_mem_widget` = keyed widget whose value survives being hidden; `design_control(key, variant)` = keyed container styled as a design-control box (FS-001; CSS in `app.py` targets `st-key-dctl_*` blue / `st-key-dcsel_*` amber), used by all tabs. Custom H(s) (FS-007): `draw_unit_radio` (shared keyless Unit radio), `_draw_band_corners`, `draw_custom_mode_block` / `_scale_block` / `_type_block` / `_frequency_block` (complete) / `_proto_frequency_block` (Corners / Normalized width) / `_gain_block` / `_ripple_block`, `draw_custom_editor` (panel; state in `_custom_spec`, fixed-row `st.data_editor` + ＋/− buttons, bases fixed per `_custom_rev`; keyed widgets seeded by `_bind`), `fill_custom_k` (greyed K / A₀ under Normalize), `draw_custom_diagnostics` |
 | `topology_tab.py` | 68K | Tab 3 "Topology": per-section hardware solver UI, convergence settings, results table, schematics. `render_topology_tab()` entry. Lines ~1-160 = helpers; ~220-510 = job management; ~510-800 = results rendering; ~800-880 = 1st-order; ~880-1150 = `_render_section`; ~1150-1290 = `_render_overall` cascade; ~1294 = `render_topology_tab` |
 | `response_tab.py` | 24K | Tab 4 "Resulting Response": ideal vs realized Bode overlay, Monte Carlo. `render_response_tab()` entry |
 | `schematic_svg.py` | 28K | SVG schematic annotation & rendering: `render_svg()`, `build_annotations()`, `download_buttons()` |
@@ -86,23 +87,24 @@ Streamlit app for analog active-filter design: spec → poles/zeros → biquad c
 
 ---
 
-## app.py Section Map (1982 lines)
+## app.py Section Map (2170 lines)
 
 | Lines | Section |
 |---|---|
 | 1-51 | Imports, process pool |
 | 53-134 | Band-reject gain equalization helpers (`_stage_rho`, `_section_peak_mag`, `_equalize_dc_hf_ks`) |
-| 136-290 | Page config, CSS (block 7 = FS-001 design-control box styles; 7b = FS-003/FS-004 compact tabs, scoped to the `rp_plots`/`rp_roots` (Response Plots, + grey frame on `rp_roots`) and `bp_body` (Biquad Pairing) containers; 8 = FS-002 notch-box gap) |
-| 298-334 | **Sidebar** — response, filter type, order, freq, gain, ripple, delay specs, modifications |
-| 336-479 | **Delay responses (FS-006): order / corner resolution** — `select_delay_order` (From specs), derived corner under the τ₀ anchor, BP fold check; `_render_delay_summary` and `_render_ems_readout` (FS-021) for Tab 1 |
-| 481-504 | Main canvas title, validation, 4-tab creation |
-| 506-832 | **Section 1: Engine run** — background workers for LP/HP/BP/BR synthesis (L514-536: FS-021 Equiripple Magnitude Stopband mode state — `ems_ok`/`ems_on`/`ems_m`, Active-row defaults, pins parked/restored), result unpacking, notch-grid display mapping |
-| 833-999 | Report snapshot (`report_spec` rows incl. delay rows, detail windows) |
-| 1001-1317 | **Tab 1: Response Plots** (tab_plots, container `rp_plots`) — magnitude, passband detail, group-delay detail (delay responses), phase/GD, probes, manual notch grid (delay LP: Equiripple Magnitude Stopband checkbox, Active column, readout) |
-| 1319-1478 | **Tab 1, continued: Roots & TF** (tab_plots, container `rp_roots`; FS-003) — Domain Scale + units radio (sets `scale_type` / `map_unit_choice`; Biquad Pairing uses its own `unit_pair`), grey frame (CSS 7b), Root Locations expander (pole/zero tables + K), Pole-Zero Map expander, H(s) expander with form radio (`tf_form_roots`) |
-| 1480-1996 | **Tab 2: Biquad Pairing** (tab_pairing, container `bp_body`) — mnemoscheme (in the `pair_box` design-control box), stage gain distribution, per-stage TF details |
-| 1998-2000 | **Tab 3: Topology** → delegates to `render_topology_tab()` |
-| 2002-2003 | **Tab 4: Response** → delegates to `render_response_tab()` |
+| 149-309 | Page config, CSS (block 7 = FS-001 design-control box styles; 7b = FS-003/FS-004 compact tabs, scoped to the `rp_plots`/`rp_roots` (Response Plots, + grey frame on `rp_roots`) and `bp_body` (Biquad Pairing) containers; 8 = FS-002 notch-box gap) |
+| 311-387 | **Sidebar** — response, filter type, order, freq, gain, ripple, delay specs, modifications; Custom H(s) (FS-007): mode (+ Scale in complete mode) right after Response, Filter Type radio only in prototype mode (complete: a slot for the detected type), then its frequency / gain-mode / α-A_s blocks |
+| 389-532 | **Delay responses (FS-006): order / corner resolution** — `select_delay_order` (From specs), derived corner under the τ₀ anchor, BP fold check; `_render_delay_summary` and `_render_ems_readout` (FS-021) for Tab 1 |
+| 534-559 | Main canvas title (`title_slot`), validation (skipped for Custom), 4-tab creation |
+| 561-621 | **Custom H(s) (FS-007): editor panel + resolution step** — `draw_custom_editor` in container `rp_custom` (top of Response Plots, before `real_fc`), cached `_design_custom` → `synthesize_custom` (complete mode: `filter_type` None → detected type written back, sidebar line + title), greyed K (`fill_custom_k`), diagnostics, `st.stop()` on gate errors; writes measured edges (`f1_val`/`f2_val`), prototype α, display orders and the As-entered G back into the sidebar variables |
+| 623-955 | **Section 1: Engine run** — Custom takes `custom_res['engine_results']`; background workers for LP/HP/BP/BR synthesis (L676-701: FS-021 Equiripple Magnitude Stopband mode state — `ems_ok`/`ems_on`/`ems_m`, Active-row defaults, pins parked/restored), result unpacking, notch-grid display mapping (not for Custom) |
+| 956-1148 | Report snapshot (`report_spec` rows incl. delay rows and Custom rows, detail windows; `w_norm` = `custom_info['w_n']` for Custom) |
+| 1150-1471 | **Tab 1: Response Plots** (tab_plots, container `rp_plots`) — magnitude, passband detail, group-delay detail (delay responses), phase/GD, stopband-edge readout (not for Custom), probes, manual notch grid (not for Custom; delay LP: Equiripple Magnitude Stopband checkbox, Active column, readout) |
+| 1473-1638 | **Tab 1, continued: Roots & TF** (tab_plots, container `rp_roots`; FS-003) — Domain Scale + units radio (sets `scale_type` / `map_unit_choice`; Biquad Pairing uses its own `unit_pair`), grey frame (CSS 7b), Root Locations expander (pole/zero tables + K), Pole-Zero Map expander, H(s) expander with form radio (`tf_form_roots`) |
+| 1640-2165 | **Tab 2: Biquad Pairing** (tab_pairing, container `bp_body`) — mnemoscheme (in the `pair_box` design-control box; Custom signature = `roots_sig`), stage gain distribution (BR Equalize hidden for an asymmetric Custom BR), per-stage TF details; writes `hw_sections`, `hw_filter_type`, `hw_pb_gain` |
+| 2167-2168 | **Tab 3: Topology** → delegates to `render_topology_tab()` |
+| 2170+ | **Tab 4: Response** → delegates to `render_response_tab()` |
 
 ---
 
@@ -134,7 +136,7 @@ Sidebar specs
 
 ## Key Data Structures
 
-- **engine_results**: dict returned by `filter_engine.synthesize_*()`. LP/HP: `poles`, `zeros`, `k`, `f_stop_hz`, `ideal_notches_hz`, `sb_status` (+ `reflection_zeros` for LP). BP: `poles`, `zeros`, `reflection_zeros`, `k`, `f_stop_hp_hz`, `f_stop_lp_hz`, `ideal_notches_hp_hz`, `ideal_notches_lp_hz`, `sb_status_hp`, `sb_status_lp`. BR: the BP keys (with `ideal_notches_hz`) + `actual_as_db`; note `f_stop_hp_hz` is the lower edge. **Delay responses only** (Bessel / Equiripple Delay): `delay_info` = `{response, kind (LP/BP), order, alpha_db, delta, eps_ref, max_q, bp_mapping, n_origin_zeros, pole_scale, warnings, tau_dc_s, tau_nom_s, tau_center_s, w_prod, corner_hz, center_hz, flat_band_hz, delay_pp_pct, ems}` (seconds / Hz) from `delay_solvers.make_delay_info`; `ems` (FS-021, LP only) = `{m, converged, max_err_db, pole_scale}` or None, and the solved notches are then in `ideal_notches_hz`.
+- **engine_results**: dict returned by `filter_engine.synthesize_*()`. LP/HP: `poles`, `zeros`, `k`, `f_stop_hz`, `ideal_notches_hz`, `sb_status` (+ `reflection_zeros` for LP). BP: `poles`, `zeros`, `reflection_zeros`, `k`, `f_stop_hp_hz`, `f_stop_lp_hz`, `ideal_notches_hp_hz`, `ideal_notches_lp_hz`, `sb_status_hp`, `sb_status_lp`. BR: the BP keys (with `ideal_notches_hz`) + `actual_as_db`; note `f_stop_hp_hz` is the lower edge. **Delay responses only** (Bessel / Equiripple Delay): `delay_info` = `{response, kind (LP/BP), order, alpha_db, delta, eps_ref, max_q, bp_mapping, n_origin_zeros, pole_scale, warnings, tau_dc_s, tau_nom_s, tau_center_s, w_prod, corner_hz, center_hz, flat_band_hz, delay_pp_pct, ems}` (seconds / Hz) from `delay_solvers.make_delay_info`; `ems` (FS-021, LP only) = `{m, converged, max_err_db, pole_scale}` or None, and the solved notches are then in `ideal_notches_hz`. **Custom H(s)** (FS-007): `poles`, `zeros`, `k` (peak-normalized) + `custom_info` (entry form/scale, w_n, measured edges, entered peak gain G, detected type, counts, warnings, pre-flight, `roots_sig`; full list in `docs/CONTRACTS.md` §6); no stopband / notch / delay keys.
 - **stage**: dict with `pole_id`, `zero_ids`, `absorbed_real_id`, `type`. Created by `auto_pair_stages()`.
 - **brick**: dict with `id`, `root`, `w0`, `Q`, `type` ("Complex Pair"/"Real"). From `build_stage_bricks()`.
 - **topo**: dict with `family`, `order`, `gain`, `notch`, `has_R7`, plus symbolic circuit equations.
@@ -149,10 +151,11 @@ Sidebar specs
 2. **For plot changes**: `plot_utils.py` (main response plots) or `hw_plots.py` (hardware-level/MC plots).
 3. **For adding a new cell topology**: see any `cells_*.py` as template + register in `tf_derivation_v2.py`.
 4. **For solver/optimization bugs**: `unified_solver_v2.py` (main solver), `zero_manifold_solver.py` (alt solver).
-5. **For filter math/approximation**: `filter_solvers.py` (prototype), `filter_engine.py` (orchestrator). Bessel / Equiripple Delay live in `delay_solvers.py`; their sidebar is `ui_components.draw_delay_order_block` / `draw_delay_block` plus the resolution step in `app.py` (L270-400); math base in `dev/FS-006_bessel_eqdelay_design_note.md`, numeric checks `python dev/fs006/check_delay_solvers.py`.
+5. **For filter math/approximation**: `filter_solvers.py` (prototype), `filter_engine.py` (orchestrator). Bessel / Equiripple Delay live in `delay_solvers.py`; their sidebar is `ui_components.draw_delay_order_block` / `draw_delay_block` plus the resolution step in `app.py` (L389-532); math base in `dev/FS-006_bessel_eqdelay_design_note.md`, numeric checks `python dev/fs006/check_delay_solvers.py`.
 6. **For schematic rendering**: `schematic_svg.py`.
 7. **For scoring/metrics**: `scoring.py`.
 8. **For topology tab UI**: `topology_tab.py` — use section map above to target the right line range.
 9. **For response tab / Monte Carlo**: `response_tab.py` + `hw_plots.py`.
 10. **For 1st-order sections**: `first_order_solver.py` + `cells_first_order.py`.
 11. **For op-amp parts/parameters**: edit `opamp_library.json` (data) or `opamp_library.py` (loading, naming rules, user overlay). The per-section picker + Edit popover is `topology_tab._opamp_picker`; `response_tab._eval_opamp` and `topology_tab.opamp_label` read the same choice.
+12. **For Custom H(s) (FS-007)**: math in `custom_tf.py` (math base + gate table: `dev/FS-007_custom_tf_design_note.md`; checks `python dev/fs007/check_custom_tf.py`); sidebar + panel in `ui_components.py` (Custom section at the end); wiring in `app.py` §0 (L561-621) and the `is_custom` gates.

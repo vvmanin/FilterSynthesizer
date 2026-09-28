@@ -14,10 +14,13 @@ import mp_fix
 mp_fix.neutralize_main()
 import streamlit as st
 import concurrent.futures
+import contextlib
+import json
 import numpy as np
 import pandas as pd
 
 from filter_engine import synthesize_lowpass, synthesize_highpass, synthesize_bandpass, synthesize_bandreject
+from filter_engine import synthesize_custom
 from plot_utils import plot_main_magnitude, plot_passband_magnitude, evaluate_h_complex, plot_pole_zero_map, plot_mnemoscheme_map
 from plot_utils import plot_group_delay_detail, format_seconds
 from tf_utils import clean_roots, poly_to_latex, roots_to_biquad_latex, build_coeff_table, format_val, format_latex_val, poly_to_latex_lines, roots_to_biquad_lines, tf_latex
@@ -41,9 +44,22 @@ from ui_components import (
     _mem_widget,
     UNIT_MULT as _UNIT_MULT,
     RECIPROCAL_UNIT as _RECIP_UNIT,
+    draw_custom_mode_block,
+    draw_custom_scale_block,
+    draw_custom_type_block,
+    draw_custom_frequency_block,
+    draw_custom_proto_frequency_block,
+    fill_custom_k,
+    draw_custom_gain_block,
+    draw_custom_ripple_block,
+    draw_custom_editor,
+    draw_custom_diagnostics,
+    CUSTOM_FORMS,
+    CUSTOM_MODES,
 )
 import delay_solvers
 from delay_solvers import DELAY_RESPONSES
+from custom_tf import CUSTOM, MODE_COMPLETE, MODE_PROTOTYPE, GAIN_NORMALIZE, GAIN_AS_ENTERED
 
 
 from pool_utils import run_in_pool, format_exc_for_ui, env_summary
@@ -299,38 +315,75 @@ with st.sidebar:
     st.header("Filter Configuration")
     
     response = st.radio("Response", ["Butterworth", "Chebyshev", "Inverse Chebyshev", "Elliptic",
-                                     "Bessel", "Equiripple Delay"], index=0)
+                                     "Bessel", "Equiripple Delay", CUSTOM], index=0)
     st.markdown("---")
     is_delay = response in DELAY_RESPONSES
-    
-    filter_type = draw_filter_type(response)
+    is_custom = response == CUSTOM   # FS-007: H(s) typed in the Response Plots panel
+
+    # FS-007: Custom Transfer Function (mode) and, in complete mode, Scale come right after
+    # Response; complete mode has no Filter Type radio -- the type is detected from H(s) and
+    # written into custom_type_slot by the resolution step (filter_type is None until then).
+    custom_mode = custom_scale = custom_type_slot = None
+    custom_complete = False
+    if is_custom:
+        custom_mode = draw_custom_mode_block()
+        custom_complete = custom_mode == MODE_COMPLETE
+        if custom_complete:
+            custom_scale = draw_custom_scale_block()
+        st.markdown("---")
+
+    if custom_complete:
+        filter_type, custom_type_slot = None, draw_custom_type_block()
+    else:
+        filter_type = draw_filter_type(response)
     st.markdown("---")
-    
+
     delay_order_mode, delay_order_slot = None, None
-    if is_delay:
+    if is_custom:
+        final_lp_order = final_hp_order = 2      # display values, set by the resolution step
+    elif is_delay:
         final_lp_order, final_hp_order, delay_order_mode, delay_order_slot = \
             draw_delay_order_block(response, filter_type)
     else:
         final_lp_order, final_hp_order = draw_order_block(response, filter_type)
+    if not is_custom:
+        st.markdown("---")
+
+    custom_edge_slot = custom_gain_slot = custom_alpha_slot = None
+    delay_anchor_ui = None
+    if custom_complete:                  # edges are measured, not entered
+        freq_unit, custom_edge_slot = draw_custom_frequency_block(custom_scale)
+        f1_val = f2_val = None
+    elif is_custom:                      # prototype: corner, or band corners / normalized width
+        f1_val, f2_val, freq_unit = draw_custom_proto_frequency_block(filter_type)
+    else:
+        f1_val, f2_val, freq_unit, delay_anchor_ui = draw_frequency_block(filter_type, response)
     st.markdown("---")
-    
-    f1_val, f2_val, freq_unit, delay_anchor_ui = draw_frequency_block(filter_type, response)
+
+    custom_gain_mode = GAIN_NORMALIZE
+    if is_custom:
+        custom_gain_mode, final_gain_units, custom_gain_slot = draw_custom_gain_block()
+    else:
+        final_gain_units = draw_gain_block()
     st.markdown("---")
-    
-    final_gain_units = draw_gain_block()
-    st.markdown("---")
-    
-    final_alpha, final_as_lp, final_as_hp = draw_ripple_block(response, filter_type)
-        
+
+    if is_custom:
+        final_alpha, final_as_lp, final_as_hp, custom_alpha_slot = draw_custom_ripple_block(custom_mode)
+    else:
+        final_alpha, final_as_lp, final_as_hp = draw_ripple_block(response, filter_type)
+
     delay_spec = None
     if is_delay and filter_type in delay_solvers.DELAY_FILTER_TYPES:
         delay_spec = draw_delay_block(
             response, filter_type, delay_order_mode,
             delay_anchor_ui["anchor"] if delay_anchor_ui else "corner", freq_unit)
 
-    pb_mod_lp, pb_mod_hp, sb_roll_lp, sb_roll_hp = draw_modifications_block(
-    response, filter_type, final_lp_order, final_hp_order
-)
+    if is_custom:
+        pb_mod_lp = pb_mod_hp = sb_roll_lp = sb_roll_hp = False
+    else:
+        pb_mod_lp, pb_mod_hp, sb_roll_lp, sb_roll_hp = draw_modifications_block(
+        response, filter_type, final_lp_order, final_hp_order
+    )
     st.markdown("---")
 
 # ============================================================
@@ -483,9 +536,14 @@ if delay_spec is not None:
 # ============================================================
 
 # DYNAMIC TITLE
-st.title(f"{APP_NAME} v{__version__} - {response} {filter_type}")
+# FS-007: complete-mode Custom learns its type in the resolution step, which rewrites the title
+title_slot = st.empty()
+title_slot.title(f"{APP_NAME} v{__version__} - {response}" + (f" {filter_type}" if filter_type else ""))
 
-is_valid, error_msg = validate_filter_specs(response, filter_type, final_lp_order, final_hp_order)
+# FS-007: skipped for Custom -- its orders are display values, and the BR even-order stop would
+# fire before the editor panel exists.
+is_valid, error_msg = ((True, "") if is_custom else
+                       validate_filter_specs(response, filter_type, final_lp_order, final_hp_order))
 
 if not is_valid:
     st.error(f"**Mathematical Constraint Violation:** {error_msg}")
@@ -499,6 +557,66 @@ tab_plots, tab_pairing, tab_topology, tab_response = st.tabs([
     "⚙️ Topology",
     "📉 Resulting Response & Schematic"
 ])
+
+# ------------------------------------------------------------
+# 0. CUSTOM H(s) (FS-007): EDITOR PANEL + RESOLUTION STEP
+# ------------------------------------------------------------
+# The panel renders first in Response Plots and BEFORE real_fc, so its values feed this same
+# run. The resolution step writes the measured edges (complete mode), the prototype's edge
+# attenuation (prototype mode), the display orders and the entered gain G back into the sidebar
+# variables; plots, probes, Roots & TF, pairing and the report then work unchanged. Main
+# process, no pool: milliseconds of numpy.
+@st.cache_data(max_entries=50, show_spinner=False)
+def _design_custom(spec_json, filter_type, mode, f1_hz, f2_hz, alpha_db, gain_mode):
+    return synthesize_custom(json.loads(spec_json), filter_type, mode, f1_hz, f2_hz,
+                             alpha_db, gain_mode)
+
+
+custom_res = None
+if not is_custom:
+    st.session_state.pop("_custom_seen", None)   # hidden tables lose their edit state
+else:
+    with tab_plots, st.container(key="rp_custom"):
+        custom_spec, custom_diag, custom_k_slot = draw_custom_editor(custom_mode, freq_unit,
+                                                                     custom_gain_mode)
+    _cm = _UNIT_MULT[freq_unit]
+    _is_proto = custom_mode == MODE_PROTOTYPE
+    custom_res = _design_custom(
+        json.dumps(custom_spec, sort_keys=True), filter_type, custom_mode,
+        f1_val * _cm if _is_proto else None,
+        f2_val * _cm if (_is_proto and f2_val) else None,
+        final_alpha, custom_gain_mode)
+    _ci = custom_res["info"]
+    if custom_complete and _ci.get("detected"):   # complete mode: the type IS the detected one
+        filter_type = _ci["target"] if not custom_res["errors"] else _ci["detected"]
+        custom_type_slot.markdown(
+            f"Filter Type: **{_ci['detected'] if _ci['detected'] != 'other' else 'not recognised'}**"
+            " (detected from H(s))")
+        title_slot.title(f"{APP_NAME} v{__version__} - {response} {filter_type}")
+    fill_custom_k(custom_k_slot, custom_res, final_gain_units)
+    with custom_diag:
+        draw_custom_diagnostics(custom_res, filter_type, custom_mode, freq_unit)
+    if custom_res["errors"]:
+        st.stop()   # after the panel, so the input can be fixed
+    if _is_proto:
+        final_alpha = _ci["proto_edge_db"]
+        custom_alpha_slot.caption(f"Prototype edge attenuation α = **{final_alpha:.4g} dB** "
+                                  "(measured at ω = 1)")
+    else:
+        _e1, _e2 = _ci["edges_hz"]
+        f1_val, f2_val = _e1 / _cm, (_e2 / _cm if _e2 else None)
+        custom_edge_slot.caption(
+            f"Measured at −{final_alpha:g} dB: **f1 = {f1_val:.6g}, f2 = {f2_val:.6g} {freq_unit}**"
+            if f2_val else f"Measured at −{final_alpha:g} dB: **fc = {f1_val:.6g} {freq_unit}**")
+    _np_c = _ci["n_poles"]
+    if filter_type in ("Bandpass", "Band-Reject"):
+        final_lp_order, final_hp_order = _np_c - _np_c // 2, _np_c // 2
+    else:
+        final_lp_order = final_hp_order = _np_c
+    if custom_gain_mode == GAIN_AS_ENTERED:
+        final_gain_units = _ci["peak_gain"]
+        custom_gain_slot.caption(f"G = **{final_gain_units:.6g} V/V** "
+                                 f"({20 * np.log10(final_gain_units):+.2f} dB) from H(s)")
 
 multiplier = {"Hz": 1, "kHz": 1e3, "MHz": 1e6, "GHz": 1e9}[freq_unit]
 real_fc = f1_val * multiplier
@@ -581,7 +699,10 @@ elif "_ems_n" in st.session_state:                           # just switched off
         st.session_state[f"pin_notch_{i}"] = True
         st.session_state[f"val_notch_{i}"] = v
 
-if filter_type == "Lowpass":
+if is_custom:   # FS-007: resolved above (no notch pins; zeros are edited in the panel)
+    engine_results = custom_res["engine_results"]
+
+elif filter_type == "Lowpass":
     P = final_lp_order // 2
     P_eff = P - 1 if sb_roll_lp and response in ["Inverse Chebyshev", "Elliptic"] else P
     safe_fallback = f2_val if f2_val is not None else f1_val * 2.0
@@ -756,7 +877,9 @@ free_notches_display = {}
 free_notches_display_hp = {}
 free_notches_display_lp = {}
 
-if engine_results:
+# FS-007: not for Custom -- the slot variables below do not exist for it, and a Custom LP would
+# overwrite the _last_free_notches seeds of a later Elliptic design.
+if engine_results and not is_custom:
     z_rad = engine_results['zeros']
     actual_rad = sorted([z.imag for z in z_rad if z.imag > 1e-6 and abs(z.real) < 1e-6])
     actual_notches_hz = [r / (2 * np.pi) for r in actual_rad]
@@ -858,7 +981,24 @@ _corners = (f"{f1_val:g}…{f2_val:g} {freq_unit}" if _is_band and f2_val
             else f"{f1_val:g} {freq_unit}")
 
 _rep = [("Response", response), ("Filter type", filter_type)]
-if _is_band:
+_cinfo = (engine_results or {}).get("custom_info") if is_custom else None
+if _cinfo:   # FS-007: what was entered and what was measured
+    _fn = _cinfo.get("f_norm_hz")
+    _rep += [("Mode", CUSTOM_MODES[0] if custom_mode == MODE_COMPLETE else CUSTOM_MODES[1]),
+             ("Entry", f"{CUSTOM_FORMS[_cinfo['form']]}, {_cinfo['scale']}"
+                       + (f", f_n = {_fn / multiplier:g} {freq_unit}" if _fn else "")),
+             ("Structure", f"{_cinfo['n_poles']} poles; {_cinfo['n_zeros']} finite zeros "
+                           f"({_cinfo['n_origin_zeros']} at origin, {_cinfo['n_jw_pairs']} jω pairs)"),
+             ("Passband edges (measured at −α)" if custom_mode == MODE_COMPLETE
+              else "Target edges", _corners),
+             ("Gain mode", "as entered" if custom_gain_mode == GAIN_AS_ENTERED
+              else "normalized (peak → passband gain)"),
+             ("Entered peak gain G", f"{_cinfo['peak_gain']:.6g} V/V")]
+    if _cinfo.get("detected") != filter_type:
+        _rep.append(("Detected type", _cinfo.get("detected", "—")))
+    if _cinfo.get("warnings"):
+        _rep.append(("Warnings", " · ".join(_cinfo["warnings"]), True))
+elif _is_band:
     _rep += [("Order (LP / HP)", f"{final_lp_order} / {final_hp_order}"),
              ("Total order", f"{_tot_order}"),
              ("Lower corner f1", f"{f1_val:g} {freq_unit}"),
@@ -868,13 +1008,16 @@ else:
              ("Corner frequency fc", f"{f1_val:g} {freq_unit}")]
 _rep += [("Passband gain", f"{final_gain_units:g} V/V "
                            f"({20*np.log10(final_gain_units):+.2f} dB)"),
-         ("Passband ripple α_max" if response in ("Chebyshev", "Elliptic")
+         (("Passband edge level α" if custom_mode == MODE_COMPLETE else
+           "Prototype edge attenuation α") if is_custom else
+          "Passband ripple α_max" if response in ("Chebyshev", "Elliptic")
           else "Passband attenuation", f"{final_alpha:g} dB")]
 if _is_band and final_as_lp != final_as_hp:
     _rep += [("Stopband A_sl (lower)", f"{final_as_hp:g} dB"),
              ("Stopband A_su (upper)", f"{final_as_lp:g} dB")]
 else:
-    _rep += [("Stopband A_s", f"{final_as_lp:g} dB")]
+    _rep += [("Stopband A_s (plot reference)" if is_custom else "Stopband A_s",
+              f"{final_as_lp:g} dB")]
 _rep += [("Passband even-order mod.",
           (("LP " if pb_mod_lp else "") + ("HP " if pb_mod_hp else "")) or "off"),
          ("Stopband roll-off",
@@ -900,7 +1043,7 @@ if not any(k.startswith("Manual notches") for k, *_ in _rep):
 # Calculated stopband edges -- a 3-tuple marks a FULL-WIDTH row in the report's
 # spec table, so the long "Lower = …, Upper = …" string is not squeezed into a
 # half-width cell. Mirrors the read-only engine output shown under the plots.
-if engine_results:
+if engine_results and not is_custom:   # FS-007: Custom results carry no stopband keys
     if filter_type in ("Lowpass", "Highpass"):
         _rep.append(("Calculated stopband edge f_s",
                      _rep_edge(engine_results.get("f_stop_hz"),
@@ -952,8 +1095,12 @@ if is_delay and _dinfo:
     else:
         _rep.append(("Order selection", "manual"))
 
+if is_custom:   # FS-007: no modifications or manual notches for an entered H(s)
+    _rep = [r for r in _rep
+            if not r[0].startswith(("Passband even-order", "Stopband roll-off", "Manual notches"))]
 st.session_state["report_spec"] = _rep
 st.session_state["report_spec_short"] = (
+    f"Custom_{filter_type.replace('-', '')}_n{_tot_order}" if is_custom else
     f"{response.replace(' ', '')}_{filter_type.replace('-', '')}_n{_tot_order}")
 st.session_state["report_subtitle"] = (
     f"{response} {filter_type} · order {_tot_order} · {_corners}")
@@ -961,6 +1108,8 @@ st.session_state["report_subtitle"] = (
 if engine_results:
     _wn = (2 * np.pi * np.sqrt(f1_val * f2_val) * multiplier
            if _is_band and f2_val else 2 * np.pi * real_fc)
+    if _cinfo:   # FS-007: the entered normalization (complete-normalized: 2π·f_n)
+        _wn = _cinfo["w_n"]
     st.session_state["report_engine"] = {
         "poles": np.asarray(engine_results["poles"]),
         "zeros": np.asarray(engine_results["zeros"]),
@@ -1076,8 +1225,8 @@ with tab_plots, st.container(key="rp_plots"):   # key -> CSS 7b. (compact)
     # FS-002: no horizontal rules between the sections below (they cost ~4rem
     # each); the headings and the notch box border separate them.
 
-    # --- A2. READ-ONLY ENGINE OUTPUTS ---
-    if engine_results is not None:
+    # --- A2. READ-ONLY ENGINE OUTPUTS --- (FS-007: none for Custom; no stopband keys)
+    if engine_results is not None and not is_custom:
         if filter_type in ["Lowpass", "Highpass"]:
             sb_status = engine_results.get('sb_status', 'normal')
             if sb_status == 'corrupted':
@@ -1168,14 +1317,18 @@ with tab_plots, st.container(key="rp_plots"):   # key -> CSS 7b. (compact)
                                             key=f"probe_{_i + 1}_{filter_type}", format="%.3f")
         _pcols[2 * _i + 1].caption(get_probe_text(_p_in))
 
-    # --- C. MANUAL NOTCH GRID ---
-    with design_control("notch"):  # FS-001
-        if response in ["Elliptic", "Inverse Chebyshev"]:
+    # --- C. MANUAL NOTCH GRID --- (FS-007: none for Custom; its zeros are edited in the panel)
+    with (contextlib.nullcontext() if is_custom else design_control("notch")):  # FS-001
+        if is_custom:
+            pass
+        elif response in ["Elliptic", "Inverse Chebyshev"]:
             st.markdown("#### Manual Notch Tuning")
         else:
             st.markdown("#### Manual Notch Placement")
 
-        if filter_type in ["Lowpass", "Highpass"]:
+        if is_custom:
+            pass
+        elif filter_type in ["Lowpass", "Highpass"]:
             if P_eff > 0:
                 # Enforce the strict UI-level safety guardrail for Elliptics
                 is_elliptic_over_limit = (response == "Elliptic") and (
@@ -1332,7 +1485,11 @@ with tab_plots, st.container(key="rp_roots"):
 
         with col_units:
             if scale_type == "Normalized":
-                if filter_type in ["Bandpass", "Band-Reject"]:
+                if is_custom:   # FS-007: custom_info['w_n'] (2π·f_n for a normalized entry)
+                    st.info(f"Normalized to ω_n = 2π · "
+                            f"{engine_results['custom_info']['w_n'] / (2 * np.pi) / multiplier:.6g} "
+                            f"{freq_unit}")
+                elif filter_type in ["Bandpass", "Band-Reject"]:
                     st.info("Passband Center Frequency Normalized to 1 rad/s")
                 else:
                     st.info("Passband Corner Frequency Normalized to 1 rad/s")
@@ -1350,7 +1507,9 @@ with tab_plots, st.container(key="rp_roots"):
             w_norm = 2 * np.pi * np.sqrt(f1_val * f2_val) * multiplier
         else:
             w_norm = 2 * np.pi * real_fc
-        
+        if is_custom:   # FS-007: the round trip shows exactly what was typed
+            w_norm = engine_results['custom_info']['w_n']
+
         if scale_type == "Normalized":
             p_disp = p_phys_rad / w_norm
             z_disp = z_phys_rad / w_norm
@@ -1535,6 +1694,9 @@ with tab_pairing, st.container(key="bp_body"):   # key -> CSS 7b. (FS-004 compac
         current_signature = f"{response}_{final_lp_order}_{real_fc}_{final_alpha}_{final_as_lp}_{len(z_bricks)}_mnemo_{do_absorb}"
         if is_delay:   # FS-006 parameters that move poles without changing the above
             current_signature += f"_{delay_ripple}_{delay_anchor}_{delay_bp_mapping}_{f2_val}_ems{ems_m if ems_on else -1}"
+        if is_custom:   # FS-007: the roots alone (α / real_fc move in complete mode, H does not)
+            current_signature = (f"custom_{filter_type}_{engine_results['custom_info']['roots_sig']}"
+                                 f"_mnemo_{do_absorb}")
         
         # If the physical filter changed OR manual routing is off, run the Auto-Router
         if 'filter_signature' not in st.session_state or st.session_state.filter_signature != current_signature:
@@ -1768,7 +1930,13 @@ with tab_pairing, st.container(key="bp_body"):   # key -> CSS 7b. (FS-004 compac
                 # Band-Reject (two passbands straddling the stop-band); it appears
                 # in 2nd position for BR and is hidden for every other response.
                 _dist_opts = ["Distribute Remaining Gain Evenly"]
-                if filter_type == "Band-Reject":
+                # FS-007: hidden for a custom BR whose |H(0)| and |H(∞)| differ (> 0.01 dB):
+                # the strategy then only reaches their geometric mean.
+                _ci_br = engine_results.get("custom_info") or {}
+                _asym_br = bool(_ci_br) and (
+                    _ci_br.get("h0_db") is None or _ci_br.get("hinf_db") is None
+                    or abs(_ci_br["h0_db"] - _ci_br["hinf_db"]) > 0.01)
+                if filter_type == "Band-Reject" and not _asym_br:
                     _dist_opts.append("Equalize DC and HF gains of LP and HP sections")
                 _dist_opts += [
                     "Apply Remaining Gain to First Stage",
@@ -1876,6 +2044,9 @@ with tab_pairing, st.container(key="bp_body"):   # key -> CSS 7b. (FS-004 compac
             
             st.session_state.hw_sections = hw_sections
             st.session_state.hw_filter_type = filter_type   # BR-aware overall readout
+            # FS-007: the overall readout's target gain (was never written; it fell back to
+            # _mem_gain, which a Custom "As entered" G must not touch). Every design.
+            st.session_state.hw_pb_gain = float(final_gain_units)
             st.session_state.hw_gen = hash(tuple(
                 (s['stage_num'], s['order'], s['notch'],
                  round(s['f0_hz'] or 0.0, 6), round(s['Q'], 6), round(s['K_radps'], 9))

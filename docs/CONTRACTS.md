@@ -51,6 +51,17 @@ Producers that can count origin zeros exactly (the Pairing tab in `app.py`)
 must store `n_origin_zeros` — a boolean `has_origin_zero` cannot separate
 `BP` from `HP`.
 
+**Producer rule (FS-007).** The classifier, `build_stage_bricks` and the pairers
+understand only origin zeros, jω zero pairs and zeros at ∞, with exact
+conjugates, and strictly-LHP poles; anything else is mishandled *silently*
+(real zeros dropped, off-axis zeros treated as notches, lone roots given an
+invented conjugate). A producer of `engine_results` other than the synthesized
+approximations — today `custom_tf.design_custom` — must emit only that
+pattern, snapped exactly (jω zeros with Re = 0, origin zeros = 0, real roots
+with Im = 0, exact conjugate pairs), or refuse with a message. Its gate is
+relaxed only by FS-013 (RHP zeros) / FS-014 (off-axis LHP zeros), together with
+their cell and schema changes.
+
 ## 3. Section → solver dispatch gate (Tier D)
 
 **Hard rule:** a section is solved only by the solver matching its family.
@@ -85,10 +96,24 @@ Inverting cells (MFB, some AM variants, inverting 1st-order) carry
 `sign = -1`. The overall sign is the product of the section signs; an odd count
 inverts the output and is flagged in the UI (`compute_stage_gains` + the
 overall-gain readout). Sign is a **realization** property, set by the cell —
-`classify_section` never decides it.
+`classify_section` never decides it. `engine_results['k']` is positive: a
+Custom H(s) entered with a negative K is used as |K|, with a warning.
 
 ## 6. Data schemas
 
+- **engine_results, Custom H(s)** (FS-007): `{poles, zeros, k (> 0, peak = 1),
+  custom_info}`. No stopband keys (`f_stop_*`, `sb_status*`, `ideal_notches_*`,
+  `actual_as_db`), no `reflection_zeros`, no `delay_info`: consumers read those
+  with `.get` or are gated off for Custom. `custom_info` = `{mode, form, scale,
+  f_norm_hz|None, w_n (rad/s; Roots & TF and report normalization), target (the
+  resolved type: the radio in prototype mode, the detected type in complete mode),
+  detected, n_poles, n_zeros, n_origin_zeros, n_jw_pairs, n_real_poles,
+  n_complex_pole_pairs, edges_hz (f1, f2|None), alpha_db, proto_edge_db|None,
+  peak_gain (entered, V/V), peak_hz (0 = DC, inf = HF), h0_db|None,
+  hinf_db|None (re peak), h_j1_db?, f3db_ratio?, gain_mode, k_sign, k_entered (typed K or
+  A₀; 1 when blank under Normalize),
+  conditioning_db|None, n_merged_clusters, warnings, preflight, roots_sig}`.
+  Brick / Stage / Section are unchanged.
 - **Brick** (pairing): `{id, type ∈ {Origin, Real, Complex Pair}, root, w0, q}`
 - **Stage** (`auto_pair_stages`): `{stage_num, pole_id, w0, q,
   absorbed_real_id, capacity, zero_ids, has_zero_pair, is_3rd_order,
