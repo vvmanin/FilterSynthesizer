@@ -66,6 +66,11 @@ When a change touches solver or cell math, say explicitly how it was checked.
 
 ## Git — session branch only
 
+- **Local sessions (desktop app / CLI on my PC):** edit the files directly in
+  the local project folder (the checkout I opened, not a worktree). Do not
+  create a branch, commit or push unless I ask for it in the session. When done,
+  list the files you changed.
+- **Cloud / remote sessions:** follow the branch workflow below.
 - Commit and push only to the session's `claude/*` branch; never to `main`;
   never merge.
 - Never run `git reset` or `git checkout` (denied in `.claude/settings.json`),
@@ -78,6 +83,11 @@ When a change touches solver or cell math, say explicitly how it was checked.
 
 - Plan before editing anything that spans tiers; state which tier(s) a change
   touches.
+- While planning, ask me questions (AskUserQuestion) when a decision is
+  genuinely mine to make — scope, UX choice, trade-off — rather than guessing.
+- When the session is in accept-edits mode, make the changes without stopping
+  to ask for my consent first; plan-level questions above still apply, but do
+  not pause for "shall I proceed?" confirmations.
 - Keep changes surgical. This is a single-maintainer codebase with no test net,
   so a small diff that is obviously correct beats a refactor.
 - Update `docs/ARCHITECTURE.md` when a file's role changes, a module is added,
