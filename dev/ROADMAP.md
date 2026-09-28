@@ -36,7 +36,10 @@ PROPOSED ──agree scope──▶ PLANNED ──start──▶ ACTIVE ──co
   **Validation**, and every `Open questions` entry answered. The maintainer
   approves the plan.
 - `PLANNED → ACTIVE` only if all hard `Depends on` items are `DONE`.
-- **At most one item `ACTIVE`** at a time.
+- **At most one item `ACTIVE`** at a time. Exception: an **analysis-only**
+  item (or analysis-only stage) — one whose outputs are new files under `dev/`
+  and which changes no production code — may be `ACTIVE` alongside it, in its
+  own session. Its later build stage follows the one-`ACTIVE` rule.
 - `ACTIVE → VALIDATING`: Claude states what it checked itself, then commits and
   pushes the work to its session `claude/*` branch (never `main` — see
   `CLAUDE.md`); the maintainer tests that branch and merges it.
@@ -148,6 +151,7 @@ first.
 | FS-025 | Gaussian and other non-overshooting responses | P3 *(s)* | PROPOSED | plan xhigh / build high | FS-006 (hard), FS-024 (soft) |
 | FS-026 | LTspice transient export (step; impulse from the step) | P2 *(s)* | PROPOSED | high | FS-008 (hard), FS-024 (hard) |
 | FS-027 | Realized response with inter-stage loading (feasibility first) | P3 *(s)* | PROPOSED | plan high / build high | FS-008 (hard) |
+| FS-028 | Topology solver performance — analysis first | P2 *(s)* | PROPOSED | analysis xhigh / build per finding | — |
 
 *(s)* = suggested priority, awaiting maintainer confirmation.
 
@@ -467,6 +471,25 @@ FS-027 (loaded realized response) reuses FS-008's IR and MNA.
 - **Validation:** Loaded curve equals the LTspice FS-generic AC result (FS-008) ≤ 0.01 dB; with ideal buffers it equals today's product ≤ 1e-9; MC runtime for 2000 runs within ~2× today's.
 - **Open questions:** Keep a toggle (loaded / unloaded) or replace? Does the HF-rise warning logic move to the loaded curve?
 - **Notes:** Found while planning FS-008 (design note §10, §16 with the feasibility sketch). Maintainer: open the item; build decision after the feasibility step.
+- **Updated:** 2026-09-28
+
+### FS-028 — Topology solver performance — analysis first
+- **State:** PROPOSED
+- **Priority:** P2 (suggested)
+- **Effort:** analysis xhigh / build per finding (each accepted optimization becomes its own item with its own effort)
+- **Tiers:** C (solvers, snapper, scoring), B (lambdify / TF cache), D (topology_tab job management, process pool)
+- **Depends on:** —
+- **Contracts:** §7 (performance notes — the starting point), §1 (cache keys, if derivation or caching changes)
+- **Files:** Stage 1 writes only `dev/FS-028_solver_performance_analysis.md` and supplementary material under `dev/fs028/` (profiling/benchmark scripts, raw timings). Code read, not changed: `unified_solver_v2.py`, `zero_manifold_solver.py`, `nonideal_solver.py`, `discrete_snapper.py`, `scoring.py`, `filter_synthesis.py`, `solvability_probe.py`, `first_order_solver.py`, `tf_derivation_v2.py`, `topology_tab.py` (job management), `pool_utils.py` / `mp_fix.py`
+- **Goal:** Know where Topology-tab solve time goes and which changes would cut it, at what risk to result quality — before touching any solver code.
+- **Scope:** Stage 1 (this item, no production-code changes):
+  - a reproducible benchmark set (one design per family / section kind, VCVS / MFB / AM; cold vs warm TF cache; Fast / Balanced / Thorough presets) with baseline timings and top BOMs;
+  - a profile of where time goes per phase (probe, symbolic derivation / cache load, lambdify, Phase 1 multistart, Phase 3 / zero-manifold, non-ideal correction, snapping, scoring, process-pool startup and pickling);
+  - a ranked list of candidate optimizations, each with expected gain, effect on converged values/BOMs, risk (esp. the fragile PyInstaller multiprocessing path), effort, and how it would be validated. Candidates to assess include the open §7 lever (`nonideal_solver` tolerances), early termination / pruning of the multistart, caching or reusing work across sections and reruns, vectorization, and pool reuse.
+  Stage 2 (after maintainer review): accepted candidates are opened as separate FS items. Out — any change to synthesis results without an explicit, validated trade-off.
+- **Validation:** Stage 1 — the benchmark script runs from the repo root and reproduces the baseline within run-to-run noise; the maintainer reviews and accepts the analysis. Each Stage-2 item — same benchmark: time reduction measured, top BOMs identical to baseline (or deviations listed and accepted), `python verify.py` passes, bundled-exe run of one design.
+- **Open questions:** Target: wall-clock per section, whole-cascade time, or UI responsiveness (e.g. streaming partial results)? Is a small change in converged values acceptable for a large speed-up, and within what tolerance?
+- **Notes:** Stage 1 is analysis-only and touches no production code, so it can run alongside the `ACTIVE` FS-008 as a separate session without file conflicts (§1 analysis-only exception). FS-016 may change stage assignments — take BOM baselines after it lands, or re-take them. FS-027 has its own MC-timing concern; share the benchmark harness if useful.
 - **Updated:** 2026-09-28
 
 ---
