@@ -4,7 +4,7 @@ Purpose: the reasoning and the build plan for FS-008. The tool writes LTspice sc
 whole solved cascade: sections in series, op-amps taken from a local library, component values
 from the snapped BOM, and Monte Carlo pre-set from the tool's MC settings. The files open and
 simulate directly. This note is for a coding session with the project open. It records the
-maintainer's decisions (2026-09-27/28), the caveats of generating LTspice schematics, how each
+maintainer's decisions (2026-09-27/28, second round 2026-09-28), the caveats of generating LTspice schematics, how each
 caveat is handled, and what has to be checked in LTspice itself.
 
 No code was written for this note. LTspice was not available where it was planned, so every
@@ -32,13 +32,16 @@ Conventions:
 | Optional parts and parts replaced by a short | Must be **reliable** (*maintainer requirement*). The IR marks each absent part `open` or `short` per variant. The transform deletes open parts and replaces shorted parts by a wire. The exported drawing's connectivity is re-extracted and must equal the IR; otherwise that section falls back to auto-layout. A wrong schematic is never written (§4). |
 | File scope | **One file holds the whole cascade in series**, so inter-stage loading is simulated. Sections are stacked **in a column**: section 1 at the top, the last one at the bottom. Sections connect **by net labels** (*maintainer decision*, §4.5). |
 | Op-amps | **A local op-amp library of dummy `.asc` files**, one op-amp each. The op-amp is either an LTspice built-in part, a part with an external `.lib`, or a model in a directive text block. The export **copies each section's op-amp instance and its directives from the dummy**. The user can swap op-amps in the output (*maintainer decision*). UniversalOpamp is not offered, because it adds nothing over the tool's own model (*maintainer*). Recommendation: an **FS generic** dummy with the tool's A_ol/GBWP/Ro model, used for Ideal, Custom and unmapped parts and for validation (§5). |
+| Op-amp placement | Every op-amp position in a cell is a **seat** with fixed terminal coordinates. Each dummy carries adapter wiring from its symbol's pins to those terminals, so any op-amp copied from its dummy fits every seat. Each instance is its own copy, with no shared labels, and directives are written once per file (*maintainer decision*, §5.4). A hierarchical block with one unified symbol is kept as the documented alternative. |
+| Which dummies ship | The **maintainer's call**. Appendix A gives the guidelines, the dummy check and a generator for `opamp2`-based dummies. |
 | Mapping from a tool part to a dummy | The `opamp_library` field `spice_model` holds the dummy's file stem. It is null today, and then FS generic is used (§5.2). |
-| Supply | The **total supply Vs is entered in the tool**. It is drawn as **two sources of Vs/2**, positive and negative, with GND at the common node (*maintainer decision*, §6). |
-| Inter-stage loading | **Real cascade only** (*maintainer decision*). The tool's realized curve ignores loading. The difference is explained and validated against an MNA solve of the loaded cascade (§10). |
-| One file or several? | **Several.** In v1 these are `<spec>_AC.asc` (nominal) and `<spec>_AC_MC.asc` (Monte Carlo), zipped with a README. There are two reasons. LTspice runs one analysis type per simulation. And `mc()` / `gauss()` never return the nominal value, even with one run or without `.step` (*maintainer's reasoning, confirmed*, §7). |
+| Supply | The **total supply Vs is entered in the tool**. It is drawn as **two sources of Vs/2**, positive and negative, with GND at the common node. The **default is 5 V** (±2.5 V) (*maintainer decisions*, §6). |
+| Inter-stage loading | **Real cascade only** (*maintainer decision*). The tool's realized curve ignores loading. The difference is explained and validated against an MNA solve of the loaded cascade (§10). A loaded realized response *inside the tool* becomes the follow-up item **FS-027**, with a feasibility check first (*maintainer*, §16). |
+| One file or several? | **Several.** In v1 these are `<spec>_AC.asc` (nominal) and `<spec>_AC_MC.asc` (Monte Carlo), zipped with a README. There are two reasons. LTspice runs one analysis type per simulation. And `mc()` / `gauss()` never return the nominal value, even with one run or without `.step` (*maintainer's reasoning, confirmed*, §7). MC run 1 is **not** used as a nominal reference; nominal lives only in the nominal file (*maintainer*). |
 | Transient | **Not in v1.** A follow-up item, **FS-026**, comes after FS-024 (the tool's own time-domain evaluation), which supplies the window and presets. It uses a step (mandatory) and an impulse derived from the small-signal step. There is no Monte Carlo in the time domain (*maintainer*). v1 already builds the hooks (§11). |
 | MC mapping | Gaussian `nom*(1+gauss(tol/3))` or Uniform `nom*(1+flat(tol))`, through one `.func`. There is one `.param` per resistor band plus one for caps, and `.step param run 1 N 1` with `.save V(out)`. Band membership comes from `hw_plots._r_tol_frac` itself (§9). |
-| Designators | `R201` = section 2, R1. Split caps are `C202A`/`C202B`, op-amps `U201…U203`, and AM/BP3 aliases R0/C0 become `R200`/`C200` (*recommendation*, open question §17). |
+| Designators | `R201` = section 2, R1. Split caps are `C202A`/`C202B`, op-amps `U201…U203`, and AM/BP3 aliases R0/C0 become `R200`/`C200` (*maintainer decision*). |
+| LTspice version | **LTspice 24.x only** (*maintainer decision*). XVII is not a target. |
 | Where in the UI | Resulting Response tab, in a block after the Monte Carlo settings: Vs, the op-amp→SPICE model table and a zip download (§13). |
 
 ---
@@ -174,7 +177,9 @@ roles.
    - Port FLAGs are `IN` and `OUT`, and the supply FLAGs are `VCC` and `VEE`.
    - Each internal net carries a FLAG with its IR node name. That makes LTspice's own netlist of
      the template directly comparable to the IR.
-   - The op-amp placeholder is an `opamp2`.
+   - Each op-amp position is a **seat** (§5.4): wire ends at the fixed seat terminal points, plus
+     a `;SEAT U1` comment at the seat origin. The seat may hold the FS generic block as a
+     placeholder, so the template also simulates on its own.
    - Split caps get a parallel slot (`C2b`).
 3. **Op-amp dummies** (§5). There is one per SPICE model, and together they form the local op-amp
    library.
@@ -191,8 +196,10 @@ The UI shows which one each section used.
 
 ### 3.4 Folder and packaging
 
-The folder is `LTspice_Library/` with `symbols.asc`, `cells/` and `opamps/`. It follows the SVG
-pattern:
+The folder is `LTspice_Library/`. It holds `symbols.asc`, `cells/`, `opamps/` (the dummies
+plus `_seat_template.asc`, an empty seat to start a new dummy from), `models/` (user-supplied
+model files referenced by dummies, never committed from vendors) and `tools/` (the open-loop
+harness, Appendix A.6). It follows the SVG pattern:
 - It is bundled in `FilterSynthesizer.spec` `datas`.
 - `build.bat` copies it next to the exe as a user-editable copy.
 - `launcher.py` points `FILTERSYNTHESIZER_LTSPICE_DIR` at the exe-adjacent copy, falling back to
@@ -226,7 +233,8 @@ The transform does the following to each section's template:
 5. **Values.** Set SYMATTR Value to the formatted nominal (§12), or to the MC expression (§9).
 6. **Rename.** InstName becomes the stage designator (`R201`). Internal FLAGs become `S2_a`,
    `S2_m`, and so on. `IN` / `OUT` become the cascade nets of §4.5.
-7. **Op-amps.** Replace each placeholder with the section's dummy (§5.4).
+7. **Op-amps.** Clear each seat's interior and insert a copy of the section's dummy block, so
+   its terminals land on the seat's wire ends (§5.4).
 8. **Strip** the template's own TEXT directives. The exporter owns all directives. It adds a
    section title comment instead.
 9. **Translate** into the column (§4.5).
@@ -259,7 +267,9 @@ check is the second line of defence.
 
 It is generated from the IR and needs only `symbols.asc`.
 - Parts are placed on a grid: op-amps on the first row, resistors on the next, capacitors below.
-- Every pin gets a short stub to a FLAG carrying its net name.
+- Every R/C pin gets a short stub to a FLAG carrying its net name.
+- Each op-amp is a copy of its dummy block (§5.4). A FLAG with the pin's net name goes on each
+  seat terminal, so auto-layout needs no op-amp pin geometry either.
 - The result is electrically exact and editable in LTspice. It reads like a drawn netlist, not a
   textbook figure.
 - It is what cells without a template show until their family's template exists.
@@ -291,17 +301,22 @@ A dummy is a normal LTspice-saved `.asc` containing:
 - **Exactly one op-amp SYMBOL**, with any symbol: an LTspice built-in part (for example
   `Opamps\\LT1001`), the generic `opamp2` with Value set to a subckt name, or a custom `.asy`
   (see §5.5).
-- **Pin stubs**: a wire from each pin to a FLAG named `INP`, `INN`, `OUT`, `VCC` and `VEE`.
-  3-pin symbols omit the supplies. Extra pins, such as shutdown or compensation, are handled
-  *inside* the dummy (tied to a supply flag, or left open) the way the datasheet requires.
+- **Adapter wiring to the seat terminals**: wires from each pin to the fixed seat terminal
+  points (§5.4). Each terminal point carries a FLAG named `INP`, `INN`, `OUT`, `VCC` or `VEE`.
+  These FLAGs are markers for the exporter and are never copied into the output. 3-pin symbols
+  omit the supplies. Extra pins, such as shutdown or compensation, are handled *inside* the
+  seat (tied to a `VCC` / `VEE` / `0` label, or left open) the way the datasheet requires. Those
+  three are the only labels allowed inside a dummy, because they are the only nets meant to be
+  shared.
 - **Directives, optional**: TEXT lines `!.lib …`, `!.include …`, or a whole `!.subckt … .ends`
   block.
 - **Metadata, optional**: a comment TEXT line
   `;FS: vs_min=4.5 vs_max=36 note=TI model, download from ti.com`.
 - **Nothing else.** Any other element fails the dummy check.
 
-Because the pin positions are *read from the FLAG positions*, the exporter never needs the
-symbol's `.asy` geometry. Any op-amp symbol works.
+Because the dummy's author wires the pins to the standard terminals, the exporter never needs
+the symbol's `.asy` geometry. Any op-amp symbol fits any seat. Appendix A is the step-by-step
+guide for making a dummy.
 
 ### 5.2 Mapping a tool part to a dummy
 
@@ -349,23 +364,86 @@ Ro y out {Ro}              ; omitted when Ro < 1 mΩ
     one more dummy in the library, labelled *"FS generic (A_ol/GBWP/Ro) — replace with a real
     model"*.
 
-### 5.4 Putting a dummy into a cell
+### 5.4 Putting a dummy into a cell: the op-amp seat (*maintainer decision*)
 
-The cell template has an `opamp2` placeholder per slot, and its pin offsets are known from
-`symbols.asc`. The dummy's port offsets are known from its FLAGs.
+The maintainer asked whether the op-amp can be copied from the dummy sheet into the final
+schematic with wiring whose ends sit at fixed coordinates, so that any op-amp fits its place in
+the cell. **It can.** An `.asc` is plain text, and "copy-paste" means copying the SYMBOL and WIRE
+records with translated coordinates. The fixed-coordinate wiring is the **seat**.
 
-- **In place.** If the dummy's port offsets, after applying the placeholder's orientation, equal
-  the placeholder's pin offsets, the dummy's SYMBOL block replaces the placeholder at the same
-  origin and orientation. The template's wires then reach the pins directly. This holds for
-  `opamp2`-shaped symbols and the FS generic dummy.
-- **Label mode.** Otherwise the placeholder is removed and a FLAG goes on each former pin point,
-  carrying that pin's net name. The dummy block (symbol, stubs and FLAGs) is placed beside the
-  cell with its port FLAGs renamed to the same nets. The result is electrically exact but visually
-  looser. This covers built-in parts whose symbol has a different shape or extra pins.
-- The orientation group (R0…R270, M0…M270) is composed onto the dummy's SYMBOL and its
-  wire/flag coordinates are transformed. **[verify]** LTspice's rotation convention using
-  `symbols.asc`.
-- Either way, §4.3 re-checks the result.
+**Seat geometry.** The seat is a square box of ±128 grid units around a seat origin. Five
+terminal points sit on its boundary. LTspice's y axis points down.
+
+| Terminal | Offset from the seat origin | Role |
+|---|---|---|
+| `INN` | (−128, −32) | inverting input |
+| `INP` | (−128, +32) | non-inverting input |
+| `OUT` | (+128, 0) | output |
+| `VCC` | (0, −128) | positive supply |
+| `VEE` | (0, +128) | negative supply |
+
+The numbers are provisional. Phase 1b fixes the input order (INN above INP, or the reverse) to
+match `opamp2` in R0, so the FS generic dummy's adapter wires need no crossings. 256 × 256 units
+leaves room for any common op-amp symbol.
+
+**In a dummy**, the symbol and its adapter wires lie inside the box, and the terminal FLAGs sit
+exactly on the terminal points. The seat origin is derived from the terminal FLAGs. The dummy
+check rejects a dummy whose terminals are off the standard offsets.
+
+**In a cell template**, each op-amp position has:
+- wire ends at the five terminal points (the supplies go to `VCC` / `VEE` labels);
+- a comment TEXT `;SEAT U1` anchored at the seat origin (`U2`, `U3` for AM);
+- an optional placeholder in the box interior: the FS generic block pasted in, so the template
+  simulates on its own.
+
+Nothing else may lie in the box interior. The template check enforces that.
+
+**On export, per seat:**
+1. Remove everything strictly inside the box: the placeholder symbol, its adapter wires and its
+   labels.
+2. Insert a copy of the section's dummy block, translated so its terminals land on the seat
+   origin plus the offsets. The adapter wires' ends meet the template's wire ends there.
+3. Drop the dummy's terminal FLAGs and set the InstName (`U201`).
+4. The §4.3 check confirms every op-amp pin is on the right net.
+
+**Multiple entries of one op-amp** (the maintainer's question) are safe:
+- Every seat gets its **own copy** of the block, with a unique InstName (`U201`, `U202`, `U301`,
+  …).
+- The terminal FLAGs `INP` / `INN` / `OUT` are **dropped**, so no two instances share a label.
+  Copying them would join every op-amp's inputs into one net, which the design rules out.
+- The only labels a dummy may carry inside are `VCC`, `VEE` and `0`, which are *meant* to be
+  common.
+- The dummy's directives (`.lib`, `.subckt`) are written **once per file**, however many seats
+  use the model. FS generic with several parameter sets writes `FS_OA_1`, `FS_OA_2`, … (§5.3).
+
+**Orientation.** v1 accepts seats in R0 only, and the template check enforces it. A cell that
+wants the inverting input on the other side routes its wires to the terminals instead of flipping
+the seat. Flipped seats can come later by transforming the whole block, once LTspice's rotation
+convention has been verified with `symbols.asc`.
+
+**Alternative kept on file: a hierarchical block with one unified symbol.** This was the
+maintainer's fallback in case copying proved impossible. It works as follows:
+- A block symbol `FS_OPAMP.asy` is drawn once, as an op-amp triangle with pins
+  `INP/INN/OUT/VCC/VEE` at the seat geometry.
+- For every model, the exporter writes a renamed copy `FSOA_<model>.asy`, because LTspice binds
+  a block symbol to the same-named `.asc` in the schematic's folder. It also writes
+  `FSOA_<model>.asc`, which is the dummy with its terminal FLAGs turned into IOPIN ports.
+
+Its advantages:
+- The fit is guaranteed by construction.
+- Each model is edited in one place.
+- The main sheet stays uncluttered.
+
+Its costs, which are why it is not the primary choice:
+- The output becomes **several files**, which must be extracted and kept together. That runs
+  against the maintainer's "one file holds the whole cascade".
+- The op-amp shows as a block rather than its real symbol.
+- Probing inside needs hierarchy navigation.
+- Where LTspice places `.lib` / `.subckt` directives from a sub-sheet is **[verify]**.
+
+Both mechanisms can coexist *per model*. If a symbol ever cannot be adapted inside a seat box
+(for example, it needs external parts on extra pins), that one model can be marked
+`;FS: mode=block` and delivered as a block.
 
 ### 5.5 Directives, external model files and symbols
 
@@ -397,9 +475,10 @@ is used through its symbol.
 ### 5.7 Swapping later
 
 This is the maintainer's use case. A user replaces an op-amp in the output by
-right-click → Pick New Symbol, or by editing its Value / SpiceModel. Label mode and in-place mode
-both allow this. Labelled nets (`S2_m`, `S2_out`, …) make it easy to rewire a symbol with a
-different shape.
+right-click → Pick New Symbol, or by editing its Value / SpiceModel. A replacement symbol with the
+same pin geometry drops straight onto the adapter wires. One with a different shape needs its
+pins rewired to the adapter wire ends. Labelled nets (`S2_m`, `S2_out`, …) make that easy. A
+replacement that should be reused goes into the library as a dummy instead (Appendix A).
 
 ---
 
@@ -410,8 +489,11 @@ different shape.
   midpoint and the signal reference, so single-supply parts see a virtual ground at mid-rail,
   which is how the tool's model already treats every signal. Editing `Vs` in LTspice changes both
   sources.
-- **Default.** Use the smallest `vs_max` among the dummies used, when their metadata gives one,
-  otherwise 10 V. The UI warns when Vs is outside any used dummy's `vs_min…vs_max`.
+- **Default.** **5 V**, i.e. ±2.5 V (*maintainer decision*). The UI warns when Vs is outside any
+  used dummy's `vs_min…vs_max`. Classic ±15 V parts (TL072, NE5532) are usually specified from a
+  few volts per rail upward, above ±2.5 V. Their dummies must therefore state `vs_min`, so the
+  default produces a visible warning rather than a silent, badly biased model. Check the value in
+  the datasheet when making the dummy.
 - **Real models need a sane DC operating point.** The offset times the cascade's DC gain can drive
   an output into a rail, and then the AC result, a linearization around that point, is
   meaningless. The AC files carry a commented `;.op` directive, and the README says to run it once
@@ -458,9 +540,10 @@ Rejected alternatives:
 - one file with an `mcon` switch (above);
 - one file with commented alternative directives.
 
-Optional (open question §17): **MC run 1 = nominal**, via
-`.func TOL(nom,tol) {if(run==1, nom, nom*(1+gauss(tol/3)))}`. The nominal trace then sits inside
-the MC plot as step 1 (View → Select Steps). The cost is N−1 random runs instead of N.
+Not done: **MC run 1 = nominal** (`.func TOL(nom,tol) {if(run==1, nom, …)}`). The maintainer's
+experience is that the first run of a stepped MC is not a trustworthy nominal reference in
+practice. The nominal circuit therefore lives only in the separate nominal file (*maintainer
+decision*, 2026-09-28). All N runs of the MC file are random.
 
 ---
 
@@ -718,8 +801,8 @@ small-signal step (2).
 - **Opening from the zip.** Windows Explorer can open an `.asc` inside the zip by extracting it
   alone. That works because the files are self-contained, unless a dummy needs external files.
   Then the README and the UI say "extract first".
-- **LTspice versions.** The target is LTspice 24.x. XVII is best effort **[verify]**; see the open
-  question in §17.
+- **LTspice version.** The target is **LTspice 24.x only** (*maintainer decision*). Templates are
+  saved from 24.x, and the output copies their header.
 
 ---
 
@@ -731,10 +814,11 @@ The Streamlit code lives in a new **`spice_ui.py`** (like `report_ui.py`), and `
 gets one call.
 
 - **Header:** "LTspice export".
-- **Supply Vs (V)** input with a caption *"drawn as ±Vs/2, GND at midpoint"*. Supply-range
-  warnings come from the dummies' metadata.
+- **Supply Vs (V)** input, **default 5 V**, with a caption *"drawn as ±Vs/2, GND at midpoint"*.
+  Supply-range warnings come from the dummies' metadata.
 - **Table:** section, the tool's op-amp choice, the SPICE model (dummy stem, or "FS generic
-  (fallback)"), and a template status (exact / superset / auto-layout). A per-section override
+  (fallback)"), a template status (exact / superset / auto-layout) and the dummy-check result. A
+  dummy that fails the check is not offered, and the reason is shown. A per-section override
   selectbox lists the library dummies.
 - **MC settings** shown read-only from `mc_params`: runs (editable, defaulting to `resp_runs`),
   distribution, capacitor tolerance and resistor bands. A note says they are taken from the
@@ -770,8 +854,9 @@ gets one call.
    - auto-layout and column assembly;
    - the §4.3 self-check;
    - the zip and README builder.
-4. **`LTspice_Library/`**: a provisional `symbols.asc` and `opamps/_FS_generic.asc`, written as
-   text following LTspice's format. They are confirmed in Phase 1b.
+4. **`LTspice_Library/`**: a provisional `symbols.asc`, `opamps/_FS_generic.asc` and
+   `opamps/_seat_template.asc`, written as text following LTspice's format. They are confirmed in
+   Phase 1b. The same step adds `check_opamp_dummy()` (Appendix A.4) to `spice_export.py`.
 5. **`spice_ui.py`**, plus the one-call hook in `response_tab.py`.
 6. **Packaging**: the `FilterSynthesizer.spec` `datas` line, the `build.bat` copy, and the
    `launcher.py` env var.
@@ -787,7 +872,7 @@ gets one call.
 
 - Open `symbols.asc` and run the netlister (`LTspice -netlist symbols.asc`, **[verify]** the flag
   in 24.x). Every device must sit on its named nets. Save it back if LTspice rewrote anything.
-- Open `_FS_generic.asc`.
+- Open `_FS_generic.asc` and fix the seat's input order to match `opamp2` in R0 (§5.4).
 - Export a design and open both files.
 - Run through §15.2.
 
@@ -796,17 +881,25 @@ gets one call.
 This goes one family at a time: the Sallen-Key LP superset first, since it is the most used, then
 HP, MFB LP/HP, AM, BP/notch and first order.
 - **Maintainer:** draws the superset per §3.2 and runs `-netlist` on it.
-- **Claude:** adds the template path (gating, shorts, prune, placeholder swap), extends the check
+- **Claude:** adds the template path (gating, shorts, prune, seat insertion), extends the check
   to all variants of that family, and confirms that every variant's transformed drawing equals
   its IR.
 
 The families that already have a template switch from auto-layout to the template.
 
-### Phase 3 (op-amp library content)
+### Phase 3 (op-amp library content — the maintainer's call, Appendix A)
 
-- Dummies for the built-in library parts where LTspice ships a model, by symbol only.
-- External-model dummies with `;FS:` download notes, for the rest.
-- `spice_model` values in `opamp_library.json`, coordinated with FS-018 / FS-019.
+Which parts get dummies, and in what order, is the **maintainer's decision**. It cannot be fully
+automated: it depends on which models the maintainer trusts and has obtained legally, and on pin
+orders and supply ranges read from datasheets. Claude supplies the tooling:
+- **`dev/fs008/make_opamp_dummy.py`** writes an `opamp2`-based dummy from a subckt name, model
+  file, vendor pin order and supply range. It reuses the FS generic adapter wiring and adds a
+  pin-order wrapper when needed (Appendix A.7). No drawing is involved.
+- **`tools/opamp_openloop.asc`**, an open-loop harness with one seat. The exporter writes
+  `<stem>_openloop.asc` for any dummy, so its A_ol, GBWP and Ro can be compared with the library
+  entry (Appendix A.6).
+- **`spice_model` values** in `opamp_library.json` as dummies land, coordinated with FS-018 /
+  FS-019.
 
 ---
 
@@ -840,7 +933,10 @@ The check needs `pip install -r requirements.txt`, for sympy.
    - print the loaded deviation (dB) at the probe frequencies.
 7. **FS generic Ideal clamp.** The response with the clamped parameters must equal the tool's
    `IDEAL_PARAMS` response within 1e-6 dB.
-8. `python verify.py` still passes. No Tier B change is expected, so this is a smoke test only.
+8. **Dummy and template contracts.** Every shipped dummy passes `check_opamp_dummy`. Every
+   template's seats are R0, their interiors hold only the placeholder, and the terminal points
+   coincide with wire ends.
+9. `python verify.py` still passes. No Tier B change is expected, so this is a smoke test only.
 
 ### 15.2 Maintainer (LTspice 24)
 
@@ -869,16 +965,28 @@ families in a single cascade.
   - for FS-026 later, `ddt()` and `d()`.
 - **Real part.** One design with a built-in ADI part dummy and one with an external `.lib` dummy
   both run at the chosen Vs. The commented `.op` shows the section outputs near 0 V.
+- **Seats.** Test an FS generic block, a built-in-part dummy and an external-model dummy, each
+  inserted into the same template seat. All connect: LTspice shows no unconnected pins, and its
+  netlist puts every `U` pin on its `S…` net.
 - **Swapping.** Replace one op-amp in the output file by hand. The circuit still simulates, which
-  checks the labelled nets and the label mode.
+  checks the labelled nets and the adapter wiring.
 
 ---
 
 ## 16. Findings for other items
 
-- **The tool ignores inter-stage loading** (§10). The realized curve is an unloaded product. The IR
-  and `mna_ac` make a loaded realized response cheap, which suggests a follow-up item (P3,
-  suggested). Until then, the README and §8.3 quantify the difference per design.
+- **The tool ignores inter-stage loading** (§10). The realized curve is an unloaded product. This
+  becomes the follow-up item **FS-027** (the maintainer approved it; whether to build it is
+  decided on feasibility). Until then, the README and §8.3 quantify the difference per design.
+  - **Feasibility sketch.** At each frequency, get each section's two-port (ABCD) parameters
+    from its IR with two MNA solves, one with the output open and one with it shorted. Chain-
+    multiply them, then terminate with the ideal source and an open load. The unknowns per
+    section are about 8–25, and batched numpy solves are cheap: milliseconds for the nominal
+    curve, and seconds for 2000 MC runs × 600 frequencies, comparable to today's MC.
+  - **Costs.** The realized-response path (`response_tab`, `hw_plots.monte_carlo`, the report)
+    would move from symbolic per-section H to the IR MNA. Group delay (`build_loggrad`) would need
+    a numeric derivative. Solvers and scoring stay per-section and unloaded; only the verification
+    view changes.
 - **MC split-cap correlation.** `hw_plots.comp_dict` varies `C2a+C2b` as one part, so the tool's
   MC is slightly pessimistic for split caps. It could be a small follow-up that draws each part.
 - **A 0 % resistor tolerance becomes 1 %.** `response_tab.py:207` has
@@ -898,15 +1006,138 @@ families in a single cascade.
 
 ---
 
-## 17. Open questions (for the maintainer, before PLANNED)
+## 17. Open questions — answered 2026-09-28
 
-1. **Designator scheme.** `R201` (section × 100 + index), or something closer to the schematic's
-   `2R1`, such as `R2_1`? InstNames should start with the prefix letter, so `2R1` itself is out.
-2. **Default Vs** when no dummy states a range: 10 V (±5 V) as proposed, or another value?
-3. **Initial dummy set to ship.** Which of the 8 library parts get a dummy in Phase 3? Is it
-   acceptable that TI parts are external-model stubs the user completes?
-4. **LTspice versions.** 24.x only, or keep XVII working too, which means testing both?
-5. **Op-amp placement.** Accept label mode for symbols that are not `opamp2`-shaped, or always use
-   label mode for uniformity?
-6. **MC run 1 = nominal** (§7): yes or no?
-7. **Loaded realized response in the tool** (§16): open a follow-up item now, or later?
+1. **Designators.** `R201` scheme accepted.
+2. **Default Vs.** 5 V (±2.5 V).
+3. **Initial dummy set.** Left to the maintainer. Claude provides guidelines (Appendix A), the
+   dummy check, the generator and the open-loop harness (Phase 3).
+4. **LTspice versions.** 24.x only.
+5. **Op-amp placement.** Copying from the dummy into a **seat** with fixed wire-end coordinates.
+   It is feasible, so it is the design (§5.4). Multiple instances are separate copies with no
+   shared labels. The hierarchical-block variant with a unified symbol is documented as the
+   alternative.
+6. **MC run 1 = nominal.** No. Nominal is only in the separate nominal file.
+7. **Loaded realized response in the tool.** Yes, as **FS-027**, decided after a feasibility check
+   (§16).
+
+Nothing left open blocks PLANNED. The [verify] items (§15.2) are Phase 1b checks, not design
+questions.
+
+---
+
+## Appendix A — Making op-amp dummies (guidelines for the maintainer)
+
+### A.1 Which parts first
+
+The maintainer decides; this is only a suggestion. Criteria:
+- **Use.** Parts that actually appear in designs, starting with the 8 built-in library entries.
+  Also parts whose tool values are doubted (FS-018), since a model gives an independent
+  cross-check.
+- **Model availability and licence.** There are three sources:
+  - LTspice 24's own library: search the component picker. Most ADI and many former-Maxim parts
+    are there. **[verify]** which of AD8505 and MAX9636 / MAX40100 are present.
+  - A vendor download (TI, onsemi, ST, …). The model must be plain-text SPICE (PSpice-compatible),
+    not encrypted for another simulator and not TINA-only.
+  - No model at all. Then FS generic with the library's A_ol/GBWP/Ro is the honest choice.
+- **Supply fit at the 5 V default.** AD8505, LMV358A, MAX9636 and MAX40100 are 5 V parts. LM358
+  and OPA1656 also run at 5 V. TL072 and NE5532 are ±15 V-class parts, so record their `vs_min`
+  from the datasheet and expect the warning at the default.
+- **A suggested first batch**, where each item exercises one mechanism:
+  1. FS generic (Phase 1).
+  2. One LTspice built-in part from the library (kind A).
+  3. TL072 via TI's model (kind B, the external `.lib` path).
+  4. The rest as designs need them.
+
+### A.2 Three kinds of dummy
+
+| Kind | Symbol | Model comes from | Directives in the dummy | May be committed? |
+|---|---|---|---|---|
+| **A** built-in | the part's own LTspice symbol | LTspice's library (link in the symbol) | none | yes (reference only) |
+| **B** external file | `opamp2`, Value = subckt name (or a wrapper) | a `.lib` / `.sub` file in `LTspice_Library/models/` or the user overlay | `.lib <file>` (+ wrapper `.subckt` if the pin order differs) | the dummy yes, the vendor file **never** |
+| **C** embedded text | `opamp2`, Value = subckt name | a `.subckt … .ends` pasted in a SPICE directive | the model text | only own or permissively licensed text; vendor text only in the private user overlay |
+
+### A.3 Step by step in LTspice 24 (kind B; A and C differ only in steps 3–4)
+
+1. Open `LTspice_Library/opamps/_seat_template.asc` and *Save As* `<stem>.asc`. The template has
+   the seat box outline and the five terminal FLAGs. Use a plain ASCII stem with no spaces, for
+   example `TL072`. The stem is what goes into `spice_model`.
+2. Place the op-amp symbol inside the box, in R0.
+3. (B) Set its Value to the subckt name exactly as written on the model file's `.subckt` line.
+   Add a SPICE directive `.lib TL072.lib`, and put the file in `LTspice_Library/models/` (or the
+   user overlay's `models/`). (A) Nothing to do: the symbol brings its model. (C) Paste the whole
+   `.subckt … .ends` block as a SPICE directive.
+4. **Check the pin order.** This is the most common SPICE-model mistake. A swapped order usually
+   still "simulates" and quietly gives nonsense.
+   - `opamp2` nets its pins in the order In+, In−, V+, V−, Out. **[verify]** with `symbols.asc`.
+   - Read the model's `.subckt` line and the comment naming its pins. If the order differs, add a
+     wrapper directive and set the Value to the wrapper's name:
+
+     ```text
+     .subckt TL072_FS inp inn vp vn out
+     X1 <the vendor's order, written with inp inn vp vn out> TL072
+     .ends
+     ```
+
+5. Draw adapter wires from each pin to its terminal point.
+   - Every pin must sit on a wire *end*, with no crossings and everything inside the box.
+   - Tie extra pins (shutdown, compensation, …) as the datasheet requires, using only the `VCC`,
+     `VEE` and `0` labels inside the box.
+6. Add the metadata comment, for example
+   `;FS: vs_min=9 vs_max=36 source=https://www.ti.com/product/TL072 note=TI PSpice model`, or
+   `source=LTspice built-in`.
+7. Save. Run the dummy check (the UI table shows the result, or run the dev script) and fix what
+   it reports.
+8. Run the open-loop harness (A.6).
+9. Set `spice_model` for the part, in the op-amp Edit popover or the JSON.
+
+### A.4 What the dummy check enforces
+
+- Exactly one SYMBOL.
+- The terminal FLAGs `INP`, `INN`, `OUT` (and `VCC` / `VEE`, if used) sit exactly at the seat
+  offsets.
+- The symbol and all wires lie inside the box.
+- There are no crossing wires, and every pin sits on a wire end.
+- The only labels are the terminals plus `VCC`, `VEE` and `0`.
+- `.lib` / `.include` targets exist.
+- The `;FS:` fields parse.
+- Text is ASCII, or can be transliterated.
+
+The InstName is free, because it is renamed on export.
+
+### A.5 Licensing: what may be committed
+
+- **Commit:** FS generic, the seat template, the harness, kind-A dummies, and kind-B dummies whose
+  `.lib` points to a file the user downloads (with the source URL in `;FS:`).
+- **Never commit:** vendor model files, vendor text pasted into kind-C dummies, or anything
+  encrypted.
+- The **user overlay** is private. Users put there whatever they are licensed to use.
+
+### A.6 Testing a new dummy
+
+- **Open loop.** The exporter writes `<stem>_openloop.asc` from `tools/opamp_openloop.asc` with
+  the dummy in its seat. It uses the classic setup: the DC loop is closed through a very large
+  feedback inductor, with a very large capacitor to ground, so the loop is open for AC. A second
+  run injects an AC current into the output to read the output resistance.
+  - Compare the model's DC gain, unity-gain frequency and output resistance with the library's
+    `A_ol`, `GBWP_hz` and `Ro_ohm`.
+  - A large mismatch means either the library value or the model is off. That is useful input for
+    FS-018.
+- **Closed loop.** Export a simple design (2nd-order Butterworth Sallen-Key LP at 1 kHz) with the
+  new dummy.
+  - `.op` at the chosen Vs must show the outputs near 0 V.
+  - In the AC nominal run, the passband must match the FS generic run within a fraction of a dB.
+    Stopband differences are the model's own.
+- **Supply.** Re-run at `vs_min` and at the 5 V default.
+
+### A.7 How much can be automated
+
+- **Kinds B and C with `opamp2`:** fully generated by `dev/fs008/make_opamp_dummy.py` from the
+  name, subckt, model file, vendor pin order and supply range. The adapter wiring is the FS
+  generic dummy's, so nothing is drawn.
+- **Kind A** with a built-in symbol shaped like `opamp2`: generated the same way, with only the
+  symbol name changed, once a quick `-netlist` shows the symbol's pins match. **[verify]** per
+  symbol.
+- **Hand-drawn:** only unusually shaped symbols, via steps A.3.
+- **Not automatable:** choosing parts, obtaining models legally, and reading pin orders and supply
+  ranges from datasheets. That stays with the maintainer.

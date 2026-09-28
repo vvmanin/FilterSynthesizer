@@ -134,7 +134,7 @@ first.
 | FS-003 | Fold "Roots & Transfer Function" tab into Response Plots | P2 *(s)* | PROPOSED | medium | FS-002 (hard) |
 | FS-004 | Biquad Pairing tab: compact layout, rad/s note font | P2 *(s)* | PROPOSED | medium | FS-001 (soft) |
 | FS-007 | Custom filter design (coefficients or poles/zeros) | P1 | PLANNED | plan xhigh / build high | FS-003 (soft), FS-016 (soft) |
-| FS-008 | LTspice export with Monte Carlo presets (AC + MC; design note) | P1 | PROPOSED | plan xhigh / build high | FS-005 (hard, done) |
+| FS-008 | LTspice export with Monte Carlo presets (AC + MC; design note) | P1 | PLANNED | plan xhigh / build high | FS-005 (hard, done) |
 | FS-009 | Noise analysis in LTspice output | P2 *(s)* | PROPOSED | medium | FS-008 (hard) |
 | FS-010 | QSpice compatibility | P3 | PROPOSED | medium | FS-008 (hard) |
 | FS-011 | Project save / load | P2 | PROPOSED | high | FS-003, FS-007 (soft) |
@@ -152,6 +152,7 @@ first.
 | FS-024 | Step and impulse response plots (design vs realized) | P3 *(s)* | PROPOSED | high | — |
 | FS-025 | Gaussian and other non-overshooting responses | P3 *(s)* | PROPOSED | plan xhigh / build high | FS-006 (hard), FS-024 (soft) |
 | FS-026 | LTspice transient export (step; impulse from the step) | P2 *(s)* | PROPOSED | high | FS-008 (hard), FS-024 (hard) |
+| FS-027 | Realized response with inter-stage loading (feasibility first) | P3 *(s)* | PROPOSED | plan high / build high | FS-008 (hard) |
 
 *(s)* = suggested priority, awaiting maintainer confirmation.
 
@@ -176,7 +177,8 @@ Op-amp data items: FS-018 before FS-009 (it defines how the noise fields are
 sourced) and before FS-019 (additions follow its curation rule).
 
 SPICE track: FS-008 (AC + Monte Carlo) first; FS-026 (transient) after both
-FS-008 and FS-024; FS-009 / FS-010 plug into FS-008's bundle builder and IR.
+FS-008 and FS-024; FS-009 / FS-010 plug into FS-008's bundle builder and IR;
+FS-027 (loaded realized response) reuses FS-008's IR and MNA.
 
 ---
 
@@ -268,25 +270,26 @@ FS-008 and FS-024; FS-009 / FS-010 plug into FS-008's bundle builder and IR.
 - **Updated:** 2026-09-27
 
 ### FS-008 — LTspice export with Monte Carlo presets
-- **State:** PROPOSED (design note written; promote to PLANNED once its §17 open questions are answered)
+- **State:** PLANNED
 - **Priority:** P1
 - **Effort:** plan xhigh / build high
 - **Tiers:** D (new modules; Tier A/B/C and the TF cache untouched)
 - **Depends on:** FS-005 (hard, done)
 - **Contracts:** §6 (Solution schema is the writer's input — correct its stale keys: R8, `C1a/C1b/C1_parallel`, absent = 0.0 or None); §1 relied on read-only (`topo_for_name`, `all_cells`, `derive_nonideal` for the dev check)
-- **Files:** new `spice_cells.py` (netlist IR per cell superset with open/short gating, `mna_ac`, DC-path check), new `spice_export.py` (no Streamlit: `.asc` model, template transform, auto-layout, column assembly, export-time connectivity self-check, values/MC/directives, FS generic subckt, zip + README), new `spice_ui.py` (Streamlit block), `response_tab.py` (one call after the MC settings), new `LTspice_Library/` (`symbols.asc` calibration, `cells/` superset templates, `opamps/` dummies), new `dev/fs008/check_spice_export.py`, `FilterSynthesizer.spec` + `build.bat` + `launcher.py` (data dir, env var `FILTERSYNTHESIZER_LTSPICE_DIR`), `opamp_library.json` (`spice_model` = dummy stem, phase 3), `docs/ARCHITECTURE.md`, `docs/CONTRACTS.md` §6, `CLAUDE.md` (new-cell checklist: + IR entry, + optional template)
+- **Files:** new `spice_cells.py` (netlist IR per cell superset with open/short gating, `mna_ac`, DC-path check), new `spice_export.py` (no Streamlit: `.asc` model, template transform, auto-layout, column assembly, export-time connectivity self-check, values/MC/directives, FS generic subckt, zip + README), new `spice_ui.py` (Streamlit block), `response_tab.py` (one call after the MC settings), new `LTspice_Library/` (`symbols.asc` calibration, `cells/` superset templates, `opamps/` dummies + `_seat_template.asc`, `models/` for user-supplied model files, `tools/opamp_openloop.asc`), new `dev/fs008/check_spice_export.py` and `dev/fs008/make_opamp_dummy.py`, `FilterSynthesizer.spec` + `build.bat` + `launcher.py` (data dir, env var `FILTERSYNTHESIZER_LTSPICE_DIR`), `opamp_library.json` (`spice_model` = dummy stem, phase 3), `docs/ARCHITECTURE.md`, `docs/CONTRACTS.md` §6, `CLAUDE.md` (new-cell checklist: + IR entry, + optional template)
 - **Goal:** One zip download with LTspice schematics of the whole solved cascade (sections in series, so real inter-stage loading), op-amps copied from a local library of one-op-amp dummy `.asc` files, split supply ±Vs/2 around GND, AC nominal + AC Monte Carlo pre-set from the tool's MC settings — opens and simulates directly.
 - **Scope:**
-  - In — `<spec>_AC.asc` (nominal) and `<spec>_AC_MC.asc` (MC) + `README.txt`; sections stacked in a column (section 1 on top), joined by net labels; drawing per section from an exact-variant template → family superset template (gated: open parts deleted, shorted parts replaced by a wire) → auto-layout fallback, every section re-checked against the IR at export (a mismatching drawing is never written); op-amp dummies (LTspice built-in part / part + external `.lib` / model in a directive block) mapped by `spice_model`, FS generic dummy (the tool's A_ol/GBWP/Ro model) for Ideal / Custom / unmapped parts; Vs input; MC as `.param` per tolerance band + `.func TOL` + `.step param run` + `.save V(out)` + `.meas` probes; UI block in Resulting Response; hooks for FS-026 (source abstraction, per-analysis directives, bundle builder).
-  - Out — transient (FS-026, after FS-024), MC in the time domain (maintainer decision), noise (FS-009), QSpice (FS-010), ideal inter-stage buffers (maintainer: real cascade only), UniversalOpamp modes, shipping or embedding vendor model files.
+  - In — `<spec>_AC.asc` (nominal) and `<spec>_AC_MC.asc` (MC) + `README.txt`; sections stacked in a column (section 1 on top), joined by net labels; drawing per section from an exact-variant template → family superset template (gated: open parts deleted, shorted parts replaced by a wire) → auto-layout fallback, every section re-checked against the IR at export (a mismatching drawing is never written); op-amp dummies (LTspice built-in part / part + external `.lib` / model in a directive block) mapped by `spice_model`, copied into fixed-coordinate **seats** in each cell (adapter wiring in the dummy makes any symbol fit; one copy per instance, no shared labels, directives once per file), FS generic dummy (the tool's A_ol/GBWP/Ro model) for Ideal / Custom / unmapped parts; dummy check, dummy generator and open-loop harness for the maintainer's library work; Vs input (default 5 V); LTspice 24.x only; MC as `.param` per tolerance band + `.func TOL` + `.step param run` + `.save V(out)` + `.meas` probes; UI block in Resulting Response; hooks for FS-026 (source abstraction, per-analysis directives, bundle builder).
+  - Out — transient (FS-026, after FS-024), MC in the time domain (maintainer decision), noise (FS-009), QSpice (FS-010), ideal inter-stage buffers (maintainer: real cascade only), UniversalOpamp modes, MC run 1 as nominal, LTspice XVII, choosing which dummies ship (maintainer), shipping or embedding vendor model files, a loaded realized response inside the tool (FS-027).
 - **Validation:**
   - `python dev/fs008/check_spice_export.py`: IR vs every cell's non-ideal TF for all 92 cells (80 registry + 12 first-order, random values, |ΔH| ≤ 1e-9·max|H|, split-cap and AM R8 ≠ R7 variants); DC-path check per cell; value formatting round trip (no bare `M`/`F`, ASCII only); `.asc` round trip — re-extracted connectivity equals the IR for auto-layout and every template × variant; MC band assignment equals `hw_plots._r_tol_frac`; buffered cascade MNA equals the tool's product ≤ 1e-9 and the loaded deviation is reported; FS generic Ideal clamp ≤ 1e-6 dB.
   - `python verify.py` still passes.
-  - Maintainer, LTspice 24, one design per family (SK / MFB / AM × LP/HP/BP/notch, first-order ni/inv): both files open and run without errors; with FS generic dummies the `.meas` values match the README's loaded-MNA expectations ≤ 0.01 dB; MC `.meas` spread comparable to the tool's p1–p99 band; the note's §15.2 [verify] list; one built-in-part and one external-`.lib` dummy run at the chosen Vs.
-- **Open questions:** see the design note §17 — designator scheme (`R201` proposed); default Vs; initial set of shipped dummies (TI parts as external-model stubs?); LTspice 24 only or XVII too; label mode vs in-place op-amp placement; MC run 1 = nominal; open a follow-up item for a loaded realized response in the tool?
+  - Maintainer, LTspice 24, one design per family (SK / MFB / AM × LP/HP/BP/notch, first-order ni/inv): both files open and run without errors; with FS generic dummies the `.meas` values match the README's loaded-MNA expectations ≤ 0.01 dB; MC `.meas` spread comparable to the tool's p1–p99 band; the note's §15.2 [verify] list; FS generic, a built-in-part dummy and an external-`.lib` dummy all fit the same template seat and run at the chosen Vs.
+- **Open questions:** none (answered 2026-09-28 — see Notes and the design note §17).
 - **Notes:**
   - Design note: `dev/FS-008_ltspice_export_design_note.md` (decisions §0, caveats, build phases §14, validation §15).
   - Decisions (maintainer, 2026-09-28): export from the tool, opened in LTspice; `.asc` schematic, hybrid (hand-drawn superset templates per family + gating, reliable handling of optional and shorted parts); one file = whole cascade in series, column layout, net-label joins; op-amps from a local library of dummy `.asc` files, copied per section, user may swap them later; supply entered in the tool, drawn as two Vs/2 sources with GND at the midpoint; real cascade only; separate nominal and MC files (random functions never return nominal); v1 = AC + AC MC; transient split out to FS-026.
+  - Decisions, second round (maintainer, 2026-09-28): designators `R201` / `C202A` / `U201`; default Vs 5 V; LTspice 24.x only; op-amps copied from dummies into fixed-coordinate seats (hierarchical block with a unified symbol kept as the documented alternative); no MC-run-1 nominal — nominal only in its own file; which dummies ship is the maintainer's call (guidelines: design note Appendix A); loaded realized response in the tool → FS-027, decided on feasibility.
   - The tool's realized response ignores inter-stage loading (plain product of unloaded sections) — LTspice differs in the far stopband by design; validation compares against the IR's loaded-cascade MNA instead.
   - Vendor model files are never shipped or embedded; dummies reference them (`.lib`) or use LTspice built-in symbols.
 - **Updated:** 2026-09-28
@@ -537,6 +540,21 @@ FS-008 and FS-024; FS-009 / FS-010 plug into FS-008's bundle builder and IR.
 - **Validation:** With FS generic dummies the small-amplitude step matches FS-024's realized step (Bessel LP n = 4: overshoot ≈ 0.84 %; Butterworth n = 4: ≈ 10.8 %) and the impulse node matches FS-024's impulse outside the δ spike; large-amplitude run with a real-model dummy stays within the rails at the chosen Vs; file opens and runs in LTspice 24.
 - **Open questions:** Rule for the large amplitude (fraction of swing, or user-set)? Add a slew-rate field to the op-amp library (FS-018) for a slew check?
 - **Notes:** Reasoning (impulse with real op-amps, practice, why the derivative of a small-signal step): `dev/FS-008_ltspice_export_design_note.md` §11. Base prepared in FS-008 v1 (§11.4).
+- **Updated:** 2026-09-28
+
+### FS-027 — Realized response with inter-stage loading (feasibility first)
+- **State:** PROPOSED
+- **Priority:** P3 (suggested)
+- **Effort:** plan high / build high
+- **Tiers:** D (C-adjacent: the realized-response evaluation, not the solvers)
+- **Depends on:** FS-008 (hard — reuses its netlist IR and `mna_ac`)
+- **Contracts:** — (solvers and scoring stay per-section and unloaded)
+- **Files:** `spice_cells.py` (two-port / cascade evaluation), `hw_plots.py` (`monte_carlo`, `cascade`), `response_tab.py` (realized curve, group delay), `report_pdf.py` / `report_ui.py` (same curves), `docs/ARCHITECTURE.md`
+- **Goal:** The Resulting Response tab (and report) shows the realized cascade *with* inter-stage loading — each section's op-amp output impedance driving the next section's input — so it matches the LTspice export instead of an unloaded product.
+- **Scope:** Step 1 — feasibility prototype and decision: per-section ABCD parameters from the IR (two MNA solves per frequency: output open / output shorted), chain-multiplied; nominal and 2000-run MC timing vs today; group-delay approach (numeric derivative or analytic via the MNA). Step 2 (only if step 1 says go) — switch the realized curve, MC and report to it, keeping the unloaded product available for comparison. Out — loading-aware synthesis or scoring.
+- **Validation:** Loaded curve equals the LTspice FS-generic AC result (FS-008) ≤ 0.01 dB; with ideal buffers it equals today's product ≤ 1e-9; MC runtime for 2000 runs within ~2× today's.
+- **Open questions:** Keep a toggle (loaded / unloaded) or replace? Does the HF-rise warning logic move to the loaded curve?
+- **Notes:** Found while planning FS-008 (design note §10, §16 with the feasibility sketch). Maintainer: open the item; build decision after the feasibility step.
 - **Updated:** 2026-09-28
 
 ---
