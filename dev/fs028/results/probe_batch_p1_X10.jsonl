@@ -1,0 +1,3 @@
+{"case": "LPn2-VCVS", "preset": "X10", "batch": {"setup": 0.2551824940019287, "solve": 0.32941938400108484, "n": 2100, "ok": 0, "valleys": {}, "per_mode": {"ratio": [600, 0], "wide": [300, 0], "anchored": [1200, 0]}}}
+{"case": "HPn2-MFB", "preset": "X10", "batch": {"setup": 0.7062827480021951, "solve": 0.9619109739996929, "n": 4200, "ok": 0, "valleys": {}, "per_mode": {"ratio": [1200, 0], "wide": [600, 0], "anchored": [2400, 0]}}}
+{"case": "HPn3-MFB", "preset": "X10", "batch": {"setup": 0.7163870340009453, "solve": 0.7271899889983615, "n": 2100, "ok": 0, "valleys": {}, "per_mode": {"ratio": [600, 0], "wide": [300, 0], "anchored": [1200, 0]}}}

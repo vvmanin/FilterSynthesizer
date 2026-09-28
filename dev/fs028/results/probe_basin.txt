@@ -1,0 +1,15 @@
+LPn3-VCVS: 1 converged Phase-1 starts
+3LPn-unity: 8 components, 4 residuals, |r|^2 at the root 3.4e-27
+perturbation  TRF conv TRF nfev  TRF ms | LM free evals    ms | LM box evals    ms
+x1.02          39/40    46  56.24 |  40/40     5   0.77 |  40/40     5   0.69
+x1.05          37/40    46  40.11 |  40/40     5   0.83 |  40/40     5   0.71
+x1.22          36/40    50  42.63 |  40/40     6   0.97 |  40/40     6   0.82
+x1.65          29/40    43  69.89 |  40/40     7   0.98 |  40/40     7   0.87
+x2.72          26/40    55  84.31 |  40/40     9   1.13 |  40/40     8   1.00
+TRF cost after each evaluation, three starts 5 % off the root:
+  start 0: nfev 49, first cost < 1e-10 after 23 evaluations
+   1e-02 1e-03 1e+01 7e-02 1e-02 5e-03 1e-02 6e-03 9e-04 6e-04 2e-05 6e-06 5e-07 1e-07 2e-07 8e-09 2e-07 5e-09 2e-08 9e-10 8e-09 4e-10 9e-10 4e-11 6e-10 4e-11 2e-11 1e-08 3e-10 9e-12 6e-11 8e-12 1e-12 5e-12 2e-13 2e-12 9e-14 3e-13 1e-14 1e-13 8e-15 9e-15 4e-16 1e-14 1e-16 3e-15 5e-17 5e-16
+  start 1: nfev 36, first cost < 1e-10 after 21 evaluations
+   5e-02 5e-02 4e+00 7e-03 2e-01 1e-03 5e-04 4e-05 7e-06 5e-03 4e-04 1e-05 5e-06 4e-07 1e-07 5e-05 1e-06 2e-08 4e-07 1e-08 3e-08 3e-11 5e-08 2e-09 4e-13 3e-10 1e-11 5e-14 3e-12 1e-14 2e-12 3e-14 4e-17 5e-14 2e-15 6e-18
+  start 2: nfev 37, first cost < 1e-10 after 20 evaluations
+   3e-03 3e-01 3e-04 1e-04 6e-06 4e-06 9e-05 9e-07 5e-06 8e-07 1e-05 1e-07 3e-06 1e-09 2e-06 9e-08 5e-10 9e-09 3e-10 8e-10 4e-12 1e-09 2e-11 2e-13 1e-11 3e-15 8e-12 4e-13 3e-15 1e-15 3e-16 1e-14 9e-17 2e-15 7e-17 2e-16 2e-18

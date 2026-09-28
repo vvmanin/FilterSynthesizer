@@ -151,7 +151,7 @@ first.
 | FS-025 | Gaussian and other non-overshooting responses | P3 *(s)* | PROPOSED | plan xhigh / build high | FS-006 (hard), FS-024 (soft) |
 | FS-026 | LTspice transient export (step; impulse from the step) | P2 *(s)* | PROPOSED | high | FS-008 (hard), FS-024 (hard) |
 | FS-027 | Realized response with inter-stage loading (feasibility first) | P3 *(s)* | PROPOSED | plan high / build high | FS-008 (hard) |
-| FS-028 | Topology solver performance — analysis first | P2 *(s)* | PROPOSED | analysis xhigh / build per finding | — |
+| FS-028 | Topology solver performance — analysis first | P2 *(s)* | VALIDATING (Stage 1 analysis) | analysis xhigh / build per finding | — |
 
 *(s)* = suggested priority, awaiting maintainer confirmation.
 
@@ -474,7 +474,7 @@ FS-027 (loaded realized response) reuses FS-008's IR and MNA.
 - **Updated:** 2026-09-28
 
 ### FS-028 — Topology solver performance — analysis first
-- **State:** PROPOSED
+- **State:** VALIDATING (Stage 1 analysis done 2026-09-28: `dev/FS-028_solver_performance_analysis.md`; waiting on the maintainer's review before Stage-2 items are opened)
 - **Priority:** P2 (suggested)
 - **Effort:** analysis xhigh / build per finding (each accepted optimization becomes its own item with its own effort)
 - **Tiers:** C (solvers, snapper, scoring), B (lambdify / TF cache), D (topology_tab job management, process pool)
@@ -488,8 +488,12 @@ FS-027 (loaded realized response) reuses FS-008's IR and MNA.
   - a ranked list of candidate optimizations, each with expected gain, effect on converged values/BOMs, risk (esp. the fragile PyInstaller multiprocessing path), effort, and how it would be validated. Candidates to assess include the open §7 lever (`nonideal_solver` tolerances), early termination / pruning of the multistart, caching or reusing work across sections and reruns, vectorization, and pool reuse.
   Stage 2 (after maintainer review): accepted candidates are opened as separate FS items. Out — any change to synthesis results without an explicit, validated trade-off.
 - **Validation:** Stage 1 — the benchmark script runs from the repo root and reproduces the baseline within run-to-run noise; the maintainer reviews and accepts the analysis. Each Stage-2 item — same benchmark: time reduction measured, top BOMs identical to baseline (or deviations listed and accepted), `python verify.py` passes, bundled-exe run of one design.
-- **Open questions:** Target: wall-clock per section, whole-cascade time, or UI responsiveness (e.g. streaming partial results)? Is a small change in converged values acceptable for a large speed-up, and within what tolerance?
+- **Open questions:** none for Stage 1 (answered 2026-09-28): target = **wall time per section** (32 cores fully loaded during a solve); a change in converged values is acceptable **if ~10 ppm buys ≥ 2×**; favour **alternative approaches** over polishing the current solver, including the ML idea (learned fast analytical seed + the numerical solver for precision); the goal behind it is an **automated self-adjusting batch mode** (an orchestrator that re-tunes the initial values of any section that does not converge).
 - **Notes:** Stage 1 is analysis-only and touches no production code, so it can run alongside the `ACTIVE` FS-008 as a separate session without file conflicts (§1 analysis-only exception). FS-016 may change stage assignments — take BOM baselines after it lands, or re-take them. FS-027 has its own MC-timing concern; share the benchmark harness if useful.
+  - Stage 1 findings (note §0): 96 % of solve CPU is `scipy least_squares` (bounded TRF) in the Phase-1/3 multistarts — failing starts run to `max_nfev`, TRF stalls near bounds even 5 % from a root; about half of the 32-core wall is per-section fixed cost (symbolic re-derivation in dc_gain mode, run_synthesis + snapper + every non-ideal worker; per-worker lambdify; two fresh pools per solve). Tolerance-only loosening = 1.3×; + budgets ÷4 = 2.0× with 6 of 28 best BOMs changed. Presets barely move the 32-core wall (Fast 0.80×, Thorough 1.21× of Balanced); Thorough is not reliably better (3 better / 4 worse).
+  - Alternatives measured: log-space projected LM (4–5 evaluations from a nearby seed vs TRF's ~46); **batched (vectorized) LM in one process: Phase 1 ≈ 91× and Phase 3 ≈ 187× less CPU over the 31-section set — a section in ≈ 0.3 s median on one core vs ≈ 2 s on 32 cores today (est.)**; **learned seeds** (analytic polynomial in the log-targets + LM polish, 2–5 ms/target) reach the best valley of a full cold multistart on 3 cells; design-parametric residuals verified for all 80 cells (compile once). Quality: Phase-3 LM neutral; Phase-1 solver change alters valley sampling → pair with an explicit Phase-3 sensitivity polish (beat baseline on BP2-VCVS 2.32 vs 2.90).
+  - Proposed Stage-2 items (open on acceptance, IDs assigned then): (1) compile-once cell kernels — no per-section derivation / lambdify / pool start-up, results identical; (2) batched LM solver core + Phase-3 sensitivity polish, validated per note §6; (3) learned seeds (offline trainer, per-cell model versioned like the TF cache, online atlas); (4) self-adjusting batch orchestrator (note §8). Fallback quick win if Stage 2 waits: TRF budget trim (2.0×). Scoring interplay: settle `dev/SENSITIVITY_SCORE.md` §8.1 before any step optimises `sens_score` explicitly.
+  - Harness: `dev/fs028/` (`bench_sections.py` baseline + BOMs, `ab_lm.py` variants, `probe_*.py`, `make_tables.py`); baseline JSON `dev/fs028/results/baseline_balanced.json`. Windows spawn cost not measured here — run `probe_pool.py --workers 32` on the 32-core box.
 - **Updated:** 2026-09-28
 
 ---

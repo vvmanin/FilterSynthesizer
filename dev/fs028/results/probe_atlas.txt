@@ -1,0 +1,24 @@
+3LPn-unity: n=8 m=4  one-time symbolic derive 3.13s, lambdify 0.81s (then reused for EVERY design)
+training: 300 targets, cold solve 39.5s total (132 ms/target), feasible 193, valleys/target median 23
+poly seed: 10 terms x 8 outputs, in-sample RMS log-error 0.311 (x1.37)
+test: 60 targets, 42 feasible (cold found >= 1 valley)
+method  accept rate  valleys  best sens / cold found any  ms/target LM iters
+cold           0.65       49    1.000 (p90 1.00)      1.00      156.7      100
+atlas          1.00       34    1.000 (p90 1.00)      1.00       34.6       16
+poly           1.00        3    0.999 (p90 1.00)      1.00        5.1        5
+2BP: n=7 m=3  one-time symbolic derive 0.31s, lambdify 0.13s (then reused for EVERY design)
+training: 200 targets, cold solve 18.4s total (92 ms/target), feasible 200, valleys/target median 38
+poly seed: 10 terms x 7 outputs, in-sample RMS log-error 0.870 (x2.39)
+test: 40 targets, 40 feasible (cold found >= 1 valley)
+method  accept rate  valleys  best sens / cold found any  ms/target LM iters
+cold           0.82       39    1.000 (p90 1.00)      1.00       96.5      100
+atlas          1.00       28    1.003 (p90 1.38)      1.00       14.4        8
+poly           1.00        3    1.009 (p90 1.06)      1.00        1.9        5
+3LPn-MFB: n=11 m=6  one-time symbolic derive 3.83s, lambdify 0.76s (then reused for EVERY design)
+training: 200 targets, cold solve 39.2s total (196 ms/target), feasible 200, valleys/target median 101
+poly seed: 10 terms x 11 outputs, in-sample RMS log-error 0.371 (x1.45)
+test: 40 targets, 40 feasible (cold found >= 1 valley)
+method  accept rate  valleys  best sens / cold found any  ms/target LM iters
+cold           0.63      101    1.000 (p90 1.00)      1.00      192.7      100
+atlas          1.00       43    1.003 (p90 1.04)      1.00       29.4       14
+poly           1.00        4    0.989 (p90 1.00)      1.00        4.2        5
