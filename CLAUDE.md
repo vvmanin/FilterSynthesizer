@@ -61,9 +61,15 @@ When a change touches solver or cell math, say explicitly how it was checked.
 - A new cell topology = copy an existing `cells_*.py` as template, register it
   in `tf_derivation_v2.py`, route it in `topology_tab.section_kind`, add its schematic
   to `Section_Schematic_Diagrams/`, and add its netlist entry to `spice_cells.py`
-  (`python dev/fs008/check_spice_export.py` fails without it).
+  (`python dev/fs008/check_spice_export.py` fails without it). Then check its
+  LTspice drawing: a template `LTspice_Library/cells/<TEMPLATE>.asc` (spec:
+  `python spice_cells.py <TEMPLATE>`; check 11), or it stays flagged as
+  auto-layout until one ships (ROADMAP FS-008, rule for new cells).
 - Schematic SVGs in `Section_Schematic_Diagrams/` are draw.io sources and are
   hand-edited; do not regenerate or reformat them programmatically.
+- `LTspice_Library/` (FS-008): files saved back by LTspice (`symbols.asc`, dummies,
+  cell templates) are authoritative -- never `--force` the generator over them.
+  Vendor model files in `models/` are git-ignored and never committed.
 
 ## Git — session branch only
 

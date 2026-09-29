@@ -4,14 +4,16 @@
 # =====================================================================
 #  spice_export.py  [Tier D — FS-008 LTspice writer, no Streamlit]
 #
-#  Phase 1 (netlist-first): writes LTspice-24 SPICE netlists (.cir) of the
-#  whole solved cascade -- sections in series, so the real inter-stage loading
-#  is simulated -- with the FS generic op-amp model (the tool's own
-#  A_ol / GBWP / Ro model as an inline .subckt), a split supply +-Vs/2 around
-#  GND, AC nominal and AC Monte Carlo pre-set from the tool's MC settings.
-#  The .asc schematic writer (auto-layout, templates, op-amp dummies) comes in
-#  later phases and reuses this module's values, MC block, directives and
-#  bundle builder (dev/FS-008_ltspice_export_design_note.md §14).
+#  Writes, in ONE export cycle from ONE IR, LTspice-24 netlists (.cir, the
+#  phase-1 format) AND schematics (.asc, spice_asc: a section is drawn from its
+#  hand-drawn cell template, LTspice_Library/cells/, else auto-laid-out) of
+#  the whole solved cascade -- sections in series, so the real inter-stage
+#  loading is simulated -- with a split supply +-Vs/2 around GND, AC nominal
+#  and AC Monte Carlo pre-set from the tool's MC settings.
+#  Op-amps come from the local model library (spice_opamps): a section whose
+#  part has a `spice_model` dummy uses that model in both files; Ideal /
+#  Custom / unmapped parts use FS generic (the tool's own A_ol / GBWP / Ro
+#  model as an inline .subckt). dev/FS-008_ltspice_export_design_note.md §14.
 #
 #  Everything here is plain string building from spice_cells' IR, so it is
 #  cheap enough to run on every Streamlit render.
@@ -20,13 +22,16 @@
 import datetime
 import io
 import math
+import os
 import re
 import unicodedata
 import zipfile
 
 import numpy as np
 
+import spice_asc as SA
 import spice_cells as SC
+import spice_opamps as SO
 from _version import APP_NAME, __version__
 
 EOL = "\r\n"
@@ -246,16 +251,24 @@ def _probes(sections, grid, loaded):
 
 
 def build_export(sections_data, vs=5.0, mc_params=None, spec="filter",
-                 n_runs=None, now=None):
+                 n_runs=None, now=None, include_models=False, templates=True):
     """Build the LTspice bundle.
 
     sections_data : response_tab's list, stage order; each item has
                     n, sec (hw_sections entry), row (snapped BOM row),
                     eval_opamp ({A_ol, GBWP_hz, Ro MOhm}), and optionally
-                    opamp_label (the part name shown in the tool).
+                    opamp_label (the part name shown in the tool) and
+                    spice_model (a dummy stem of the op-amp model library;
+                    None / missing / unusable -> FS generic).
     mc_params     : response_tab's mc_params (r_bands, c_tol_pct, n_runs, dist).
-    Returns {files: {name: text}, zip_name, cascade (IR), sections: [info],
-             warnings: [str], expected: [(probe, f, loaded, unloaded)]}.
+    include_models: copy the model files the dummies reference into the zip
+                    and reference them by bare name (else absolute paths).
+    templates     : draw a section from its hand-drawn cell template
+                    (LTspice_Library/cells/<template>.asc) when there is one;
+                    False = auto-layout for every section.
+    Returns {files: {name: text}, extra_files: {name: path}, zip_name,
+             cascade (IR), sections: [info], warnings: [str],
+             expected: [(probe, f, loaded, unloaded)], all_generic, asc_error}.
     Raises ValueError for a row the IR cannot represent."""
     mc_params = dict(mc_params or {})
     r_bands = [tuple(b) for b in (mc_params.get("r_bands") or [(0.0, 1e12, DEFAULT_R_TOL_PCT)])]
@@ -265,30 +278,62 @@ def build_export(sections_data, vs=5.0, mc_params=None, spec="filter",
     now = now or datetime.datetime.now()
     spec = re.sub(r"[^A-Za-z0-9_.-]+", "_", ascii_text(spec)) or "filter"
 
-    # ---- IR per section, FS generic models, cascade ----
-    models, irs_tool, irs_spice, info, warnings = {}, [], [], [], []
+    # ---- IR per section, op-amp models, cascade ----
+    lib = SO.dummies()
+    fsd = lib[SO.FS_GENERIC]
+    models, real, stage_dummy = {}, {}, {}
+    irs_tool, irs_spice, info, warnings = [], [], [], []
+    for w in fsd["warnings"]:
+        warnings.append(f"Op-amp library: {w}")
     for sd in sections_data:
-        row = sd["row"]
+        row, n = sd["row"], sd["n"]
         p = fs_generic_params(sd["eval_opamp"])
-        key = (p["A_ol"], p["GBWP_hz"], p["Ro_ohm"])
-        if key not in models:
-            models[key] = (f"FS_OA_{len(models) + 1}", p)
+        stem = sd.get("spice_model") or SO.FS_GENERIC
+        dm = lib.get(stem)
+        if stem != SO.FS_GENERIC and (dm is None or dm["errors"]):
+            why = ("is not in the op-amp model library" if dm is None else
+                   "fails the dummy check (" + "; ".join(dm["errors"]) + ")")
+            warnings.append(f"Section {n}: SPICE model '{stem}' {why} -- FS generic used")
+            dm = None
+        if dm is None or dm["fs_generic"]:
+            key = (p["A_ol"], p["GBWP_hz"], p["Ro_ohm"])
+            if key not in models:
+                models[key] = (f"FS_OA_{len(models) + 1}", p)
+            dm, xmodel = fsd, models[key][0]
+        else:
+            real.setdefault(dm["stem"], dm)
+            xmodel = dm["xmodel"]
+            meta = dm["meta"]
+            if (meta.get("vs_min") and vs < meta["vs_min"]) or (meta.get("vs_max") and vs > meta["vs_max"]):
+                warnings.append(f"Section {n}: Vs = {vs:g} V is outside {dm['stem']}'s supply "
+                                f"range {meta.get('vs_min', '?')} .. {meta.get('vs_max', '?')} V")
+        stage_dummy[n] = dm
         alias = SC.display_alias(row.get("topology"))
         ir_tool = SC.section_ir(row, SC.opamp_params(sd["eval_opamp"]))
-        ir_sp = SC.section_ir(row, dict(p, subckt=models[key][0]))
-        irs_tool.append((sd["n"], ir_tool, alias))
-        irs_spice.append((sd["n"], ir_sp, alias))
+        ir_sp = SC.section_ir(row, dict(p, subckt=xmodel))
+        irs_tool.append((n, ir_tool, alias))
+        irs_spice.append((n, ir_sp, alias))
         fl = SC.dc_floating_nodes(ir_sp)
         for w in ir_sp["warnings"]:
-            warnings.append(f"Section {sd['n']}: {w}")
+            warnings.append(f"Section {n}: {w}")
         if fl:
-            warnings.append(f"Section {sd['n']} ({row.get('topology')}): no DC path at "
+            warnings.append(f"Section {n} ({row.get('topology')}): no DC path at "
                             f"{', '.join(fl)} -- a real op-amp model will not bias there")
-        info.append({"n": sd["n"], "topology": row.get("topology"),
+        info.append({"n": n, "topology": row.get("topology"),
                      "opamp_label": ascii_text(sd.get("opamp_label") or ""),
-                     "model": models[key][0], "params": p,
+                     "model": xmodel, "stem": dm["stem"], "fs_generic": dm["fs_generic"],
+                     "dummy": dm, "params": p, "drawing": "auto-layout",
                      "template": ir_sp["template"], "floating": fl})
     casc = SC.cascade_ir(irs_spice)
+    all_generic = not real
+    tpls = {}
+    for inf in info if templates else ():
+        t = SO.cell_template(inf["template"])
+        if t is not None:
+            sup, node_map = SC.gating(inf["topology"])
+            tpls[inf["n"]] = dict(t, sup=sup, node_map=node_map)
+    drawn = {}
+    dummy_of = {o["name"]: stage_dummy[o["stage"]] for o in casc["opamps"]}
 
     # ---- expected values: loaded (what LTspice solves) vs the tool (unloaded) ----
     grid = ac_grid(sections_data)
@@ -308,11 +353,69 @@ def build_export(sections_data, vs=5.0, mc_params=None, spec="filter",
     band = _db(h_tool) >= np.max(_db(h_tool)) - 60.0      # ignore deep nulls
     dev = float(np.max(np.abs(_db(h_loaded[band]) - _db(h_tool[band]))))
 
-    # ---- files ----
+    # ---- shared pieces: the .cir and the .asc are built from the same ones ----
+    def values(mc):
+        vals, used = {}, set()
+        for el in casc["parts"]:
+            val = fmt_value(el["value"])
+            if mc:
+                if el["kind"] == "R":
+                    b = r_band_index(el["value"], r_bands)
+                    used.add(b)
+                    val = f"{{TOL({val},{_band_param(b)})}}"
+                else:
+                    val = f"{{TOL({val},tC)}}"
+            vals[el["name"]] = val
+        return vals, used
+
+    def x_line(o):
+        nets = {"INP": o["inp"], "INN": o["inn"], "OUT": o["out"],
+                "VCC": "VCC", "VEE": "VEE", "0": "0"}
+        return f"X{o['name']} {' '.join(SO.x_args(dummy_of[o['name']], nets, o['name']))} " \
+               f"{o['subckt']}"
+
+    def model_note(inf):
+        if inf["fs_generic"]:
+            return f"{inf['model']} (FS generic)"
+        return f"{inf['stem']} ({inf['model']})"
+
+    real_blocks, seen_blocks = [], set()           # [(stem, cir lines, asc blocks)]
+    for stem, d in real.items():
+        cir = [ln for ln in SO.directives_cir(d, include_models)]
+        blocks = [b for b in SO.directives_asc(d, include_models)
+                  if tuple(b) not in seen_blocks]
+        seen_blocks |= {tuple(b) for b in blocks}
+        real_blocks.append((stem, cir, blocks))
+
+    def probe_lines():
+        out = []
+        for name, f, a, b in expected:
+            if all_generic:
+                out.append(f"* expected {_db(a):.4f} dB {math.degrees(np.angle(a)):.2f} deg "
+                           f"(loaded MNA); tool (unloaded) {_db(b):.4f} dB")
+            else:
+                out.append(f"* tool (unloaded, its own op-amp model) {_db(b):.4f} dB")
+            out.append(f".meas AC G_{name} FIND V(OUT) AT {fmt_value(f, 6)}")
+        return out
+
+    def head(mc, ext):
+        what = "AC Monte Carlo" if mc else "AC nominal"
+        ops = ("Op-amps: FS generic = the tool's own A_ol / GBWP / Ro model (linear, no rails)."
+               if all_generic else
+               "Op-amps: per section (see below); FS generic = the tool's own A_ol / GBWP / Ro model.")
+        return [f"{spec} - {APP_NAME} LTspice export (FS-008) - {what}",
+                f"Generated {now:%Y-%m-%d %H:%M} by {APP_NAME} {__version__}.",
+                f"{len(sections_data)} section(s) in series (real inter-stage loading), "
+                f"input IN, output OUT.",
+                ops,
+                "Supply: Vs drawn as two Vs/2 sources, GND (node 0) at the midpoint.",
+                f"Open in LTspice 24 and Run; plot V(OUT). See README.txt."
+                if ext == "cir" else
+                "Run, then plot V(OUT). The same circuit as the .cir netlist; see README.txt."]
+
     def netlist(mc):
-        used = set()
-        # parts come from the cascade in stage order, so designators are final
-        by_stage = {}
+        vals, used = values(mc)
+        by_stage = {}                               # cascade order: designators final
         for p in casc["parts"]:
             by_stage.setdefault(p["stage"], []).append(p)
         for o in casc["opamps"]:
@@ -320,59 +423,86 @@ def build_export(sections_data, vs=5.0, mc_params=None, spec="filter",
         sec_lines = []
         for sd, inf in zip(sections_data, info):
             sec_lines += ["*", "* " + _section_title(sd),
-                          f"* op-amp: {inf['opamp_label'] or 'Ideal'} -> {inf['model']} "
-                          f"(FS generic)"]
+                          f"* op-amp: {inf['opamp_label'] or 'Ideal'} -> {model_note(inf)}"]
             for el in by_stage.get(sd["n"], []):
                 if "kind" in el:
-                    val = fmt_value(el["value"])
-                    if mc:
-                        if el["kind"] == "R":
-                            b = r_band_index(el["value"], r_bands)
-                            used.add(b)
-                            val = f"{{TOL({val},{_band_param(b)})}}"
-                        else:
-                            val = f"{{TOL({val},tC)}}"
-                    sec_lines.append(f"{el['name']} {el['n1']} {el['n2']} {val}")
+                    sec_lines.append(f"{el['name']} {el['n1']} {el['n2']} {vals[el['name']]}")
                 else:
-                    sec_lines.append(f"X{el['name']} {el['inp']} {el['inn']} VCC VEE "
-                                     f"{el['out']} {el['subckt']}")
-        what = "AC Monte Carlo" if mc else "AC nominal"
-        head = [f"* {spec} - {APP_NAME} LTspice export (FS-008) - {what}",
-                f"* Generated {now:%Y-%m-%d %H:%M} by {APP_NAME} {__version__}.",
-                f"* {len(sections_data)} section(s) in series (real inter-stage loading), "
-                f"input IN, output OUT.",
-                "* Op-amps: FS generic = the tool's own A_ol / GBWP / Ro model (linear, no rails).",
-                "* Supply: Vs drawn as two Vs/2 sources, GND (node 0) at the midpoint.",
-                "* Open in LTspice 24 and Run; plot V(OUT). See README.txt.",
-                "*",
-                f".param Vs={fmt_value(vs)}",
-                "VPOS VCC 0 {Vs/2}",
-                "VNEG 0 VEE {Vs/2}",
-                f"VIN IN 0 {source_value({'kind': 'ac'})}"]
+                    sec_lines.append(x_line(el))
+        top = ["* " + ln for ln in head(mc, "cir")] + [
+            "*",
+            f".param Vs={fmt_value(vs)}",
+            "VPOS VCC 0 {Vs/2}",
+            "VNEG 0 VEE {Vs/2}",
+            f"VIN IN 0 {source_value({'kind': 'ac'})}"]
         tail = ["*", "* ---- op-amp models ----"]
         for name, p in models.values():
             tail += fs_generic_subckt(name, p)
+        for stem, cir, _blocks in real_blocks:
+            note = ascii_text(lib[stem]["meta"].get("note", ""))
+            tail += [f"* {stem}: {lib[stem]['origin']} dummy {lib[stem]['path']}"
+                     + (f" -- {note}" if note else "")] + cir
         tail += ["*", "* ---- analysis ----"] + directives("ac", grid)
         if mc:
             tail += ["*"] + mc_block(r_bands, c_tol, runs, dist, used)
         tail += ["*", "* ---- probes: LTspice reports each in the SPICE Error Log "
-                      "(View > SPICE Error Log) ----"]
-        for name, f, a, b in expected:
-            tail.append(f"* expected {_db(a):.4f} dB {math.degrees(np.angle(a)):.2f} deg "
-                        f"(loaded MNA); tool (unloaded) {_db(b):.4f} dB")
-            tail.append(f".meas AC G_{name} FIND V(OUT) AT {fmt_value(f, 6)}")
+                      "(View > SPICE Error Log) ----"] + probe_lines()
         tail += ["*", "* Real op-amp models only: run the operating point once and check",
                  "* that every section output sits near 0 V before trusting the AC result.",
                  "* .op", ".end"]
-        return EOL.join(head + sec_lines + tail) + EOL
+        return EOL.join(top + sec_lines + tail) + EOL
 
-    files = {f"{spec}_AC.cir": netlist(False), f"{spec}_AC_MC.cir": netlist(True)}
+    def drawing(mc):
+        vals, used = values(mc)
+        titles = {sd["n"]: [_section_title(sd),
+                            f"op-amp: {inf['opamp_label'] or 'Ideal'} -> {model_note(inf)}"]
+                  for sd, inf in zip(sections_data, info)}
+        blocks = [[f".param Vs={fmt_value(vs)}"] + directives("ac", grid)]
+        if mc:
+            blocks.append(mc_block(r_bands, c_tol, runs, dist, used))
+        blocks.append(["* probes: View > SPICE Error Log"] + probe_lines())
+        blocks += [fs_generic_subckt(name, p) for name, p in models.values()]
+        for _stem, _cir, bl in real_blocks:
+            blocks += bl
+        comments = [["Real op-amp models only: run the operating point once and check",
+                     "that every section output sits near 0 V before trusting the AC result."],
+                    [".op"]]
+        return SA.draw_cascade(casc, titles, vals, dummy_of, blocks, head(mc, "asc"),
+                               SO.calibration(), comment_blocks=comments,
+                               templates=tpls, drawn=drawn)
+
+    files = {}
+    asc_error = None
+    try:
+        files[f"{spec}_AC.asc"] = drawing(False)
+        files[f"{spec}_AC_MC.asc"] = drawing(True)
+    except SA.AscError as e:                        # never write a wrong drawing (§4.3)
+        files = {}
+        asc_error = str(e)
+        warnings.append(f"Schematic (.asc) not written -- the drawing failed its self-check "
+                        f"against the netlist ({e}). The .cir netlists are unaffected.")
+    for inf in info:
+        inf["drawing"] = drawn.get(inf["n"], "auto-layout") if not asc_error else "-"
+        if "rejected" in inf["drawing"] or "unreadable" in inf["drawing"]:
+            warnings.append(f"Section {inf['n']}: {inf['drawing']}")
+    files[f"{spec}_AC.cir"] = netlist(False)
+    files[f"{spec}_AC_MC.cir"] = netlist(True)
+
+    extra = {}
+    for stem, d in real.items():
+        if d["asy"]:
+            extra[os.path.basename(d["asy"])] = d["asy"]
+        if include_models:
+            for p in d["files"].values():
+                extra[os.path.basename(p)] = p
     files["README.txt"] = _readme(spec, now, vs, info, r_bands, c_tol, runs, dist,
-                                  grid, expected, dev, warnings, files)
+                                  grid, expected, dev, warnings, files, real, extra,
+                                  include_models, all_generic)
     for name, text in files.items():
         text.encode("ascii")                        # raises on a non-ASCII slip
-    return {"files": files, "cascade": casc, "sections": info, "warnings": warnings,
-            "expected": expected, "loaded_dev_db": dev,
+    return {"files": files, "extra_files": extra, "cascade": casc, "sections": info,
+            "warnings": warnings, "expected": expected, "loaded_dev_db": dev,
+            "all_generic": all_generic, "asc_error": asc_error,
             "zip_name": f"FS_LTspice_{spec}_{now:%Y%m%d_%H%M}.zip"}
 
 
@@ -381,6 +511,8 @@ def zip_bytes(export):
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         for name, text in export["files"].items():
             z.writestr(name, text)
+        for name, path in export.get("extra_files", {}).items():
+            z.write(path, name)
     return buf.getvalue()
 
 
@@ -388,21 +520,32 @@ def zip_bytes(export):
 #  README
 # =====================================================================
 def _readme(spec, now, vs, info, r_bands, c_tol, runs, dist, grid, expected, dev,
-            warnings, files):
+            warnings, files, real, extra, include_models, all_generic):
     fmin, fmax, ppd = grid
-    L = [f"{APP_NAME} - LTspice export (FS-008, phase 1: netlists)",
+    has_asc = f"{spec}_AC.asc" in files
+    L = [f"{APP_NAME} - LTspice export (FS-008: schematics + netlists)",
          f"Design: {spec}    Generated: {now:%Y-%m-%d %H:%M}    Version: {__version__}",
          "",
-         "FILES",
-         f"  {spec}_AC.cir      nominal values, AC sweep, .meas probes",
-         f"  {spec}_AC_MC.cir   the same circuit with Monte Carlo values "
-         f"({runs} runs), .save V(OUT)",
-         "  Nominal and Monte Carlo are separate files on purpose: LTspice's random",
-         "  functions never return the nominal value, and the nominal file keeps plain",
-         "  values you can read and edit.",
-         "",
+         "FILES"]
+    if has_asc:
+        L += [f"  {spec}_AC.asc      schematic: nominal values, AC sweep, .meas probes",
+              f"  {spec}_AC_MC.asc   schematic: Monte Carlo values ({runs} runs), .save V(OUT)"]
+    L += [f"  {spec}_AC.cir      the same nominal circuit as a netlist",
+          f"  {spec}_AC_MC.cir   the same Monte Carlo circuit as a netlist",
+          "  The schematics and the netlists are written from one netlist model in the",
+          "  same export and are checked against each other; the .cir files open without",
+          "  any symbol or library.",
+          "  Nominal and Monte Carlo are separate files on purpose: LTspice's random",
+          "  functions never return the nominal value, and the nominal file keeps plain",
+          "  values you can read and edit."]
+    for name in extra:
+        L.append(f"  {name:<18} used by an op-amp model (keep it next to the .asc/.cir)")
+    L += ["",
          "HOW TO RUN (LTspice 24)",
-         "  1. File > Open, set the file type to Netlists (*.cir), open a file.",
+         "  0. Extract the whole zip into one folder first"
+         + (" (the models need their files)." if extra else "."),
+         "  1. File > Open: the .asc schematic, or a .cir (set the file type to",
+         "     Netlists (*.cir)).",
          "  2. Simulate > Run, then Plot Settings > Add Trace > V(out). The plot",
          "     shows magnitude (dB) and phase; right-click the right-hand (phase)",
          "     axis and choose Group Delay for tau(f).",
@@ -421,21 +564,52 @@ def _readme(spec, now, vs, info, r_bands, c_tol, runs, dist, grid, expected, dev
          "  AC sweep: " + f"{fmt_hz(fmin)} .. {fmt_hz(fmax)}, {ppd} points/decade "
          "(the tool's grid).",
          "",
+         "  Schematic: sections stacked top to bottom, joined by net labels; the",
+         "  directives sit to the right of the circuit. A section is drawn from its",
+         "  hand-drawn cell template (parts the variant does not use are removed, a",
+         "  shorted one becomes a wire); a cell without a template is auto-laid-out",
+         "  (op-amps, a row of resistors, a row of capacitors, every pin on a",
+         "  labelled net). SECTIONS below says which.",
+         "",
          "SECTIONS"]
     for inf in info:
         p = inf["params"]
+        if inf["fs_generic"]:
+            mdl = (f"{inf['model']}: A_ol={fmt_value(p['A_ol'])} GBWP={fmt_hz(p['GBWP_hz'])}"
+                   f" Ro={fmt_value(p['Ro_ohm']) if p['Ro_ohm'] else '0'} ohm")
+        else:
+            mdl = f"{inf['stem']} (model {inf['model']})"
         L.append(f"  {inf['n']:>2}  {inf['topology']:<22} op-amp {inf['opamp_label'] or 'Ideal':<14}"
-                 f" -> {inf['model']}: A_ol={fmt_value(p['A_ol'])} GBWP={fmt_hz(p['GBWP_hz'])}"
-                 f" Ro={fmt_value(p['Ro_ohm']) if p['Ro_ohm'] else '0'} ohm")
+                 f" -> {mdl}")
+        if has_asc:
+            L.append(f"      drawing: {inf['drawing']}")
     L += ["",
-          "OP-AMP MODEL",
-          "  Every op-amp is the FS generic subcircuit: the tool's own model,",
-          "  A(s) = A_ol / (1 + s*A_ol/(2*pi*GBWP)) behind Ro. It is linear, has no",
-          "  supply rails, no offset and no noise, so LTspice must reproduce the tool",
-          "  exactly (see EXPECTED VALUES). The Ideal op-amp is clamped to A_ol = 1e9,",
-          "  GBWP = 10 THz, Ro = 0 (invisible). Real vendor models come in a",
-          "  later phase of FS-008.",
-          "",
+          "OP-AMP MODELS",
+          "  FS generic (Ideal, Custom and parts without a SPICE model): the tool's",
+          "  own model, A(s) = A_ol / (1 + s*A_ol/(2*pi*GBWP)) behind Ro. It is linear,",
+          "  has no supply rails, no offset and no noise, so LTspice must reproduce the",
+          "  tool exactly (see EXPECTED VALUES). The Ideal op-amp is clamped to",
+          "  A_ol = 1e9, GBWP = 10 THz, Ro = 0 (invisible)."]
+    for stem, d in real.items():
+        m = d["meta"]
+        L += [f"  {stem}: from the op-amp model library ({d['origin']}: {d['path']}).",
+              f"    X-line model {d['xmodel']}; pin order "
+              + " ".join(r or "NC" for r, _ in d["xpins"])
+              + (f"; supply {m.get('vs_min', '?')} .. {m.get('vs_max', '?')} V"
+                 if ("vs_min" in m or "vs_max" in m) else "")]
+        if m.get("note") or m.get("source"):
+            L.append(f"    {m.get('note', '')} {m.get('source', '')}".rstrip())
+        if d["files"]:
+            L.append("    model files: " + ", ".join(
+                os.path.basename(p) if include_models else p for p in d["files"].values()))
+    if real:
+        L += ["  A real model has offsets, bias currents and rails: run .op once (the",
+              "  commented directive in each file) and check that every section output",
+              "  sits near 0 V before trusting the AC result."]
+        if not include_models and any(d["files"] for d in real.values()):
+            L += ["  Model files are referenced by absolute path on the exporting machine;",
+                  "  export with 'Include model files in the zip' to move the files."]
+    L += ["",
           "MONTE CARLO",
           f"  Capacitors +-{c_tol:g} %; resistors by value band:"]
     for i, (lo, hi, tol) in enumerate(r_bands):
@@ -453,8 +627,12 @@ def _readme(spec, now, vs, info, r_bands, c_tol, runs, dist, grid, expected, dev
           "  'loaded' = MNA of the cascade exactly as written here (LTspice must match",
           "  it to ~0.01 dB); 'tool' = the tool's realized curve, a product of unloaded",
           "  sections. The two differ only where an op-amp's output impedance meets the",
-          "  next section's input impedance -- mostly the far stopband.",
-          f"  {'probe':<10}{'f':>12}{'loaded dB':>12}{'phase':>10}{'tool dB':>12}"]
+          "  next section's input impedance -- mostly the far stopband."]
+    if not all_generic:
+        L += ["  Real op-amp models are used, so LTspice will NOT match 'loaded' exactly:",
+              "  the column is what the FS generic model (the tool's A_ol / GBWP / Ro)",
+              "  would give in the same cascade -- a passband sanity reference only."]
+    L += [f"  {'probe':<10}{'f':>12}{'loaded dB':>12}{'phase':>10}{'tool dB':>12}"]
     for name, f, a, b in expected:
         L.append(f"  {name:<10}{fmt_hz(f):>12}{_db(a):>12.4f}"
                  f"{math.degrees(np.angle(a)):>10.2f}{_db(b):>12.4f}")
@@ -463,21 +641,20 @@ def _readme(spec, now, vs, info, r_bands, c_tol, runs, dist, grid, expected, dev
           ""]
     if warnings:
         L += ["WARNINGS"] + [f"  - {ascii_text(w)}" for w in warnings] + [""]
-    L += ["VALIDATION CHECKLIST (FS-008 phase 1b; report results back)",
-          "  [ ] Both .cir files open and run without errors or warnings.",
-          "  [ ] AC file: every .meas value equals 'loaded dB' above within 0.01 dB.",
-          "  [ ] MC file: the spread of G_* over the runs is comparable to the tool's",
-          "      p1-p99 band at the same frequency.",
-          "  [ ] MC independence: two parts with the same nominal and tolerance must",
-          "      draw different values in the same run (.func TOL is evaluated per",
-          "      call). Quick test in the MC file, before .end:",
-          "        VT T 0 AC 1",
-          "        RT1 T 0 {TOL(10k,0.3)}",
-          "        RT2 T 0 {TOL(10k,0.3)}",
-          "        .meas AC IT1 FIND I(RT1) AT 1k",
-          "        .meas AC IT2 FIND I(RT2) AT 1k",
-          "      Set the .step to 1 3 1 and run: IT1 and IT2 must differ in each run.",
-          "      If they are equal, report it -- the writer then inlines the draws.",
+    L += ["VALIDATION CHECKLIST (FS-008; report results back)",
+          "  [ ] Both .asc files open in LTspice 24 without errors; no unconnected-pin",
+          "      marks, no label overlapping a part badly enough to mislead.",
+          "  [ ] View > SPICE Netlist of each .asc: the R / C / V / X lines equal the",
+          "      matching .cir up to line order, net-name case (XU201 = U201) and the",
+          "      two nodes of an R / C (a template may draw a part either way round).",
+          "  [ ] Template sections: no unconnected-pin marks, no leftover stubs of",
+          "      removed parts, the seat's op-amp wired to the template's nets.",
+          "  [ ] Run each .asc: the .meas values in the SPICE Error Log equal the .cir's",
+          "      (and, with FS generic only, 'loaded dB' above within 0.01 dB).",
+          "  [ ] The multi-line directives (.subckt, Monte Carlo block, probes) show",
+          "      as several lines and simulate (LTspice's \\n encoding in TEXT).",
+          "  [ ] Replace one op-amp by hand (right-click > Pick New Symbol, or edit its",
+          "      Value): the circuit still simulates.",
           "  [ ] Edit .param Vs: both supply sources follow.",
           ""]
     return EOL.join(ascii_text(x) for x in L) + EOL

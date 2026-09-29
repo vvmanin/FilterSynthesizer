@@ -811,7 +811,8 @@ def _oped_key(n, tag, field):
 
 
 def _oped_tag(name, e):
-    return f"{name}|{e['A_ol']!r}|{e['GBWP_hz']!r}|{e['Ro_ohm']!r}|{e.get('description')}"
+    return (f"{name}|{e['A_ol']!r}|{e['GBWP_hz']!r}|{e['Ro_ohm']!r}|{e.get('description')}"
+            f"|{e.get('spice_model')}")
 
 
 def _oplib_save_edit(n, name, tag):
@@ -826,7 +827,8 @@ def _oplib_save_edit(n, name, tag):
             return
         target = new
     try:
-        oplib.save_user(target, g("aol"), g("gbwp"), g("ro"), description=g("desc") or "")
+        oplib.save_user(target, g("aol"), g("gbwp"), g("ro"), description=g("desc") or "",
+                        spice_model=(g("spice") or "").strip() or None)
     except (OSError, ValueError) as ex:
         _oplib_msg(n, "error", f"Could not save: {ex}")
         return
@@ -866,6 +868,10 @@ def _opamp_part_editor(n, name, e):
         st.number_input("GBWP (Hz)", value=e["GBWP_hz"], format="%.3e", key=_oped_key(n, tag, "gbwp"))
         st.number_input("Ro (Ω)", value=e["Ro_ohm"], step=10.0, key=_oped_key(n, tag, "ro"))
         st.text_input("Description", value=e.get("description") or "", key=_oped_key(n, tag, "desc"))
+        st.text_input("SPICE model", value=e.get("spice_model") or "", key=_oped_key(n, tag, "spice"),
+                      help="Stem of an op-amp dummy in LTspice_Library/opamps (or your "
+                           "overlay), e.g. TL072 for TL072.asc. Empty = FS generic in the "
+                           "LTspice export.")
         st.button("Save", key=f"hw_oped_save_{n}", on_click=_oplib_save_edit, args=(n, name, tag),
                   help="Written to your user library; shipped values are never changed.")
         if e["origin"] == "edited":

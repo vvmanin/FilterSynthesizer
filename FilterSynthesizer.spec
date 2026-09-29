@@ -69,6 +69,12 @@ if _svg.is_dir():
 # build.bat copies it next to the exe; this bundled copy is the fallback.
 datas += [(str(ROOT / "opamp_library.json"), ".")]
 
+# LTspice library (FS-008: symbol calibration, op-amp dummies, templates).
+# Same pattern: build.bat copies it next to the exe; this is the fallback.
+_lt = ROOT / "LTspice_Library"
+if _lt.is_dir():
+    datas += [(str(_lt), "LTspice_Library")]
+
 
 a = Analysis(
     [str(ROOT / "launcher.py")],

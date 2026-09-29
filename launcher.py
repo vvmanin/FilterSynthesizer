@@ -238,6 +238,16 @@ def main():
         if os.path.isfile(bundled):
             os.environ["FILTERSYNTHESIZER_OPAMP_FILE"] = bundled
 
+    # LTspice library (FS-008): same EXE-adjacent-first rule (spice_opamps.py).
+    # User op-amp models live in writable_app_data()/LTspice_Library.
+    ext_lt = os.path.join(exe_dir(), "LTspice_Library")
+    if os.path.isdir(ext_lt):
+        os.environ["FILTERSYNTHESIZER_LTSPICE_DIR"] = ext_lt
+    else:
+        bundled = resource_path("LTspice_Library")
+        if os.path.isdir(bundled):
+            os.environ["FILTERSYNTHESIZER_LTSPICE_DIR"] = bundled
+
     # Diagnostics mode: everything above has run (so the report sees the real
     # runtime state), but the server never starts.
     if "--selftest" in sys.argv:

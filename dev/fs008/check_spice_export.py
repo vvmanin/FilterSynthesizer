@@ -13,14 +13,27 @@ refer to dev/FS-008_ltspice_export_design_note.md §15.1.
   3  value formatting round trip, suffixes, ASCII
   4  netlist round trip: parse the written .cir back (R, C, G, E, X, V, .subckt),
      solve it with an independent SPICE-semantics MNA, compare with the IR
+  4b .asc round trip (phase 2): every cell and three cascades drawn by
+     auto-layout, re-read, netlisted from the geometry (spice_asc.netlist_lines)
+     and solved like 4; a corrupted drawing must fail the export self-check
   5  MC band mapping == hw_plots._r_tol_frac
   6  loading: buffered cascade == tool product; loaded deviation printed
   7  FS generic Ideal clamp vs IDEAL_PARAMS
+  8  LTspice_Library contracts: symbols.asc, _FS_generic, _seat_template,
+     _cell_template; the dummy check rejects bad dummies
+  10 real op-amp models (phase 4 plumbing): dummies with an embedded .subckt
+     + pin-order wrapper, an external .lib, and a custom .asy symbol, in a
+     temporary user overlay -- the .cir and the .asc must both solve to the IR
+  11 hand-drawn cell templates (phase 3): every variant of every templated
+     cell, plain and with split C1 / C2, drawn from its template: re-read and
+     solved = IR, no loose stubs or lone labels; every library op-amp seated
 """
 import math
 import os
 import re
+import shutil
 import sys
+import tempfile
 import time
 
 import numpy as np
@@ -36,8 +49,10 @@ os.chdir(ROOT)
 import cells_first_order as FO      # noqa: E402
 import hw_plots                      # noqa: E402
 import opamp_library as oplib        # noqa: E402
+import spice_asc as SA               # noqa: E402
 import spice_cells as SC             # noqa: E402
 import spice_export as SX            # noqa: E402
+import spice_opamps as SO            # noqa: E402
 import tf_derivation_v2 as TF        # noqa: E402
 
 QUICK = "--quick" in sys.argv
@@ -357,6 +372,428 @@ def check_4_netlist():
                     fail(f"{fname}: expected CRLF line endings")
 
 
+MC = dict(r_bands=[(0, 1e4, 1.0), (1e4, 1e12, 0.1)], c_tol_pct=5.0, n_runs=200, dist="gaussian")
+TL = dict(A_ol=2e5, GBWP_hz=3e6, Ro=50e-6)
+CASCADES = [
+    ["3LPn-gained", "2HP-MFB-QE", "3HPn-AM"],
+    ["2BP1LP-MFB-QE", "1HP-inv-gained", "2N-AM-C1s", "2N"],
+    ["1LP-ni-atten", "2LPn-MFB-LS+R1+R7", "2HPn-MFB2+R7", "2BP-AM2"],
+]
+
+
+def opamp_dummies(exp):
+    by_stage = {inf["n"]: inf["dummy"] for inf in exp["sections"]}
+    return {o["name"]: by_stage[o["stage"]] for o in exp["cascade"]["opamps"]}
+
+
+def drawing_netlist(text, exp, extra=()):
+    """The drawing's LTspice-style netlist (+ model file text) as one string."""
+    lines = SA.netlist_lines(text, SO.calibration(), opamp_dummies(exp))
+    return "\r\n".join(lines[:1] + list(extra) + lines[1:])
+
+
+def element_set(text):
+    """Top-level R / C / V / X lines, upper-cased, order-free; an R / C's two
+    nodes in either order (a template draws a part whichever way round)."""
+    _p, _s, top = _flatten(text)
+    out = set()
+    for tk in top:
+        t = [x.upper() for x in tk]
+        if t[0][0] in "RC":
+            t[1:3] = sorted(t[1:3])
+        out.add(tuple(t))
+    return out
+
+
+def check_4b_asc():
+    print("\n[4b] .asc round trip (auto-layout, geometry -> netlist -> solve)")
+    rng = np.random.default_rng(41)
+    f = np.logspace(1, 6, 25)
+    t0, worst, n_ok = time.time(), 0.0, 0
+    for name in SC.all_cell_names():
+        exp = SX.build_export(demo_sections(rng, [name], [TL]), mc_params=MC, spec="cell",
+                              templates=False)
+        if exp["asc_error"]:
+            fail(f"{name}: {exp['asc_error']}")
+            continue
+        h_ir = SC.mna_ac(exp["cascade"], f)
+        for fn in ("cell_AC.asc", "cell_AC_MC.asc"):
+            text = exp["files"][fn]
+            text.encode("ascii")
+            if "\r\n" not in text:
+                fail(f"{name} {fn}: expected CRLF")
+            err = (np.max(np.abs(netlist_response(drawing_netlist(text, exp), f) - h_ir))
+                   / np.max(np.abs(h_ir)))
+            worst = max(worst, err)
+            if not err <= 1e-6:
+                fail(f"{name} {fn}: drawing vs IR {err:.2e}")
+        n_ok += 1
+    ok(f"{n_ok} of 92 cells auto-laid-out: re-read and solved = IR, worst |dH|/max = {worst:.1e} "
+       f"({time.time() - t0:.0f} s)")
+
+    rng = np.random.default_rng(42)
+    for names, ops in zip(CASCADES, ([TL, oplib.IDEAL_PARAMS, TL], [TL, TL, TL, oplib.IDEAL_PARAMS],
+                                     [TL] * 4)):
+        exp = SX.build_export(demo_sections(rng, names, ops), mc_params=MC, spec="demo")
+        if exp["asc_error"]:
+            fail(f"{'+'.join(names)}: {exp['asc_error']}")
+            continue
+        for kind in ("AC", "AC_MC"):
+            asc, cir = exp["files"][f"demo_{kind}.asc"], exp["files"][f"demo_{kind}.cir"]
+            dn = drawing_netlist(asc, exp)
+            if element_set(dn) != element_set(cir):
+                diff = element_set(dn) ^ element_set(cir)
+                fail(f"{'+'.join(names)} {kind}: drawing lines != .cir lines: {sorted(diff)[:4]}")
+            else:
+                ok(f"demo_{kind}.asc  {'+'.join(names)}: R/C/V/X lines == .cir")
+    # a corrupted drawing must fail the export self-check (§4.3)
+    asc = SA.parse(exp["files"]["demo_AC.asc"])
+    dums = opamp_dummies(exp)
+    SA.check_drawing(asc, exp["cascade"], dums, SO.calibration())       # the good one passes
+    bad = 0
+    for i, (x, y, n) in enumerate(asc["flags"]):
+        if n not in ("0", "VCC", "VEE") and i % 7 == 0:
+            other = next(m for _x, _y, m in asc["flags"] if m not in (n, "0", "VCC", "VEE"))
+            mut = dict(asc, flags=asc["flags"][:i] + [(x, y, other)] + asc["flags"][i + 1:])
+            try:
+                SA.check_drawing(mut, exp["cascade"], dums, SO.calibration())
+                fail(f"relabelled {n} -> {other} at {(x, y)} passed the self-check")
+            except SA.AscError:
+                bad += 1
+    mut = dict(asc, wires=asc["wires"][1:])
+    try:
+        SA.check_drawing(mut, exp["cascade"], dums, SO.calibration())
+        fail("a missing wire passed the self-check")
+    except SA.AscError:
+        bad += 1
+    ok(f"{bad} corrupted drawings (relabelled nets, a missing wire) rejected by the self-check")
+
+
+def check_8_library():
+    print("\n[8] LTspice_Library contracts and the dummy check")
+    cal = SO.calibration()
+    if cal.source == "defaults" or cal.errors:
+        fail(f"symbols.asc: {cal.source} {cal.errors}")
+    for b, (_sym, pins, _o) in ((b, (v[0], v[1], None)) for b, v in SA.CAL_DEFAULT.items()):
+        got = cal.pins(b)
+        if got != [(n, off) for n, off, _d in pins]:
+            print(f"  note {b}: calibrated pins {got} differ from the stock .asy (phase 2b)")
+    fs = SO.dummies()[SO.FS_GENERIC]
+    roles = [r for r, _ in fs["xpins"] or []]
+    if fs["origin"] != "built-in" or fs["errors"] or fs["warnings"]:
+        fail(f"_FS_generic.asc: {fs['origin']} {fs['errors']} {fs['warnings']}")
+    elif roles != ["INP", "INN", "VCC", "VEE", "OUT"]:
+        fail(f"_FS_generic.asc X-line order {roles}")
+    else:
+        ok("_FS_generic.asc passes the dummy check; X line = INP INN VCC VEE OUT (opamp2 order)")
+    lib = SO.library_dir()
+    st = SO.load_dummy(os.path.join(lib, "opamps", "_seat_template.asc"))
+    if sorted(st["terminals"]) != sorted(SA.SEAT_TERMS) or st["errors"] != ["needs exactly one symbol, found 0"]:
+        fail(f"_seat_template.asc: terminals {st['terminals']} errors {st['errors']}")
+    else:
+        ok("_seat_template.asc: five terminal labels at the seat offsets")
+    # cell template: seat R0, terminals on wire ends, the placeholder wired as a follower
+    ct = SA.parse(SA.read_text(os.path.join(lib, "cells", "_cell_template.asc")))
+    seat = [t for t in ct["texts"] if t["text"].strip() == ";SEAT U1"]
+    ends = {w[:2] for w in ct["wires"]} | {w[2:] for w in ct["wires"]}
+    o = (seat[0]["x"], seat[0]["y"]) if seat else None
+    s = ct["symbols"][0]
+    pts = [(n, (s["x"] + dx, s["y"] + dy)) for n, (dx, dy) in cal.pins("opamp2")]
+    nets, errs = SA.connectivity(ct["wires"], ct["flags"], pts)
+    want = {"INP": "IN", "INN": "OUT", "OUT": "OUT", "VP": "VCC", "VN": "VEE"}
+    if (not o or s["orient"] != "R0" or errs or nets != want
+            or any((o[0] + dx, o[1] + dy) not in ends for dx, dy in SA.SEAT_TERMS.values())):
+        fail(f"_cell_template.asc: seat {o}, {errs}, nets {nets}")
+    else:
+        ok("_cell_template.asc: seat U1 in R0, terminals on wire ends, placeholder = follower")
+    # the dummy check rejects bad dummies
+    good = SO.fs_generic_dummy_text()
+    bad = {
+        "moved terminal": good.replace("FLAG 128 288 INP", "FLAG 128 304 INP"),
+        "extra label": good.replace("FLAG 256 128 VCC", "FLAG 256 128 VCC\r\nFLAG 176 240 FOO"),
+        "missing model file": good.replace("TEXT 32 16", "TEXT 32 480 Left 2 !.lib nosuch.lib\r\nTEXT 32 16"),
+        "rotated symbol": good.replace("256 192 R0", "256 192 R90"),
+        "second symbol": good.replace("SYMATTR Value FS_OA_1",
+                                      "SYMATTR Value FS_OA_1\r\nSYMBOL res 300 300 R0"),
+        "wire outside the box": good.replace("WIRE 288 256 384 256", "WIRE 288 256 416 256"),
+    }
+    for what, text in bad.items():
+        d = SO.load_dummy("bad.asc", text=text)
+        if not d["errors"]:
+            fail(f"dummy check accepted a dummy with a {what}")
+    ok(f"dummy check rejects {len(bad)} broken dummies ({', '.join(bad)})")
+
+
+# ---------------------------------------------------------------------
+#  10 — real op-amp models through the dummy library
+# ---------------------------------------------------------------------
+_VENDOR = ("* vendor-style model, pins: out inn inp vp vn\n"
+           ".subckt {name} out inn inp vp vn\n"
+           "G1 0 x inp inn 1\nR1 x 0 200k\nC1 x 0 {c}\nE1 y 0 x 0 1\nR2 y out 50\n.ends {name}")
+_C = f"{1 / (2 * math.pi * 3e6):.9g}"                   # = TL's GBWP 3 MHz with A_ol 2e5
+
+
+def _dummy_from_fs(value, directives, meta):
+    """An opamp2 dummy with the FS generic adapter wiring (make_opamp_dummy's)."""
+    return SO.opamp2_dummy_text(value, meta, directives)
+
+
+_ASY = """Version 4
+SymbolType CELL
+LINE Normal -48 -48 -48 48
+LINE Normal -48 48 48 0
+LINE Normal 48 0 -48 -48
+SYMATTR Prefix X
+SYMATTR Value FSTEST_OA
+PIN 48 0 NONE 8
+PINATTR PinName OUT
+PINATTR SpiceOrder 1
+PIN -48 -16 NONE 8
+PINATTR PinName IN-
+PINATTR SpiceOrder 2
+PIN -48 16 NONE 8
+PINATTR PinName IN+
+PINATTR SpiceOrder 3
+PIN 0 -32 NONE 8
+PINATTR PinName V+
+PINATTR SpiceOrder 4
+PIN 0 32 NONE 8
+PINATTR PinName V-
+PINATTR SpiceOrder 5
+"""
+
+
+def _custom_symbol_dummy():
+    """Custom symbol FSTEST at the seat origin (256, 256); its .asy puts OUT
+    first in the SPICE order, so the X-line order must come from the .asy."""
+    w = [(304, 256, 384, 256), (208, 240, 160, 240), (160, 240, 160, 224), (160, 224, 128, 224),
+         (208, 272, 160, 272), (160, 272, 160, 288), (160, 288, 128, 288),
+         (256, 224, 256, 128), (256, 288, 256, 384)]
+    L = ["Version 4", "SHEET 1 560 560"] + ["WIRE %d %d %d %d" % x for x in w]
+    L += ["FLAG 128 224 INN", "FLAG 128 288 INP", "FLAG 384 256 OUT", "FLAG 256 128 VCC",
+          "FLAG 256 384 VEE", "SYMBOL FSTEST 256 256 R0", "SYMATTR InstName U1",
+          "TEXT 32 16 Left 2 ;FS: vs_min=4 vs_max=36 note=custom-symbol test dummy",
+          "TEXT 32 440 Left 2 !" + _VENDOR.format(name="FSTEST_OA", c=_C).replace("\n", "\\n")]
+    return "\r\n".join(L) + "\r\n"
+
+
+def check_10_real_models():
+    print("\n[10] real op-amp models via the dummy library (temporary user overlay)")
+    tmp = tempfile.mkdtemp(prefix="fs008_")
+    old = os.environ.get("FILTERSYNTHESIZER_LTSPICE_USER_DIR")
+    os.environ["FILTERSYNTHESIZER_LTSPICE_USER_DIR"] = tmp
+    try:
+        od, md = os.path.join(tmp, "opamps"), os.path.join(tmp, "models")
+        os.makedirs(od)
+        os.makedirs(md)
+        vend_b = _VENDOR.format(name="VENDB", c=_C)
+        with open(os.path.join(md, "VENDB.lib"), "w", newline="\r\n") as fh:
+            fh.write(vend_b + "\n")
+        wrapper = (".subckt VENDC_FS inp inn vp vn out\\nX1 out inn inp vp vn VENDC\\n.ends"
+                   + "\\n" + _VENDOR.format(name="VENDC", c=_C).replace("\n", "\\n"))
+        dummies = {
+            "VENDC": _dummy_from_fs("VENDC_FS", [wrapper], "vs_min=9 vs_max=36 note=kind C test"),
+            "VENDB": _dummy_from_fs("VENDB_FS", [".lib VENDB.lib",
+                                                 ".subckt VENDB_FS inp inn vp vn out\\n"
+                                                 "X1 out inn inp vp vn VENDB\\n.ends"],
+                                    "note=kind B test"),
+            "FSTEST": _custom_symbol_dummy(),
+        }
+        for stem, text in dummies.items():
+            with open(os.path.join(od, stem + ".asc"), "w", newline="") as fh:
+                fh.write(text)
+        with open(os.path.join(od, "FSTEST.asy"), "w", newline="\r\n") as fh:
+            fh.write(_ASY)
+        lib = SO.dummies()
+        for stem in dummies:
+            if lib[stem]["errors"]:
+                fail(f"{stem}: {lib[stem]['errors']}")
+        x = [r for r, _ in lib["FSTEST"]["xpins"]]
+        if x != ["OUT", "INN", "INP", "VCC", "VEE"]:
+            fail(f"FSTEST X-line order from its .asy: {x}")
+        rng = np.random.default_rng(10)
+        f = np.logspace(1, 6, 30)
+        names = ["3LPn-gained", "1HP-inv-gained", "2BP-AM2", "2HPn-MFB2+R7"]
+        stems = ["VENDC", "FSTEST", "VENDB", None]
+        for bundled in (False, True):
+            secs = demo_sections(rng, names, [TL] * 4)
+            for sd, stem in zip(secs, stems):
+                sd["spice_model"] = stem
+            exp = SX.build_export(secs, vs=5.0, mc_params=MC, spec="real", include_models=bundled)
+            if exp["asc_error"] or exp["all_generic"]:
+                fail(f"real-model export: asc_error={exp['asc_error']} all_generic={exp['all_generic']}")
+                continue
+            if not any("VENDC" in w and "supply range" in w for w in exp["warnings"]):
+                fail("no supply-range warning for VENDC (vs_min 9 V at Vs = 5 V)")
+            if "FSTEST.asy" not in exp["extra_files"] or ("VENDB.lib" in exp["extra_files"]) != bundled:
+                fail(f"extra files {sorted(exp['extra_files'])} (bundled={bundled})")
+            cir = exp["files"]["real_AC.cir"]
+            lib_line = next(ln for ln in cir.splitlines() if ln.lower().startswith(".lib"))
+            if bundled != (lib_line == ".lib VENDB.lib"):
+                fail(f"model path in the netlist: {lib_line!r} (bundled={bundled})")
+            h_ir = SC.mna_ac(exp["cascade"], f)
+            for label, text in (("cir", cir),
+                                ("asc", drawing_netlist(exp["files"]["real_AC.asc"], exp,
+                                                        vend_b.splitlines()))):
+                if label == "cir":
+                    text = text.replace(lib_line, vend_b)
+                err = np.max(np.abs(netlist_response(text, f) - h_ir)) / np.max(np.abs(h_ir))
+                if not err <= 1e-6:
+                    fail(f"real models, {label} (bundled={bundled}): vs IR {err:.2e}")
+                else:
+                    ok(f"real_AC.{label}: kind C + custom .asy + kind B .lib + FS generic "
+                       f"= IR ({err:.1e}), models {'bundled' if bundled else 'by absolute path'}")
+            xl = [ln for ln in cir.splitlines() if ln.startswith("XU")]
+            print("       " + " | ".join(xl[:2]))
+            try:
+                SX.zip_bytes(exp)
+            except OSError as e:
+                fail(f"zip with extra files: {e}")
+    finally:
+        if old is None:
+            os.environ.pop("FILTERSYNTHESIZER_LTSPICE_USER_DIR", None)
+        else:
+            os.environ["FILTERSYNTHESIZER_LTSPICE_USER_DIR"] = old
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------
+#  11 — hand-drawn cell templates x every variant (phase 3)
+# ---------------------------------------------------------------------
+def loose_ends(asc, cal, dummies):
+    """Wire ends that reach nothing (no pin, label, other wire end or T) and
+    labels on nothing -- the stubs gating must not leave behind."""
+    pins = set()
+    for s in asc["symbols"]:
+        inst = SA.attr(s, "InstName")
+        if inst in dummies:
+            pins |= {pt for _r, pt in SA._xpoints(s, dummies[inst]) if pt is not None}
+            # an op-amp's unused pins are not stubs; its adapter wires end on them
+            pins |= {(s["x"] + dx, s["y"] + dy) for _n, (dx, dy) in
+                     (cal.pins(SA.sym_base(s["sym"])) or [])}
+        else:
+            pins |= {(s["x"] + dx, s["y"] + dy) for _n, (dx, dy) in
+                     cal.pins(SA.sym_base(s["sym"]), s["orient"])}
+    deg = {}
+    for w in asc["wires"]:
+        for p in (w[:2], w[2:]):
+            deg[p] = deg.get(p, 0) + 1
+    fpts = {(x, y) for x, y, _n in asc["flags"]}
+    on_mid = lambda p: any(SA._between(p, w[:2], w[2:]) for w in asc["wires"])  # noqa: E731
+    bad = [p for p, k in deg.items() if k == 1 and p not in pins and p not in fpts
+           and not on_mid(p)]
+    bad += [f for f in asc["flags"] if f[:2] not in deg and f[:2] not in pins
+            and not on_mid(f[:2])]
+    return bad
+
+
+def _split_rows(row, sup):
+    """The row as the BOM may carry it: plain, C1 split, C2 split."""
+    present = {k for k, kind, _a, _b, st in sup["entries"] if kind == "C" and st is True}
+    out = [("", row)]
+    for c in ("C1", "C2"):
+        if c in present and c in row:
+            r = {k: v for k, v in row.items() if k != c}
+            r[c + "a"], r[c + "b"] = float(f"{row[c] * 0.6:.4g}"), float(f"{row[c] * 0.4:.4g}")
+            r[c] = r[c + "a"] + r[c + "b"]
+            out.append((f" {c}a+{c}b", r))
+    return out
+
+
+def check_11_templates():
+    print("\n[11] hand-drawn cell templates x every variant (gating, seats, pruning)")
+    tids = {SC.superset(n)["template"] for n in SC.all_cell_names()}
+    files = SO.cell_templates()
+    for stem in sorted(set(files) - tids):
+        fail(f"cells/{stem}.asc: no cell uses a template of that name")
+    for stem, t in sorted(files.items()):
+        if t["error"]:
+            fail(f"cells/{stem}.asc unreadable: {t['error']}")
+    have = sorted(t for t in tids if t in files)
+    print(f"       templates: {', '.join(have)}")
+    print(f"       auto-layout (no template): {', '.join(sorted(tids - set(files)))}")
+    rng = np.random.default_rng(11)
+    f = np.logspace(1, 6, 25)
+    n_ok, worst, bad_tpl = 0, 0.0, {}
+    for name in SC.all_cell_names():
+        sup = SC.superset(name)
+        if sup["template"] not in files:
+            continue
+        base = demo_sections(rng, [name], [TL])
+        for tag, row in _split_rows(base[0]["row"], sup):
+            secs = [dict(base[0], row=row)]
+            exp = SX.build_export(secs, mc_params=MC, spec="cell")
+            drawn = exp["sections"][0]["drawing"]
+            if exp["asc_error"] or not drawn.startswith("template"):
+                bad_tpl.setdefault(sup["template"], []).append(
+                    f"{name}{tag}: {exp['asc_error'] or drawn}")
+                continue
+            h_ir = SC.mna_ac(exp["cascade"], f)
+            for fn in ("cell_AC.asc", "cell_AC_MC.asc"):
+                text = exp["files"][fn]
+                err = (np.max(np.abs(netlist_response(drawing_netlist(text, exp), f) - h_ir))
+                       / np.max(np.abs(h_ir)))
+                worst = max(worst, err)
+                if not err <= 1e-6:
+                    fail(f"{name}{tag} {fn}: template drawing vs IR {err:.2e}")
+            asc = SA.parse(exp["files"]["cell_AC.asc"])
+            lo = loose_ends(asc, SO.calibration(), opamp_dummies(exp))
+            if lo:
+                fail(f"{name}{tag}: loose wire ends / lone labels left by gating: {lo[:4]}")
+            n_ok += 1
+    for tid, msgs in sorted(bad_tpl.items()):
+        fail(f"template {tid} rejected ({len(msgs)} variant(s)), e.g. {msgs[0]}")
+    ok(f"{n_ok} cell variants (plain + split C1 / C2) drawn from templates: re-read and "
+       f"solved = IR (worst {worst:.1e}), no loose stubs")
+
+    # the checks above can fail: a planted stub is seen, a mislabelled template rejected
+    if "SK_LP" in files:
+        exp = SX.build_export(demo_sections(rng, ["2LP-unity"], [TL]), mc_params=MC, spec="neg")
+        asc = SA.parse(exp["files"]["neg_AC.asc"])
+        w = asc["wires"][0]
+        asc["wires"].append(w[:2] + (w[0] - 48, w[1]) if w[0] == w[2] else w[:2] + (w[0], w[1] - 48))
+        if not loose_ends(asc, SO.calibration(), opamp_dummies(exp)):
+            fail("loose_ends missed a planted stub")
+        tpl = files["SK_LP"]["asc"]
+        mut = dict(tpl, flags=[(x, y, "b" if n.lower() == "c" else n) for x, y, n in tpl["flags"]])
+        sd = demo_sections(rng, ["2LP-gained"], [TL])[0]
+        ir = SC.section_ir(sd["row"], dict(SX.fs_generic_params(TL), subckt="FS_OA_1"))
+        casc = SC.cascade_ir([(1, ir, {})])
+        sup, nm = SC.gating("2LP-gained")
+        vals = {p["name"]: "1k" for p in casc["parts"]}
+        dums = {o["name"]: SO.fs_generic() for o in casc["opamps"]}
+        net = lambda n: SC.cascade_net(casc, 1, n)  # noqa: E731
+        for label, t in (("good", tpl), ("relabelled c -> b", mut)):
+            try:
+                blk = SA.draw_template(t, sup, nm, casc["parts"], casc["opamps"], net, vals,
+                                       dums, SO.calibration())
+                SA.check_drawing(blk, casc, dums, SO.calibration(), sources=False)
+                if label != "good":
+                    fail(f"SK_LP template {label} passed")
+            except SA.AscError as e:
+                if label == "good":
+                    fail(f"SK_LP template rejected: {e}")
+        ok("negative tests: a planted stub is found, a mislabelled template is rejected")
+
+    # every usable library op-amp in a template seat (geometry differs per dummy)
+    lib = SO.dummies()
+    stems = [s for s, d in lib.items() if not d["errors"] and s != SO.FS_GENERIC]
+    for stem in stems:
+        secs = demo_sections(rng, ["2LP-gained", "2BP1HP-MFB"], [TL, TL])
+        for sd in secs:
+            sd["spice_model"] = stem
+        exp = SX.build_export(secs, mc_params=MC, spec="lib")
+        kinds = [inf["drawing"] for inf in exp["sections"]]
+        if exp["asc_error"] or not all(k.startswith("template") for k in kinds):
+            fail(f"{stem} in template seats: {exp['asc_error'] or kinds}")
+            continue
+        dn = drawing_netlist(exp["files"]["lib_AC.asc"], exp)
+        if element_set(dn) != element_set(exp["files"]["lib_AC.cir"]):
+            fail(f"{stem} in template seats: drawing lines != .cir lines")
+        else:
+            ok(f"{stem} ({lib[stem]['origin']}) in template seats: R/C/V/X lines == .cir")
+
+
 def check_5_mc_bands():
     print("\n[5] MC band mapping")
     bands = [(0.0, 1e3, 0.5), (1e3, 1e5, 1.0), (1e5, 1e12, 0.1)]
@@ -430,9 +867,13 @@ if __name__ == "__main__":
     check_2_dc_path()
     check_3_format()
     check_4_netlist()
+    check_4b_asc()
     check_5_mc_bands()
     check_6_loading()
     check_7_ideal_clamp()
+    check_8_library()
+    check_10_real_models()
+    check_11_templates()
     print(f"\n{time.time() - t0:.0f} s")
     if FAILS:
         print(f"\n{len(FAILS)} CHECK(S) FAILED")

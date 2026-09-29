@@ -46,6 +46,9 @@ REM      (the launcher prefers this copy over the bundled fallback)
 xcopy /E /I /Y "Section_Schematic_Diagrams" "dist\FilterSynthesizer\Section_Schematic_Diagrams" >nul
 REM      Built-in op-amp library, same rule (user parts go to %LOCALAPPDATA%)
 copy /Y "opamp_library.json" "dist\FilterSynthesizer\" >nul
+REM      LTspice library (op-amp dummies, templates), same rule (user models go to
+REM      %LOCALAPPDATA%\FilterSynthesizer\LTspice_Library)
+xcopy /E /I /Y "LTspice_Library" "dist\FilterSynthesizer\LTspice_Library" >nul
 
 REM --- 7) user documents NEXT TO the EXE -----------------------------------
 REM      Committed PDFs only -- they are built at release time with

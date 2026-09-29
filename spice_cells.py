@@ -156,8 +156,8 @@ def _mfb_lp(t):
          ("R3", "R", "b", "m", True),
          ("R4", "R", "b", "out", True),
          ("R5", "R", "p", "out", _on(qe)),
-         ("R6", "R", "p", GND, _on(qe))]
-    return e, [("U1", "p" if qe else GND, "m", "out")], "out", "MFB_LP"
+         ("R6", "R", "p", GND, _on(qe, "short"))]             # no QE: In+ wired to GND
+    return e, [("U1", "p", "m", "out")], "out", "MFB_LP"
 
 
 def _mfb_hp(t):
@@ -196,9 +196,9 @@ def _mfb_hp(t):
          ("C4", "C", "b", "out", True),
          ("R2", "R", "b", GND, True),
          ("R3", "R", "m", "out", True),
-         ("R4", "R", "p", GND, _on(qe)),
+         ("R4", "R", "p", GND, _on(qe, "short")),             # no QE: In+ wired to GND
          ("R5", "R", "p", "out", _on(qe))]
-    return e, [("U1", "p" if qe else GND, "m", "out")], "out", "MFB_HP"
+    return e, [("U1", "p", "m", "out")], "out", "MFB_HP"
 
 
 def _mfb_bp(t):
@@ -213,10 +213,10 @@ def _mfb_bp(t):
           ("C1", "C", "a", "m", True),
           ("C2", "C", "a", "out", True),
           ("R3", "R", "m", "out", True),
-          ("R4", "R", "p", GND, _on(qe)),
+          ("R4", "R", "p", GND, _on(qe, "short")),            # no QE: In+ wired to GND
           ("R5", "R", "p", "out", _on(qe))]
     tid = {"hp": "MFB_BP1HP", "lp": "MFB_BP1LP"}.get(ab, "MFB_BP")
-    return e, [("U1", "p" if qe else GND, "m", "out")], "out", tid
+    return e, [("U1", "p", "m", "out")], "out", tid
 
 
 def _mfb_notch(t):
@@ -390,6 +390,21 @@ def opamp_params(eval_opamp):
             "Ro_ohm": float(eval_opamp["Ro"]) * 1e6}
 
 
+def gating(topology):
+    """(superset, node map) of a cell: node map = {superset node: the net it
+    becomes} once the "short" parts are merged (in / 0 survive, then out).
+    A drawing template relabels / drops its net labels with it."""
+    sup = superset(topology)
+    shorts = [(n1, n2) for (_, _, n1, n2, st) in sup["entries"] if st == "short"]
+    nodes = {"in", GND, sup["out"]}
+    for (_, _, n1, n2, _) in sup["entries"]:
+        nodes |= {n1, n2}
+    for (_, a, b, c) in sup["opamps"]:
+        nodes |= {a, b, c}
+    find = _union_find(sorted(nodes), shorts)
+    return sup, {n: find(n) for n in nodes}
+
+
 def section_ir(row, opamp=None):
     """Netlist IR of one snapped section.
 
@@ -401,14 +416,8 @@ def section_ir(row, opamp=None):
     A present part without a positive value in the row is an error, never a
     silent open."""
     topology = row.get("topology")
-    sup = superset(topology)
-    shorts = [(n1, n2) for (_, _, n1, n2, st) in sup["entries"] if st == "short"]
-    nodes = {"in", GND, sup["out"]}
-    for (_, _, n1, n2, _) in sup["entries"]:
-        nodes |= {n1, n2}
-    for (_, a, b, c) in sup["opamps"]:
-        nodes |= {a, b, c}
-    find = _union_find(sorted(nodes), shorts)
+    sup, node_map = gating(topology)
+    find = node_map.__getitem__
 
     parts, warnings = [], []
     for key, kind, n1, n2, st in sup["entries"]:
@@ -465,7 +474,7 @@ def cascade_ir(sections, buffers=False, in_name="IN", out_name="OUT"):
 
     Nets: the first input is IN, section k's output is S{k} (the last is OUT),
     internal nodes are S{k}_<name>. Parts get designators (R201, C202A, U201)."""
-    parts, opamps, bufs = [], [], []
+    parts, opamps, bufs, section_nets = [], [], [], {}
     prev = in_name
     for i, (stage, ir, alias) in enumerate(sections):
         last = i == len(sections) - 1
@@ -474,6 +483,8 @@ def cascade_ir(sections, buffers=False, in_name="IN", out_name="OUT"):
         if buffers and i > 0:
             src = f"S{stage}_buf"
             bufs.append({"key": f"E{stage}", "out": src, "inp": prev})
+        section_nets[stage] = {GND: GND, ir["in"]: src, ir["out"]: out_net,
+                               "*": f"S{stage}_"}
 
         def net(n, _stage=stage, _ir=ir, _src=src, _out=out_net):
             if n == GND:
@@ -500,7 +511,14 @@ def cascade_ir(sections, buffers=False, in_name="IN", out_name="OUT"):
     for b in bufs:
         nodes |= {b["out"], b["inp"]}
     return {"nodes": sorted(nodes | {in_name, GND}), "in": in_name,
-            "out": prev, "parts": parts, "opamps": opamps, "buffers": bufs}
+            "out": prev, "parts": parts, "opamps": opamps, "buffers": bufs,
+            "section_nets": section_nets}
+
+
+def cascade_net(casc, stage, node):
+    """Cascade net of section `stage`'s IR node (the rule of cascade_ir)."""
+    m = casc["section_nets"][stage]
+    return m.get(node, m["*"] + node)
 
 
 # =====================================================================
