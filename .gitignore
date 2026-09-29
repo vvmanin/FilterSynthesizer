@@ -219,6 +219,7 @@ FilterSynthesizer-diagnostic-*.txt
 **/build_venv
 **/dist
 **/temp
+**/LTspice_Library/models
 
 
 # derived TF caches (regenerated at runtime)
@@ -247,3 +248,7 @@ desktop.ini
 .DS_Store
 .vscode/
 .idea/
+
+# --- FS-008: vendor SPICE model files are never committed ---------------
+LTspice_Library/models/*
+!LTspice_Library/models/README.txt
