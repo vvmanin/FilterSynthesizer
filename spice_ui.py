@@ -4,15 +4,20 @@
 """
 spice_ui.py — "LTspice export" block of the Resulting Response tab (FS-008).
 
-Vs, the Monte-Carlo run count, the op-amp SPICE model per section (from the
-part's `spice_model` in the op-amp library, overridable here), a per-section
-table and one zip download with the AC nominal and AC Monte-Carlo schematics
-(.asc) and netlists (.cir) plus a README. All file content comes from
-spice_export (no Streamlit there); this module only gathers the inputs and
-shows the result. The bundle is plain string building, so it is rebuilt on
-every render -- no Generate button.
+Vs, the Monte-Carlo run count, a per-section table and one zip download with
+the AC nominal and AC Monte-Carlo schematics (.asc) and netlists (.cir) plus
+a README. Each section's op-amp model is picked automatically: the Topology
+tab's part -> its `spice_model` dummy stem in the op-amp library (FS generic
+for Ideal / Custom / parts without one). A per-section override is shown only
+with FILTERSYNTHESIZER_DEBUG=1. Parts whose dummy needs a vendor model file
+get the *simplified generic models* checkbox and the *Vendor model files*
+panel (links, disclaimer + consent, upload into the per-user models folder).
+All file content comes from spice_export (no Streamlit there); this module
+only gathers the inputs and shows the result. The bundle is plain string
+building, so it is rebuilt on every render -- no Generate button.
 
-Widget keys: spice_vs, spice_mc_runs, spice_opamp_{n}, spice_include_models.
+Widget keys: spice_vs, spice_mc_runs, spice_opamp_{n} (debug), spice_generic_vendor,
+spice_vendor_consent, spice_vendor_up_{stem}, spice_vendor_allow.
 """
 
 import pandas as pd
@@ -21,10 +26,21 @@ import streamlit as st
 import opamp_library as oplib
 import spice_export as SX
 import spice_opamps as SO
-from topology_tab import opamp_label
+from topology_tab import DEBUG_UI, opamp_label
 
 _AUTO = "Auto"
 _FS = "FS generic"
+
+_DISCLAIMER = (
+    "Vendor SPICE models are the vendors' copyrighted files. FilterSynthesizer does not "
+    "ship them and never downloads them for you. Download the model yourself from the "
+    "vendor's page (link in the table); by downloading it you accept the vendor's terms. "
+    "A file you add here is stored only on this PC, in your models folder, and is copied "
+    "unmodified into **your own** LTspice export zips, so they run as they are. Vendor "
+    "terms typically allow use only for your own design work with the vendor's parts "
+    "(TI: *only for development of an application that uses the TI products*; other "
+    "reproduction prohibited) — **do not share export zips that contain vendor model "
+    "files**; the README in each such zip says which files they are.")
 
 
 def _eng(x):
@@ -38,7 +54,8 @@ def _model_text(inf):
         return f"{inf['stem']} · model {inf['model']}"
     p = inf["params"]
     ro = _eng(p["Ro_ohm"]) if p["Ro_ohm"] else "0 "
-    return (f"FS generic · A_ol {_eng(p['A_ol']).strip()} · "
+    return (("Simplified · " if inf["simplified"] else "")
+            + f"FS generic · A_ol {_eng(p['A_ol']).strip()} · "
             f"GBWP {_eng(p['GBWP_hz'])}Hz · Ro {ro}Ω")
 
 
@@ -54,7 +71,7 @@ def _part_model(n):
 
 
 def _model_picker(sections_data, lib):
-    """One override selectbox per section; returns {n: stem | None}."""
+    """Debug only: one override selectbox per section; returns {n: stem | None}."""
     usable = [s for s, d in lib.items() if not d["errors"] and s != SO.FS_GENERIC]
     out = {}
     cols = st.columns(min(len(sections_data), 4) or 1)
@@ -68,16 +85,89 @@ def _model_picker(sections_data, lib):
         choice = cols[i % len(cols)].selectbox(
             f"Section {n} SPICE model", opts, key=key,
             format_func=lambda o, a=auto: (f"Auto ({a or _FS})" if o == _AUTO else o),
-            help="Auto = the op-amp part's `spice_model` in the op-amp library (Edit "
-                 "popover in the Topology tab); FS generic when it has none or for "
-                 "Ideal / Custom.")
+            help="Debug (FILTERSYNTHESIZER_DEBUG=1). Auto = the op-amp part's "
+                 "`spice_model` in the op-amp library.")
         out[n] = auto if choice == _AUTO else (None if choice == _FS else choice)
     return out
 
 
-def render_spice_export(sections_data, mc_params):
+def _vendor_use(stems, lib):
+    """{stem: {dummy, sections, parts, files}} of the sections whose dummy
+    needs a vendor model file."""
+    out = {}
+    for n, stem in stems.items():
+        d = lib.get(stem) if stem else None
+        if d is None or d["errors"] or d["fs_generic"]:
+            continue
+        vf = SO.vendor_files(d)
+        if vf:
+            u = out.setdefault(stem, {"dummy": d, "sections": [], "parts": [], "files": vf})
+            u["sections"].append(n)
+            lbl = opamp_label(n) or stem
+            if lbl not in u["parts"]:
+                u["parts"].append(lbl)
+    return out
+
+
+def _vendor_panel(use):
+    """Status, links, disclaimer + consent and the upload per vendor model."""
+    rows, need = [], False
+    for stem, u in use.items():
+        for name, path in u["files"].items():
+            if path is None:
+                status = "not installed"
+                need = True
+            elif SO.is_consented(path):
+                status = "installed — bundled into the zip"
+            else:
+                status = "installed — not bundled (no consent recorded)"
+                need = True
+            rows.append({"Part": ", ".join(u["parts"]), "Sections": ", ".join(map(str, u["sections"])),
+                         "Model file": name, "Status": status,
+                         "Vendor page": u["dummy"]["meta"].get("model_url")
+                         or u["dummy"]["meta"].get("source") or ""})
+    with st.expander("Vendor model files", expanded=need):
+        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True,
+                     column_config={"Vendor page": st.column_config.LinkColumn("Vendor page")})
+        st.caption(f"Your models folder: `{SO.user_models_dir()}`")
+        st.info(_DISCLAIMER)
+        ok = st.checkbox("I have read this: store the vendor model files I add on this PC and "
+                         "include them in my own export zips", key="spice_vendor_consent")
+        for stem, u in use.items():
+            missing = [nm for nm, p in u["files"].items() if p is None]
+            if not missing:
+                continue
+            up = st.file_uploader(f"Add {' / '.join(missing)} for {', '.join(u['parts'])} "
+                                  f"(the vendor's zip or the model file itself)",
+                                  type=["zip", "lib", "sub", "mod", "cir", "txt"],
+                                  key=f"spice_vendor_up_{stem}", disabled=not ok)
+            done = st.session_state.setdefault("spice_vendor_done", set())
+            if up is not None and ok and (stem, up.name, up.size) not in done:
+                try:
+                    names = SO.install_model(up.name, up.getvalue(), missing)
+                    SO.record_consent(names, u["dummy"]["meta"].get("source", ""))
+                except (ValueError, OSError) as e:
+                    st.error(f"{up.name}: {e}")
+                else:
+                    done.add((stem, up.name, up.size))
+                    st.success(f"Installed {', '.join(names)} in your models folder.")
+                    st.rerun()
+        pending = sorted({nm for u in use.values() for nm, p in u["files"].items()
+                          if p is not None and not SO.is_consented(p)})
+        if pending and st.button(f"Bundle the installed {', '.join(pending)} into my zips",
+                                 key="spice_vendor_allow", disabled=not ok):
+            try:
+                SO.record_consent(pending)
+            except OSError as e:
+                st.error(f"Could not record the consent: {e}")
+            else:
+                st.rerun()
+
+
+def render_spice_export(sections_data, mc_params, hf_hump=None):
     """Draw the export block. `sections_data` / `mc_params` are the Resulting
-    Response tab's own (stage order; every section already has a BOM pick)."""
+    Response tab's own (stage order; every section already has a BOM pick);
+    `hf_hump` = the tab's HF-hump finding {db, f_hz, am_sections} or None."""
     st.markdown("---")
     st.markdown("##### LTspice export")
     st.caption("LTspice schematics (.asc) and netlists (.cir) of the whole cascade — sections "
@@ -98,19 +188,29 @@ def render_spice_export(sections_data, mc_params):
                                   help="Defaults to the Runs setting above. LTspice "
                                        "slows down plotting thousands of traces."))
 
+    SO.ensure_user_dirs()
     lib = SO.dummies()
-    stems = _model_picker(sections_data, lib)
-    include = st.checkbox("Include model files in the zip", key="spice_include_models",
-                          help="Copies the model files the op-amp dummies reference into the "
-                               "zip and references them by bare name (portable; extract the "
-                               "zip first). Off: absolute paths on this machine.")
+    stems = (_model_picker(sections_data, lib) if DEBUG_UI else
+             {sd["n"]: _part_model(sd["n"]) for sd in sections_data})
+    use = _vendor_use(stems, lib)
+    generic = False
+    if use:
+        parts = ", ".join(p for u in use.values() for p in u["parts"])
+        generic = st.checkbox(f"Export {parts} with simplified generic models",
+                              key="spice_generic_vendor", value=False,
+                              help="On: those sections use FS generic with the library's "
+                                   "A_ol / GBWP / Ro, so no vendor file is needed. Off: the "
+                                   "vendor's SPICE model, which you download yourself (Vendor "
+                                   "model files below).")
+        _vendor_panel(use)
 
     data = [dict(d, opamp_label=opamp_label(d["n"]) or "Ideal", spice_model=stems[d["n"]])
             for d in sections_data]
     try:
         exp = SX.build_export(data, vs=vs, mc_params=mc_params, n_runs=runs,
-                              include_models=include,
-                              spec=st.session_state.get("report_spec_short", "filter"))
+                              generic_vendor=generic, hf_hump=hf_hump,
+                              spec=st.session_state.get("report_spec_short", "filter"),
+                              spec_brief=st.session_state.get("report_spec_brief"))
     except Exception as e:                      # never break the tab over an export
         st.error(f"LTspice export failed: {e}")
         return
@@ -135,6 +235,9 @@ def render_spice_export(sections_data, mc_params):
         st.caption("Real op-amp models in use: LTspice will differ from the tool's curve by "
                    "the models' own behaviour. Run the commented `.op` once and check that "
                    "every section output sits near 0 V.")
+    if any(v["bundled"] for v in exp["vendor"].values()):
+        st.caption("This zip contains vendor model files — for your own use only; do not "
+                   "share it (see its README).")
     if runs > 1000:
         st.caption(f"{runs} Monte-Carlo runs: fast to simulate, slow for LTspice to plot.")
 

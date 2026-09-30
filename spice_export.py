@@ -250,8 +250,27 @@ def _probes(sections, grid, loaded):
     return out
 
 
+def hf_note(hf_hump):
+    """Comment lines for the tool's HF-hump finding (response_tab._hf_hump):
+    {db, f_hz, am_sections}; [] when there is none."""
+    if not hf_hump or float(hf_hump.get("db") or 0.0) < 1.0:
+        return []
+    am = list(hf_hump.get("am_sections") or [])
+    f = hf_hump.get("f_hz")
+    where = f" at {fmt_hz(f)}" if f else " in the far band"
+    cause = (f"the Ackerberg-Mossberg finite-Ro loop resonance (AM section"
+             f"{'s' if len(am) > 1 else ''} {', '.join(map(str, am))})" if am else
+             "most likely the op-amp's finite output resistance Ro")
+    return [f"WARNING - HF hump: the tool's realized response rises ~{float(hf_hump['db']):.0f} dB "
+            f"above the design{where},",
+            f"  {cause}.",
+            "  Recommendation: choose an op-amp with lower Ro (<= ~50 ohm) or higher GBWP"
+            + (", or MFB for those sections." if am else ".")]
+
+
 def build_export(sections_data, vs=5.0, mc_params=None, spec="filter",
-                 n_runs=None, now=None, include_models=False, templates=True):
+                 n_runs=None, now=None, templates=True, generic_vendor=False,
+                 spec_brief=None, hf_hump=None):
     """Build the LTspice bundle.
 
     sections_data : response_tab's list, stage order; each item has
@@ -261,14 +280,24 @@ def build_export(sections_data, vs=5.0, mc_params=None, spec="filter",
                     spice_model (a dummy stem of the op-amp model library;
                     None / missing / unusable -> FS generic).
     mc_params     : response_tab's mc_params (r_bands, c_tol_pct, n_runs, dist).
-    include_models: copy the model files the dummies reference into the zip
-                    and reference them by bare name (else absolute paths).
     templates     : draw a section from its hand-drawn cell template
                     (LTspice_Library/cells/<template>.asc) when there is one;
                     False = auto-layout for every section.
+    generic_vendor: sections whose dummy needs a vendor model file use FS
+                    generic (the library's A_ol / GBWP / Ro) instead.
+    spec_brief    : [lines] -- the overall filter spec, written into every
+                    file's header.
+    hf_hump       : {db, f_hz, am_sections} of the tool's HF-hump check; a
+                    recommendation is written into the headers when >= 1 dB.
+    Vendor model files the user added with consent (spice_opamps.consents)
+    travel in the zip and are referenced by bare name; other installed files
+    by absolute path; a file not installed by the name the dummy writes.
     Returns {files: {name: text}, extra_files: {name: path}, zip_name,
              cascade (IR), sections: [info], warnings: [str],
-             expected: [(probe, f, loaded, unloaded)], all_generic, asc_error}.
+             expected: [(probe, f, loaded, unloaded)], all_generic, asc_error,
+             vendor: {stem: {files: {name: path|None}, bundled: [name],
+                     missing: [name], unconsented: [name], sections: [n],
+                     source}}}.
     Raises ValueError for a row the IR cannot represent."""
     mc_params = dict(mc_params or {})
     r_bands = [tuple(b) for b in (mc_params.get("r_bands") or [(0.0, 1e12, DEFAULT_R_TOL_PCT)])]
@@ -294,6 +323,10 @@ def build_export(sections_data, vs=5.0, mc_params=None, spec="filter",
             why = ("is not in the op-amp model library" if dm is None else
                    "fails the dummy check (" + "; ".join(dm["errors"]) + ")")
             warnings.append(f"Section {n}: SPICE model '{stem}' {why} -- FS generic used")
+            dm = None
+        simplified = bool(generic_vendor and dm is not None and not dm["fs_generic"]
+                          and SO.vendor_files(dm))
+        if simplified:
             dm = None
         if dm is None or dm["fs_generic"]:
             key = (p["A_ol"], p["GBWP_hz"], p["Ro_ohm"])
@@ -323,9 +356,36 @@ def build_export(sections_data, vs=5.0, mc_params=None, spec="filter",
                      "opamp_label": ascii_text(sd.get("opamp_label") or ""),
                      "model": xmodel, "stem": dm["stem"], "fs_generic": dm["fs_generic"],
                      "dummy": dm, "params": p, "drawing": "auto-layout",
-                     "template": ir_sp["template"], "floating": fl})
+                     "template": ir_sp["template"], "floating": fl,
+                     "simplified": stem if simplified else None})
     casc = SC.cascade_ir(irs_spice)
     all_generic = not real
+
+    # ---- vendor model files: bundled with consent, else referenced ----
+    vendor, bundle = {}, set()
+    for stem, d in real.items():
+        vf = SO.vendor_files(d)
+        if not vf:
+            continue
+        v = vendor[stem] = {"files": vf, "bundled": [], "missing": [], "unconsented": [],
+                            "sections": [i["n"] for i in info if i["stem"] == stem],
+                            "source": d["meta"].get("source", "")}
+        for name, path in vf.items():
+            if path is None:
+                v["missing"].append(name)
+            elif SO.is_consented(path):
+                v["bundled"].append(name)
+                bundle.add(path)
+            else:
+                v["unconsented"].append(name)
+        if v["missing"]:
+            warnings.append(
+                f"{stem} (section{'s' if len(v['sections']) > 1 else ''} "
+                f"{', '.join(map(str, v['sections']))}) needs the vendor model file "
+                f"{', '.join(v['missing'])}, which is not installed. Download it from "
+                f"{v['source'] or 'the vendor'} and add it under Vendor model files, or "
+                f"export with the simplified generic model. Until then LTspice stops "
+                f"with an unknown-subcircuit error.")
     tpls = {}
     for inf in info if templates else ():
         t = SO.cell_template(inf["template"])
@@ -375,14 +435,16 @@ def build_export(sections_data, vs=5.0, mc_params=None, spec="filter",
                f"{o['subckt']}"
 
     def model_note(inf):
+        if inf["simplified"]:
+            return f"{inf['model']} (FS generic, simplified in place of {inf['simplified']})"
         if inf["fs_generic"]:
             return f"{inf['model']} (FS generic)"
         return f"{inf['stem']} ({inf['model']})"
 
     real_blocks, seen_blocks = [], set()           # [(stem, cir lines, asc blocks)]
     for stem, d in real.items():
-        cir = [ln for ln in SO.directives_cir(d, include_models)]
-        blocks = [b for b in SO.directives_asc(d, include_models)
+        cir = [ln for ln in SO.directives_cir(d, bundle)]
+        blocks = [b for b in SO.directives_asc(d, bundle)
                   if tuple(b) not in seen_blocks]
         seen_blocks |= {tuple(b) for b in blocks}
         real_blocks.append((stem, cir, blocks))
@@ -404,14 +466,18 @@ def build_export(sections_data, vs=5.0, mc_params=None, spec="filter",
                if all_generic else
                "Op-amps: per section (see below); FS generic = the tool's own A_ol / GBWP / Ro model.")
         return [f"{spec} - {APP_NAME} LTspice export (FS-008) - {what}",
-                f"Generated {now:%Y-%m-%d %H:%M} by {APP_NAME} {__version__}.",
+                f"Generated {now:%Y-%m-%d %H:%M} by {APP_NAME} {__version__}."] + brief + [
                 f"{len(sections_data)} section(s) in series (real inter-stage loading), "
                 f"input IN, output OUT.",
                 ops,
                 "Supply: Vs drawn as two Vs/2 sources, GND (node 0) at the midpoint.",
                 f"Open in LTspice 24 and Run; plot V(OUT). See README.txt."
                 if ext == "cir" else
-                "Run, then plot V(OUT). The same circuit as the .cir netlist; see README.txt."]
+                "Run: V(OUT) is plotted (magnitude and phase). The same circuit as the "
+                ".cir netlist; see README.txt."] + hf
+
+    brief = [ascii_text(ln) for ln in (spec_brief or [])]
+    hf = hf_note(hf_hump)
 
     def netlist(mc):
         vals, used = values(mc)
@@ -460,6 +526,9 @@ def build_export(sections_data, vs=5.0, mc_params=None, spec="filter",
         blocks = [[f".param Vs={fmt_value(vs)}"] + directives("ac", grid)]
         if mc:
             blocks.append(mc_block(r_bands, c_tol, runs, dist, used))
+        else:                  # one saved trace: LTspice plots it on its own (as MC does)
+            blocks.append(["* V(OUT) is plotted after Run; delete this line to probe",
+                           "* internal nodes (S1_m, ...)", ".save V(OUT)"])
         blocks.append(["* probes: View > SPICE Error Log"] + probe_lines())
         blocks += [fs_generic_subckt(name, p) for name, p in models.values()]
         for _stem, _cir, bl in real_blocks:
@@ -492,17 +561,17 @@ def build_export(sections_data, vs=5.0, mc_params=None, spec="filter",
     for stem, d in real.items():
         if d["asy"]:
             extra[os.path.basename(d["asy"])] = d["asy"]
-        if include_models:
-            for p in d["files"].values():
+        for p in d["files"].values():
+            if p in bundle:
                 extra[os.path.basename(p)] = p
     files["README.txt"] = _readme(spec, now, vs, info, r_bands, c_tol, runs, dist,
                                   grid, expected, dev, warnings, files, real, extra,
-                                  include_models, all_generic)
+                                  bundle, all_generic, vendor, brief, hf)
     for name, text in files.items():
         text.encode("ascii")                        # raises on a non-ASCII slip
     return {"files": files, "extra_files": extra, "cascade": casc, "sections": info,
             "warnings": warnings, "expected": expected, "loaded_dev_db": dev,
-            "all_generic": all_generic, "asc_error": asc_error,
+            "all_generic": all_generic, "asc_error": asc_error, "vendor": vendor,
             "zip_name": f"FS_LTspice_{spec}_{now:%Y%m%d_%H%M}.zip"}
 
 
@@ -520,15 +589,19 @@ def zip_bytes(export):
 #  README
 # =====================================================================
 def _readme(spec, now, vs, info, r_bands, c_tol, runs, dist, grid, expected, dev,
-            warnings, files, real, extra, include_models, all_generic):
+            warnings, files, real, extra, bundle, all_generic, vendor, brief, hf):
     fmin, fmax, ppd = grid
     has_asc = f"{spec}_AC.asc" in files
     L = [f"{APP_NAME} - LTspice export (FS-008: schematics + netlists)",
-         f"Design: {spec}    Generated: {now:%Y-%m-%d %H:%M}    Version: {__version__}",
-         "",
-         "FILES"]
+         f"Design: {spec}    Generated: {now:%Y-%m-%d %H:%M}    Version: {__version__}"]
+    L += ["  " + ln for ln in brief]
+    if hf:
+        L += [""] + hf
+    L += ["",
+          "FILES"]
     if has_asc:
-        L += [f"  {spec}_AC.asc      schematic: nominal values, AC sweep, .meas probes",
+        L += [f"  {spec}_AC.asc      schematic: nominal values, AC sweep, .meas probes, "
+              ".save V(OUT)",
               f"  {spec}_AC_MC.asc   schematic: Monte Carlo values ({runs} runs), .save V(OUT)"]
     L += [f"  {spec}_AC.cir      the same nominal circuit as a netlist",
           f"  {spec}_AC_MC.cir   the same Monte Carlo circuit as a netlist",
@@ -539,16 +612,29 @@ def _readme(spec, now, vs, info, r_bands, c_tol, runs, dist, grid, expected, dev
           "  functions never return the nominal value, and the nominal file keeps plain",
           "  values you can read and edit."]
     for name in extra:
-        L.append(f"  {name:<18} used by an op-amp model (keep it next to the .asc/.cir)")
+        L.append(f"  {name:<18} used by an op-amp model (keep it next to the .asc/.cir)"
+                 + ("; VENDOR FILE, see below" if os.path.basename(name) in
+                    {os.path.basename(p) for p in bundle} else ""))
+    if bundle:
+        L += ["",
+              "VENDOR MODEL FILES IN THIS ZIP -- DO NOT SHARE IT",
+              "  The files marked VENDOR FILE are the op-amp vendors' copyrighted SPICE",
+              "  models, copied unmodified from your own models folder because you added",
+              "  them with consent. They are licensed to you under the vendor's terms",
+              "  (TI, for example: use only for developing an application that uses the",
+              "  TI products; other reproduction prohibited). Keep this zip for your own",
+              "  work; to share the design, share it without those files."]
     L += ["",
          "HOW TO RUN (LTspice 24)",
          "  0. Extract the whole zip into one folder first"
          + (" (the models need their files)." if extra else "."),
          "  1. File > Open: the .asc schematic, or a .cir (set the file type to",
          "     Netlists (*.cir)).",
-         "  2. Simulate > Run, then Plot Settings > Add Trace > V(out). The plot",
-         "     shows magnitude (dB) and phase; right-click the right-hand (phase)",
-         "     axis and choose Group Delay for tau(f).",
+         "  2. Simulate > Run. The .asc files save only V(OUT), so LTspice plots it",
+         "     at once (a .cir: Plot Settings > Add Trace > V(out)); delete the",
+         "     .save V(OUT) directive to probe internal nodes. The plot shows",
+         "     magnitude (dB) and phase; right-click the right-hand (phase) axis and",
+         "     choose Group Delay for tau(f).",
          "  3. View > SPICE Error Log lists the .meas probe values. In the MC file it",
          "     lists one value per run; right-click the log > Plot .step'ed .meas data",
          "     shows their spread.",
@@ -599,16 +685,24 @@ def _readme(spec, now, vs, info, r_bands, c_tol, runs, dist, grid, expected, dev
                  if ("vs_min" in m or "vs_max" in m) else "")]
         if m.get("note") or m.get("source"):
             L.append(f"    {m.get('note', '')} {m.get('source', '')}".rstrip())
-        if d["files"]:
+        v = vendor.get(stem)
+        if v:
             L.append("    model files: " + ", ".join(
-                os.path.basename(p) if include_models else p for p in d["files"].values()))
+                n + (" (in this zip)" if n in v["bundled"] else
+                     " (NOT INSTALLED -- download it from the vendor and put it next to "
+                     "the .asc / .cir)" if n in v["missing"] else
+                     f" (absolute path {v['files'][n]})") for n in v["files"]))
+    for inf in info:
+        if inf["simplified"]:
+            L.append(f"  Section {inf['n']}: simplified -- FS generic with the library's "
+                     f"values in place of {inf['simplified']} (its vendor model not used).")
     if real:
         L += ["  A real model has offsets, bias currents and rails: run .op once (the",
               "  commented directive in each file) and check that every section output",
               "  sits near 0 V before trusting the AC result."]
-        if not include_models and any(d["files"] for d in real.values()):
-            L += ["  Model files are referenced by absolute path on the exporting machine;",
-                  "  export with 'Include model files in the zip' to move the files."]
+        if any(v["unconsented"] for v in vendor.values()):
+            L += ["  Model files marked 'absolute path' stay on the exporting machine; add",
+                  "  them under Vendor model files in the app to have them bundled."]
     L += ["",
           "MONTE CARLO",
           f"  Capacitors +-{c_tol:g} %; resistors by value band:"]

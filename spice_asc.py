@@ -721,8 +721,9 @@ def _text(asc, x, y, lines, directive):
 # =====================================================================
 #  Cascade drawing: auto-layout + column + self-check
 # =====================================================================
-SEAT_PITCH = 512
-PART_PITCH = 160
+SEAT_PITCH = 640          # FS-008 next round: wide enough that net labels read
+PART_PITCH = 256
+LABEL_STUB = 48
 
 
 def _section_block(asc, cal, x0, y0, stage, title, parts, opamps, values, dummies):
@@ -736,15 +737,15 @@ def _section_block(asc, cal, x0, y0, stage, title, parts, opamps, values, dummie
         nets = {"INP": o["inp"], "INN": o["inn"], "OUT": o["out"], "VCC": "VCC", "VEE": "VEE"}
         place_seat(asc, d, o["name"], (x0 + 256 + SEAT_PITCH * k, oy), nets,
                    value=o.get("subckt") if d["fs_generic"] else None)
-    yr, yc = oy + 224, oy + 480
+    yr, yc = oy + 240, oy + 544
     rs = [p for p in parts if p["kind"] == "R"]
     cs = [p for p in parts if p["kind"] == "C"]
     for row, yy, base in ((rs, yr, "res"), (cs, yc, "cap")):
         for i, p in enumerate(row):
             _two_pin(asc, cal, base, p["name"], values[p["name"]], p["n1"], p["n2"],
-                     x0 + 64 + PART_PITCH * i, yy)
+                     x0 + 64 + PART_PITCH * i, yy, stub=LABEL_STUB)
     width = max(SEAT_PITCH * max(len(opamps), 1), 64 + PART_PITCH * max(len(rs), len(cs), 1))
-    return width, yc + 160 - y0
+    return width, yc + 192 - y0
 
 
 def _template_block(asc, cal, x0, y0, stage, title, parts, opamps, values, dummies,

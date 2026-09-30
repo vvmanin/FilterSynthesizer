@@ -228,7 +228,7 @@ def _worker(ideal_sol):
 # =====================================================================
 # 3. ORCHESTRATOR
 # =====================================================================
-def solve_nonideal(ideal_solutions, cfg, opamp="TL072",
+def solve_nonideal(ideal_solutions, cfg, opamp="TL072H",
                    n_cores=None, sort_by="ni_penalty", dc_gain=None, verbose=True):
     """Correct + score a batch of ideal solutions for a real op-amp.
 
@@ -335,5 +335,5 @@ if __name__ == "__main__":
         c["R5"] = float(cid["R5_constraint"].subs({sp.Symbol(k):v for k,v in c.items()}))
         demo.append(dict(c, topology="Without R7", sens_score=5.0, R7=None))
 
-    scored = solve_nonideal(demo, cfg, opamp="TL072", n_cores=2)
+    scored = solve_nonideal(demo, cfg, opamp="TL072H", n_cores=2)
     print_nonideal_table(scored)

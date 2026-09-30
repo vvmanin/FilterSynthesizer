@@ -5,18 +5,18 @@
     "Built-in op-amp library shipped with FilterSynthesizer. Plain JSON, hand-editable.",
     "Each key under 'opamps' is the name shown in the Op-amp dropdown; names must be unique (case-insensitive).",
     "Required: A_ol [V/V, open-loop DC gain], GBWP_hz [Hz, gain-bandwidth product], Ro_ohm [ohm, open-loop output resistance].",
-    "Optional: description [text], spice_model [model name only, for SPICE export], en_nV_rtHz [input voltage noise, nV/sqrt(Hz)], in_pA_rtHz [input current noise, pA/sqrt(Hz)]. Use null when unknown.",
+    "Optional: description [text], spice_model [LTspice export: stem of the op-amp dummy LTspice_Library/opamps/<stem>.asc; null = FS generic], en_nV_rtHz [input voltage noise, nV/sqrt(Hz)], in_pA_rtHz [input current noise, pA/sqrt(Hz)]. Use null when unknown.",
     "Your own parts and edits made in the app go to opamp_library_user.json in the per-user app-data folder, which overrides entries here by name and survives upgrades.",
     "Values are typical datasheet figures; check the datasheet for your supply and load."
   ],
   "opamps": {
-    "AD8505 / AD8506 / AD8508": {"A_ol": 1e5,    "GBWP_hz": 0.95e5, "Ro_ohm": 1000, "description": "", "spice_model": null, "en_nV_rtHz": null, "in_pA_rtHz": null},
-    "LMV358A":                  {"A_ol": 1e5,    "GBWP_hz": 1e6,    "Ro_ohm": 1200, "description": "", "spice_model": null, "en_nV_rtHz": null, "in_pA_rtHz": null},
-    "MAX9636 / MAX9637 / MAX9638": {"A_ol": 1e5, "GBWP_hz": 1.5e6,  "Ro_ohm": 100,  "description": "", "spice_model": null, "en_nV_rtHz": null, "in_pA_rtHz": null},
-    "MAX40100":                 {"A_ol": 1.41e6, "GBWP_hz": 1.5e6,  "Ro_ohm": 100,  "description": "", "spice_model": null, "en_nV_rtHz": null, "in_pA_rtHz": null},
-    "TL072":                    {"A_ol": 2e5,    "GBWP_hz": 3e6,    "Ro_ohm": 50,   "description": "", "spice_model": null, "en_nV_rtHz": null, "in_pA_rtHz": null},
-    "LM358":                    {"A_ol": 1e5,    "GBWP_hz": 1e6,    "Ro_ohm": 100,  "description": "", "spice_model": null, "en_nV_rtHz": null, "in_pA_rtHz": null},
-    "OPA1656":                  {"A_ol": 5e6,    "GBWP_hz": 53e6,   "Ro_ohm": 20,   "description": "", "spice_model": null, "en_nV_rtHz": null, "in_pA_rtHz": null},
-    "NE5532":                   {"A_ol": 1e5,    "GBWP_hz": 10e6,   "Ro_ohm": 30,   "description": "", "spice_model": null, "en_nV_rtHz": null, "in_pA_rtHz": null}
+    "AD8505 / AD8506 / AD8508": {"A_ol": 1e5,    "GBWP_hz": 0.95e5, "Ro_ohm": 1000, "description": "", "spice_model": "AD8505", "en_nV_rtHz": null, "in_pA_rtHz": null},
+    "LMV358A":                  {"A_ol": 1e5,    "GBWP_hz": 1e6,    "Ro_ohm": 1200, "description": "", "spice_model": "LMV358A", "en_nV_rtHz": null, "in_pA_rtHz": null},
+    "MAX9636 / MAX9637 / MAX9638": {"A_ol": 1e5, "GBWP_hz": 1.5e6,  "Ro_ohm": 100,  "description": "", "spice_model": "MAX9636", "en_nV_rtHz": null, "in_pA_rtHz": null},
+    "MAX40100":                 {"A_ol": 1.41e6, "GBWP_hz": 1.5e6,  "Ro_ohm": 100,  "description": "", "spice_model": "MAX40100", "en_nV_rtHz": null, "in_pA_rtHz": null},
+    "TL072H":                   {"A_ol": 5.6e5,  "GBWP_hz": 5.25e6, "Ro_ohm": 125,   "description": "", "spice_model": "TL072H", "en_nV_rtHz": null, "in_pA_rtHz": null},
+    "LM358B":                   {"A_ol": 1.4e5,  "GBWP_hz": 1.2e6,  "Ro_ohm": 300,  "description": "", "spice_model": null, "en_nV_rtHz": null, "in_pA_rtHz": null},
+    "OPA1656":                  {"A_ol": 5e6,    "GBWP_hz": 20e6,   "Ro_ohm": 26,   "description": "", "spice_model": "OPA1656", "en_nV_rtHz": null, "in_pA_rtHz": null},
+    "TLV9001 / TLV9002 / TLV9004": {"A_ol": 1e5,    "GBWP_hz": 1e6,   "Ro_ohm": 1200,   "description": "", "spice_model": "TLV9002", "en_nV_rtHz": null, "in_pA_rtHz": null}
   }
 }

@@ -12,7 +12,10 @@
 #    LTspice_Library/opamps/<stem>.asc     built-in dummies (shipped)
 #    <user overlay>/opamps/<stem>.asc      the user's own; same stem wins
 #    .../models/                           model files the dummies reference
-#                                          (vendor files are never shipped)
+#                                          (vendor files are never shipped: the
+#                                          user adds them to the overlay's
+#                                          models/ with consent, consent.json;
+#                                          consented files travel in the zip)
 #
 #  opamp_library.json `spice_model` = a dummy stem. Ideal / Custom / unmapped
 #  parts use _FS_generic (the tool's own A_ol/GBWP/Ro model).
@@ -26,8 +29,12 @@
 #                bare, when the files go into the zip).
 # =====================================================================
 
+import datetime
+import io
+import json
 import os
 import re
+import zipfile
 
 import spice_asc as SA
 from _version import APP_SLUG
@@ -85,6 +92,18 @@ def _stamp(path):
         return (path, st.st_mtime_ns, st.st_size)
     except OSError:
         return (path, None, None)
+
+
+def _models_stamp():
+    """The model folders' file lists: a dummy re-resolves its .lib when a
+    model file is added or removed."""
+    out = []
+    for d in model_dirs():
+        try:
+            out.append(tuple(sorted(os.listdir(d))))
+        except OSError:
+            out.append(None)
+    return tuple(out)
 
 
 def calibration():
@@ -194,11 +213,160 @@ def cell_template_text():
 def models_readme_text():
     return SA.EOL.join([
         "Model files referenced by op-amp dummies (.lib / .sub / .mod / .cir).",
-        "Put vendor SPICE models here (or in the per-user overlay's models/ folder).",
-        "They are never committed or shipped with FilterSynthesizer: download them",
-        "from the vendor yourself (the dummy's ';FS: source=' names where).",
-        "A dummy's '.lib <file>' with a relative name is looked up next to the",
-        "dummy, then in the overlay's models/, then here."]) + SA.EOL
+        "Vendor SPICE models are the vendors' copyrighted files: they are never",
+        "committed or shipped with FilterSynthesizer. Download them from the vendor",
+        "yourself (the dummy's ';FS: source=' names where) and add them in the app",
+        "(Resulting Response > LTspice export > Vendor model files), which stores",
+        "them in the per-user models folder and records your consent in",
+        "consent.json. A dummy's '.lib <file>' with a relative name is looked up",
+        "next to the dummy, then in the per-user models/, then here."]) + SA.EOL
+
+
+# =====================================================================
+#  Vendor model files: per-user folder, consent, install from an upload
+# =====================================================================
+CONSENT_FILE = "consent.json"
+MAX_MODEL_BYTES = 20 * 1024 * 1024
+_ENCRYPTED = ("$CDNENCSTART", "* LTSPICE ENCRYPTED", "BEGIN ENCRYPTED")
+
+
+def user_models_dir():
+    return os.path.join(overlay_dir(), "models")
+
+
+def ensure_user_dirs():
+    """Create the per-user overlay (opamps/, cells/, models/ + README) on this
+    PC; returns the models folder. Never raises."""
+    md = user_models_dir()
+    try:
+        for sub in ("opamps", "cells", "models"):
+            os.makedirs(os.path.join(overlay_dir(), sub), exist_ok=True)
+        rd = os.path.join(md, "README.txt")
+        if not os.path.isfile(rd):
+            with open(rd, "w", encoding="ascii", newline="") as fh:
+                fh.write(models_readme_text())
+    except OSError:
+        pass
+    return md
+
+
+def vendor_files(d):
+    """Model files a dummy needs from its vendor: {name: path | None}
+    (installed, or None = not installed). Empty for FS generic, kind A
+    (LTspice built-in) and kind C (embedded text)."""
+    out = {os.path.basename(k.strip('"')): v for k, v in d.get("files", {}).items()}
+    out.update({m: None for m in d.get("missing", [])})
+    return out
+
+
+def _consent_path():
+    return os.path.join(user_models_dir(), CONSENT_FILE)
+
+
+def consents():
+    """{file name (lower case): record} of vendor files the user added with
+    consent (stored locally, bundled into their own export zips)."""
+    try:
+        with open(_consent_path(), encoding="utf-8") as fh:
+            data = json.load(fh)
+        return {k.lower(): v for k, v in (data.get("files") or {}).items()}
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
+def is_consented(path_or_name):
+    return os.path.basename(path_or_name or "").lower() in consents()
+
+
+def record_consent(names, source=""):
+    """Record the user's consent for these file names (the disclaimer was
+    accepted in the app). Raises OSError when the folder is not writable."""
+    ensure_user_dirs()
+    data = {"format": "filtersynthesizer-vendor-model-consent", "version": 1,
+            "files": dict(consents())}
+    now = datetime.datetime.now().isoformat(timespec="seconds")
+    for n in names:
+        data["files"][os.path.basename(n).lower()] = {"file": os.path.basename(n),
+                                                      "accepted": now, "source": source}
+    with open(_consent_path(), "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=1)
+
+
+def _model_problem(data):
+    """None when `data` looks like a plain-text SPICE model, else why not."""
+    txt = data.decode("latin-1").upper()
+    if any(m in txt for m in _ENCRYPTED):
+        return "the file is encrypted -- LTspice cannot read it; use the vendor's plain PSpice model"
+    if ".SUBCKT" not in txt:
+        return "no .subckt in the file -- not a SPICE model"
+    return None
+
+
+def _zip_members(data, depth=1):
+    """[(base name, bytes)] of a zip's files, one nested zip deep. Paths inside
+    the archive are never used (no extraction by path)."""
+    out = []
+    try:
+        z = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile:
+        raise ValueError("not a readable zip file") from None
+    with z:
+        for info in z.infolist():
+            if info.is_dir() or info.file_size > MAX_MODEL_BYTES:
+                continue
+            base = os.path.basename(info.filename.replace("\\", "/"))
+            if not base:
+                continue
+            blob = z.read(info)
+            if base.lower().endswith(".zip") and depth > 0:
+                try:
+                    out += _zip_members(blob, depth - 1)
+                except ValueError:
+                    pass
+            else:
+                out.append((base, blob))
+    return out
+
+
+def install_model(upload_name, data, wanted):
+    """Store a vendor model the user supplied in the per-user models folder.
+
+    upload_name : the uploaded file's name (a model file, or the vendor's zip)
+    data        : its bytes
+    wanted      : the file names the dummy's .lib / .include asks for
+    A zip is searched (one nested zip deep) for a member whose base name is a
+    wanted name (case-insensitive); only that member is written, under the
+    wanted name. A plain file is stored under its wanted name. Returns the
+    installed names; raises ValueError with the reason otherwise."""
+    wanted = [os.path.basename(w) for w in wanted]
+    if not wanted:
+        raise ValueError("this model needs no vendor file")
+    if len(data) > MAX_MODEL_BYTES:
+        raise ValueError(f"file larger than {MAX_MODEL_BYTES >> 20} MB")
+    if upload_name.lower().endswith(".zip"):
+        found = {}
+        for base, blob in _zip_members(data):
+            for w in wanted:
+                if base.lower() == w.lower():
+                    found[w] = blob
+        if not found:
+            raise ValueError(f"the zip holds no {' / '.join(wanted)}")
+    else:
+        w = next((w for w in wanted if w.lower() == upload_name.lower()), None)
+        if w is None and len(wanted) == 1:
+            w = wanted[0]                          # renamed to what the dummy asks for
+        if w is None:
+            raise ValueError(f"expected one of {', '.join(wanted)}")
+        found = {w: data}
+    for w, blob in found.items():
+        why = _model_problem(blob)
+        if why:
+            raise ValueError(f"{w}: {why}")
+    md = ensure_user_dirs()
+    for w, blob in found.items():
+        with open(os.path.join(md, w), "wb") as fh:
+            fh.write(blob)
+    return sorted(found)
 
 
 # =====================================================================
@@ -257,7 +425,8 @@ def load_dummy(path, origin="built-in", text=None):
     stem = os.path.splitext(os.path.basename(path))[0]
     here = os.path.dirname(os.path.abspath(path))
     d = {"stem": stem, "path": path, "origin": origin, "errors": [], "warnings": [],
-         "meta": {}, "directives": [], "files": {}, "asy": None, "netlist_libs": [],
+         "meta": {}, "directives": [], "files": {}, "missing": [], "asy": None,
+         "netlist_libs": [],
          "fs_generic": stem == FS_GENERIC, "xpins": None, "xmodel": "", "symbol": None,
          "terminals": [], "inner_flags": [], "wires": [], "seat": (0, 0)}
     err = d["errors"].append
@@ -334,9 +503,10 @@ def load_dummy(path, origin="built-in", text=None):
             if m:
                 name = m.group(2)
                 p = _resolve_file(name, here)
-                if p is None:
-                    err(f"model file {name} not found (next to the dummy, in models/ "
-                        f"or LTspice's lib/sub)")
+                if p is None:                        # a vendor file the user adds later
+                    d["missing"].append(name.strip('"'))
+                    d["warnings"].append(f"model file {name} not installed (next to the "
+                                         f"dummy, in models/ or LTspice's lib/sub)")
                 elif p:
                     d["files"][name] = p
         try:
@@ -426,7 +596,8 @@ def _scan(folder, origin):
         if ext.lower() != ".asc" or stem == SEAT_TEMPLATE:
             continue
         p = os.path.join(folder, fn)
-        key = ("dummy", _stamp(p), _stamp(os.path.join(library_dir(), "symbols.asc")))
+        key = ("dummy", _stamp(p), _stamp(os.path.join(library_dir(), "symbols.asc")),
+               _models_stamp())
         if key not in _CACHE:
             _CACHE[key] = load_dummy(p, origin)
         out[stem] = _CACHE[key]
@@ -496,30 +667,32 @@ def cell_templates():
 # =====================================================================
 #  Netlist form
 # =====================================================================
-def _rewrite(line, d, bundled):
+def _rewrite(line, d, bundle):
     m = _LIB_RE.match(line)
     if not m:
         return line
     p = d["files"].get(m.group(2))
     if not p:
-        return line
-    tgt = os.path.basename(p) if bundled else p
+        return line                                  # not installed: the name as written
+    tgt = os.path.basename(p) if p in bundle else p
     if " " in tgt:
         tgt = f'"{tgt}"'
     return m.group(1) + tgt + m.group(3)
 
 
-def directives_cir(d, bundled=False):
-    """The dummy's directives as netlist lines (+ '.lib' of a built-in part)."""
+def directives_cir(d, bundle=()):
+    """The dummy's directives as netlist lines (+ '.lib' of a built-in part).
+    bundle: model-file paths that travel in the zip (referenced by bare
+    name); any other installed file is referenced by its absolute path."""
     out = [f".lib {mf}" for mf in d["netlist_libs"]]
     for raw in d["directives"]:
-        out += [_rewrite(ln, d, bundled) for ln in SA.text_lines(raw)]
+        out += [_rewrite(ln, d, bundle) for ln in SA.text_lines(raw)]
     return out
 
 
-def directives_asc(d, bundled=False):
+def directives_asc(d, bundle=()):
     """The dummy's directive TEXTs (as lines each) for the drawing."""
-    out = [[_rewrite(ln, d, bundled) for ln in SA.text_lines(raw)] for raw in d["directives"]]
+    out = [[_rewrite(ln, d, bundle) for ln in SA.text_lines(raw)] for raw in d["directives"]]
     return out
 
 

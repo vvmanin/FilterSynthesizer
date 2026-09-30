@@ -27,7 +27,12 @@ refer to dev/FS-008_ltspice_export_design_note.md §15.1.
   11 hand-drawn cell templates (phase 3): every variant of every templated
      cell, plain and with split C1 / C2, drawn from its template: re-read and
      solved = IR, no loose stubs or lone labels; every library op-amp seated
+  12 vendor model files: not installed (usable, warned), simplified generic,
+     install from a nested vendor zip (path-safe, rejections), consent-gated
+     bundling (= IR); spec brief / HF note in the headers, .save V(OUT) in the
+     nominal .asc; the wider auto-layout passes its self-check
 """
+import io
 import math
 import os
 import re
@@ -35,6 +40,7 @@ import shutil
 import sys
 import tempfile
 import time
+import zipfile
 
 import numpy as np
 
@@ -511,7 +517,6 @@ def check_8_library():
     bad = {
         "moved terminal": good.replace("FLAG 128 288 INP", "FLAG 128 304 INP"),
         "extra label": good.replace("FLAG 256 128 VCC", "FLAG 256 128 VCC\r\nFLAG 176 240 FOO"),
-        "missing model file": good.replace("TEXT 32 16", "TEXT 32 480 Left 2 !.lib nosuch.lib\r\nTEXT 32 16"),
         "rotated symbol": good.replace("256 192 R0", "256 192 R90"),
         "second symbol": good.replace("SYMATTR Value FS_OA_1",
                                       "SYMATTR Value FS_OA_1\r\nSYMBOL res 300 300 R0"),
@@ -522,6 +527,13 @@ def check_8_library():
         if not d["errors"]:
             fail(f"dummy check accepted a dummy with a {what}")
     ok(f"dummy check rejects {len(bad)} broken dummies ({', '.join(bad)})")
+    # a vendor model file not yet installed is a state, not a broken dummy
+    d = SO.load_dummy("vend.asc", text=good.replace(
+        "TEXT 32 16", "TEXT 32 480 Left 2 !.lib nosuch.lib\r\nTEXT 32 16"))
+    if d["errors"] or d["missing"] != ["nosuch.lib"] or SO.vendor_files(d) != {"nosuch.lib": None}:
+        fail(f"missing model file: errors {d['errors']} missing {d['missing']}")
+    else:
+        ok("a dummy whose model file is not installed is usable, flagged missing (vendor_files)")
 
 
 # ---------------------------------------------------------------------
@@ -619,7 +631,9 @@ def check_10_real_models():
             secs = demo_sections(rng, names, [TL] * 4)
             for sd, stem in zip(secs, stems):
                 sd["spice_model"] = stem
-            exp = SX.build_export(secs, vs=5.0, mc_params=MC, spec="real", include_models=bundled)
+            if bundled:                    # the user added VENDB.lib with consent
+                SO.record_consent(["VENDB.lib"], "test")
+            exp = SX.build_export(secs, vs=5.0, mc_params=MC, spec="real")
             if exp["asc_error"] or exp["all_generic"]:
                 fail(f"real-model export: asc_error={exp['asc_error']} all_generic={exp['all_generic']}")
                 continue
@@ -649,6 +663,128 @@ def check_10_real_models():
                 SX.zip_bytes(exp)
             except OSError as e:
                 fail(f"zip with extra files: {e}")
+    finally:
+        if old is None:
+            os.environ.pop("FILTERSYNTHESIZER_LTSPICE_USER_DIR", None)
+        else:
+            os.environ["FILTERSYNTHESIZER_LTSPICE_USER_DIR"] = old
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------
+#  12 — vendor model files: missing, simplified, install from a zip, consent
+# ---------------------------------------------------------------------
+def _zip(members):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        for name, blob in members:
+            z.writestr(name, blob)
+    return buf.getvalue()
+
+
+def check_12_vendor_models():
+    print("\n[12] vendor model files (missing / simplified / install / consent) + headers")
+    tmp = tempfile.mkdtemp(prefix="fs008v_")
+    user = os.path.join(tmp, "user")
+    old = os.environ.get("FILTERSYNTHESIZER_LTSPICE_USER_DIR")
+    os.environ["FILTERSYNTHESIZER_LTSPICE_USER_DIR"] = user
+    try:
+        md = SO.ensure_user_dirs()
+        if not all(os.path.isdir(os.path.join(user, s)) for s in ("opamps", "cells", "models")) \
+                or not os.path.isfile(os.path.join(md, "README.txt")):
+            fail("ensure_user_dirs did not create opamps/ cells/ models/ + README")
+        vend = _VENDOR.format(name="VENDZ", c=_C)
+        with open(os.path.join(user, "opamps", "VENDZ.asc"), "w", newline="") as fh:
+            fh.write(_dummy_from_fs("VENDZ_FS", [".lib vendz.lib",
+                                                 ".subckt VENDZ_FS inp inn vp vn out\\n"
+                                                 "X1 out inn inp vp vn VENDZ\\n.ends"],
+                                    "source=https://example.com/vendz note=kind B missing test"))
+        names, stems = ["3LPn-gained", "2BP-AM2"], ["VENDZ", None]
+
+        def export(**kw):
+            secs = demo_sections(np.random.default_rng(12), names, [TL] * 2)
+            for sd, stem in zip(secs, stems):
+                sd["spice_model"] = stem
+            return SX.build_export(secs, vs=5.0, mc_params=MC, spec="vend", **kw)
+
+        # 1. not installed: usable, referenced by name, warned, nothing bundled
+        exp = export()
+        v = exp["vendor"].get("VENDZ", {})
+        cir = exp["files"]["vend_AC.cir"]
+        if (v.get("missing") != ["vendz.lib"] or exp["extra_files"] or ".lib vendz.lib" not in cir
+                or not any("not installed" in w for w in exp["warnings"])):
+            fail(f"missing vendor file: vendor {v} extra {sorted(exp['extra_files'])}")
+        else:
+            ok("vendor file not installed: dummy used, '.lib vendz.lib' by name, warning, no bundle")
+        # 2. simplified generic models
+        exp = export(generic_vendor=True)
+        s1 = exp["sections"][0]
+        if not (exp["all_generic"] and s1["fs_generic"] and s1["simplified"] == "VENDZ"
+                and not exp["vendor"] and not any("VENDZ" in w for w in exp["warnings"])):
+            fail(f"generic_vendor: all_generic {exp['all_generic']} section 1 {s1['stem']} "
+                 f"simplified {s1['simplified']} warnings {exp['warnings']}")
+        else:
+            ok("simplified generic models: the vendor part's section uses FS generic, no warning")
+        # 3. install from the vendor's zip (nested one deep), path-safe
+        inner = _zip([("Models/VENDZ.LIB", vend + "\n"), ("readme.txt", "x")])
+        outer = _zip([("PSpice/sbom_vendz.zip", inner), ("../../evil.lib", ".subckt EVIL a b\n.ends"),
+                      ("VENDZ.OLB", "binary symbol")])
+        got = SO.install_model("sbom_vendz.zip", outer, ["vendz.lib"])
+        listed = sorted(os.listdir(md))
+        evil = [os.path.join(dp, f) for dp, _dn, fn in os.walk(tmp) for f in fn if f == "evil.lib"]
+        if got != ["vendz.lib"] or listed != ["README.txt", "vendz.lib"] or evil:
+            fail(f"install_model: {got}, models/ = {listed}, evil = {evil}")
+        else:
+            ok("install_model: vendz.lib taken from a nested vendor zip; nothing else extracted "
+               "(path-traversal member ignored)")
+        bad = {"encrypted": ("x.lib", b"$CDNENCSTART\n.subckt X a b\n"),
+               "no .subckt": ("x.lib", b"* just text\n"),
+               "zip without it": ("y.zip", _zip([("other.lib", ".subckt O a b\n.ends")]))}
+        for what, (nm, blob) in bad.items():
+            try:
+                SO.install_model(nm, blob, ["vendz.lib"])
+                fail(f"install_model accepted a file with {what}")
+            except ValueError:
+                pass
+        ok(f"install_model rejects: {', '.join(bad)}")
+        # 4. installed, no consent: absolute path, not bundled
+        exp = export()
+        v = exp["vendor"]["VENDZ"]
+        if v["unconsented"] != ["vendz.lib"] or exp["extra_files"]:
+            fail(f"installed without consent: {v}, extra {sorted(exp['extra_files'])}")
+        else:
+            ok("installed without consent: referenced by absolute path, not bundled")
+        # 5. consent: bundled by bare name, README notice, solves = IR
+        SO.record_consent(["vendz.lib"], "https://example.com/vendz")
+        hf = {"db": 12.0, "f_hz": 85e3, "am_sections": [2]}
+        exp = export(spec_brief=["Spec: Elliptic lowpass, order 5; fc = 1 kHz"], hf_hump=hf)
+        cir, rd = exp["files"]["vend_AC.cir"], exp["files"]["README.txt"]
+        if ("vendz.lib" not in exp["extra_files"] or ".lib vendz.lib" not in cir
+                or "DO NOT SHARE" not in rd or exp["vendor"]["VENDZ"]["bundled"] != ["vendz.lib"]):
+            fail(f"consented bundle: extra {sorted(exp['extra_files'])}")
+        else:
+            f = np.logspace(1, 6, 30)
+            h_ir = SC.mna_ac(exp["cascade"], f)
+            err = np.max(np.abs(netlist_response(cir.replace(".lib vendz.lib", vend), f) - h_ir)) \
+                / np.max(np.abs(h_ir))
+            (ok if err <= 1e-6 else fail)(f"consented: vendz.lib bundled by bare name, README "
+                                          f"notice, netlist = IR ({err:.1e})")
+        # 6. headers: spec brief + HF note in both .asc and the README; .save V(OUT)
+        asc, asc_mc = exp["files"]["vend_AC.asc"], exp["files"]["vend_AC_MC.asc"]
+        miss = [n for n, t in (("AC.asc", asc), ("AC_MC.asc", asc_mc), ("README", rd), ("AC.cir", cir))
+                if "Spec: Elliptic lowpass" not in t or "HF hump" not in t or "lower Ro" not in t]
+        if miss:
+            fail(f"spec brief / HF note missing in {miss}")
+        elif ".save V(OUT)" not in asc or ".save V(OUT)" in cir:
+            fail("nominal .asc must carry .save V(OUT); the frozen nominal .cir must not")
+        else:
+            ok("spec brief + HF-hump recommendation in every header; .save V(OUT) in the nominal .asc")
+        # 7. wider auto-layout still passes its self-check
+        exp = export(templates=False)
+        if exp["asc_error"] or any(i["drawing"] != "auto-layout" for i in exp["sections"]):
+            fail(f"auto-layout export: {exp['asc_error']}")
+        else:
+            ok(f"auto-layout (pitch {SA.PART_PITCH}, stubs {SA.LABEL_STUB}) passes the export self-check")
     finally:
         if old is None:
             os.environ.pop("FILTERSYNTHESIZER_LTSPICE_USER_DIR", None)
@@ -874,6 +1010,7 @@ if __name__ == "__main__":
     check_8_library()
     check_10_real_models()
     check_11_templates()
+    check_12_vendor_models()
     print(f"\n{time.time() - t0:.0f} s")
     if FAILS:
         print(f"\n{len(FAILS)} CHECK(S) FAILED")

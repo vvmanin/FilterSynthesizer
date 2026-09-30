@@ -870,7 +870,7 @@ def _opamp_part_editor(n, name, e):
         st.text_input("Description", value=e.get("description") or "", key=_oped_key(n, tag, "desc"))
         st.text_input("SPICE model", value=e.get("spice_model") or "", key=_oped_key(n, tag, "spice"),
                       help="Stem of an op-amp dummy in LTspice_Library/opamps (or your "
-                           "overlay), e.g. TL072 for TL072.asc. Empty = FS generic in the "
+                           "overlay), e.g. TL072H for TL072H.asc. Empty = FS generic in the "
                            "LTspice export.")
         st.button("Save", key=f"hw_oped_save_{n}", on_click=_oplib_save_edit, args=(n, name, tag),
                   help="Written to your user library; shipped values are never changed.")

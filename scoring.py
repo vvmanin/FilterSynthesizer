@@ -158,7 +158,7 @@ def score_solution(sol, cases, opamp, f_lo=1.0, f_hi=1e6):
 # =====================================================================
 # 3. SCORE A WHOLE TABLE
 # =====================================================================
-def score_table(solutions, opamp="TL072", design_subs=None,
+def score_table(solutions, opamp="TL072H", design_subs=None,
                 sort_by="ni_penalty", verbose=True):
     """Score every solution. `opamp` may be a library name or a dict."""
     if isinstance(opamp, str):
@@ -214,7 +214,7 @@ if __name__ == "__main__":
         "C1":0.01,"C2":2.7e-4,"C3":2.7e-4,"C4":6.8e-4,
         "R1":0.043,"R2":0.1,"R3":0.2,"R4":0.15,"R5":0.3,"R6":0.5,
     }]
-    for name in ["TL072", "OPA1656", "LM358"]:
+    for name in ["TL072H", "OPA1656", "LM358B"]:
         scored = score_table(demo, opamp=name, design_subs=design, verbose=True)
         print_scored_table(scored)
         print()

@@ -569,7 +569,11 @@ def render_response_tab():
     # =================================================================
     #  LTSPICE EXPORT  (FS-008; reads the MC settings above)
     # =================================================================
-    spice_ui.render_spice_export(sections_data, mc_params)
+    _am_secs = [d["n"] for d in sections_data if "-AM" in str(d["row"].get("topology", ""))]
+    spice_ui.render_spice_export(
+        sections_data, mc_params,
+        hf_hump=({"db": float(_hump_db), "f_hz": _f_pk, "am_sections": _am_secs}
+                 if _hump_db >= 1.0 else None))
 
     # =================================================================
     #  GENERATE REPORT

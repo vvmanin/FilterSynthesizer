@@ -453,10 +453,11 @@ Both mechanisms can coexist *per model*. If a symbol ever cannot be adapted insi
 - **Directives.** Each dummy's directive TEXT is copied **once per file**, however many sections
   use it (deduplicated by content).
 - **Relative `.lib` / `.include` paths** resolve relative to the *output* `.asc`, not the dummy.
-  The exporter rewrites them to absolute paths in the library folder. An option, *"Include model
-  files in the zip"*, instead copies the referenced files into the bundle and uses bare names.
-  That is portable to another machine, and it is the user's own local file, so the copy is theirs
-  to make. Missing referenced files are reported before download.
+  The exporter rewrites them to absolute paths in the library folder. *(Next round, 2026-09-30:
+  the "Include model files in the zip" option is gone.)* A vendor file the user added in the app
+  with consent (§5.6) is copied into the bundle and referenced by bare name; any other installed
+  file keeps its absolute path; a file not installed keeps the name the dummy writes, and the UI
+  warns before download.
 - **LTspice built-in parts** carry their model link in the symbol (a ModelFile/SpiceModel
   attribute). Copying the SYMBOL block verbatim keeps it, and nothing else is needed.
 - **Custom `.asy` symbols** are only found by LTspice in its library paths or next to the
@@ -474,6 +475,19 @@ The repo ships only its own text and references:
 Vendor model files are never shipped or embedded by the project. This matches the existing FS-008
 note ("store only the model name"). Encrypted models are never read or embedded; a built-in part
 is used through its symbol.
+
+**Evidence (checked 2026-09-30).** The TI files in use (LMV358A, TL07xH, TLV9002, OPA1656) carry a
+TI copyright line (OPA1656: "All rights reserved") and no redistribution grant. TI's *Important
+notice and disclaimer* (ti.com/legal/important-notice-and-disclaimer.html) grants use "only for
+development of an application that uses the TI products described in the resource" and says
+"Other reproduction and display of these resources is prohibited". So committing, shipping,
+mirroring or fetching them on the project's behalf is out. What the app does instead (next
+round): the user downloads the model under the vendor's terms and adds it in *Vendor model
+files* after a disclaimer and a consent tick; it is stored only in the user's own `models/`
+folder (`consent.json` records the consent) and copied unmodified into the user's **own** export
+zips, whose README says not to share them. That is the licensee's use of their copy, not
+redistribution by the project (a reading of the terms, not legal advice; other vendors' terms
+are their own, so the disclaimer stays vendor-neutral). An in-app download is FS-029.
 
 ### 5.7 Swapping later
 
@@ -1057,6 +1071,24 @@ with split slots C1b / C2b. What the exporter does, in `spice_asc.draw_template`
   - The dummy check (A.4).
 - **Library data:** the `spice_model` values in `opamp_library.json` land with FS-018 / FS-019.
 
+**As built — next round (2026-09-30).** `spice_model` holds the dummy stem for the seven parts
+with a dummy (the Topology tab's part picks the model; per-section override only with
+`FILTERSYNTHESIZER_DEBUG=1`). A dummy whose `.lib` is a vendor file gets the *Export <parts>
+with simplified generic models* checkbox (off: the vendor model, installed or not; on: FS generic
+with the library's values) and the *Vendor model files* panel (status, vendor link, disclaimer +
+consent, upload of the `.lib` or the vendor's zip -- `install_model` takes only the file the
+`.include` names, by base name, one nested zip deep). Consented files travel in the zip (§5.5,
+§5.6). Also: the nominal `.asc` saves only V(OUT) so LTspice plots it; every header carries the
+spec brief and, when the tool sees an HF hump, a lower-Ro / higher-GBWP recommendation;
+auto-layout pitch 256 / seats 640 / label stubs 48; the maintainer's AM templates wired (all 26
+template ids now have one). Check 12 covers it.
+
+**Open finding (2026-09-30).** Two TI GWL macro-models in one file collide: their helper subckts
+(`VOS_SRC_0`, `VNSE_0`, ...) are top-level with shared names and different bodies. Proposed:
+each vendor model inside a wrapper `.subckt <MODEL>_W inp inn vp vn out` holding its `.include`
+(or, if LTspice rejects that, its text), so the helpers are local. Pending the maintainer's
+LTspice test; tracked in ROADMAP FS-008 Notes, reused by FS-029.
+
 ---
 
 ## 15. Validation
@@ -1212,9 +1244,10 @@ The maintainer decides; this is only a suggestion. Criteria:
   - A vendor download (TI, onsemi, ST, …). The model must be plain-text SPICE (PSpice-compatible),
     not encrypted for another simulator and not TINA-only.
   - No model at all. Then FS generic with the library's A_ol/GBWP/Ro is the honest choice.
-- **Supply fit at the 5 V default.** AD8505, LMV358A, MAX9636 and MAX40100 are 5 V parts. LM358
-  and OPA1656 also run at 5 V. TL072 and NE5532 are ±15 V-class parts, so record their `vs_min`
-  from the datasheet and expect the warning at the default.
+- **Supply fit at the 5 V default.** AD8505, LMV358A, MAX9636, MAX40100 and TLV9002 are 5 V parts
+  (TLV9002 1.8-5.5 V). LM358B, TL072H and OPA1656 (4.5-36 V) also run at 5 V. Record each part's
+  range in `;FS: vs_min / vs_max` from the datasheet. *(Library as of 2026-09-30; TL072, LM358
+  and NE5532 were removed as obsolete.)*
 - **A suggested first batch**, where each item exercises one mechanism:
   1. FS generic (Phase 1).
   2. One LTspice built-in part from the library (kind A).
@@ -1331,7 +1364,8 @@ only has to *connect*: the adapter wires absorb whatever geometry the symbol has
 - The symbol and all wires lie inside the box.
 - There are no crossing wires, and every pin sits on a wire end.
 - The only labels are the terminals plus `VCC`, `VEE` and `0`.
-- `.lib` / `.include` targets exist.
+- `.lib` / `.include` targets exist. *(Next round: a target not installed no longer rejects the
+  dummy -- it is listed in `missing`, the export warns and the user adds the vendor file.)*
 - The `;FS:` fields parse.
 - Text is ASCII, or can be transliterated.
 

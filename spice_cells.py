@@ -654,6 +654,10 @@ def _print_spec(arg):
             f"{c}: {'on' if s is True else s}" for c, s in states[key].items()
             if s is not True) + "]"
         print(f"  {key:<4} {n1:>4} -- {n2:<4}{note}")
+    wires = sorted({(n1, n2) for n in cells for key, kind, n1, n2, st in superset(n)["entries"]
+                    if key is None and st == "short"})
+    for n1, n2 in wires:            # e.g. 2BP-AM: a = in, no part -- label it IN
+        print(f"  (wire) {n1} = {n2}: one net, no part -- label it {n1.upper() if n1 in ('in', 'out') else n1}")
     print("\nOp-amp seats (In+, In-, Out):")
     for slot, (a, b, c) in opamps.items():
         print(f"  {slot}: {a}, {b}, {c}")

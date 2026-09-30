@@ -1104,6 +1104,19 @@ st.session_state["report_spec_short"] = (
     f"{response.replace(' ', '')}_{filter_type.replace('-', '')}_n{_tot_order}")
 st.session_state["report_subtitle"] = (
     f"{response} {filter_type} · order {_tot_order} · {_corners}")
+# FS-008: one-line overall spec for the LTspice export headers (plain ASCII)
+_brief = [f"{'Custom H(s)' if is_custom else response} {filter_type.lower()}, order {_tot_order}",
+          (f"f1 = {f1_val:g} {freq_unit}, f2 = {f2_val:g} {freq_unit}" if _is_band and f2_val
+           else f"fc = {f1_val:g} {freq_unit}")
+          + ("" if is_custom or response in ("Chebyshev", "Elliptic")
+             else f" (edge at -{final_alpha:g} dB)")]
+if not is_custom and response in ("Chebyshev", "Elliptic"):
+    _brief.append(f"passband ripple {final_alpha:g} dB")
+if not is_custom and (response in ("Inverse Chebyshev", "Elliptic") or ems_m):
+    _brief.append(f"A_sl = {final_as_hp:g} dB, A_su = {final_as_lp:g} dB"
+                  if _is_band and final_as_lp != final_as_hp else f"A_s = {final_as_lp:g} dB")
+_brief.append(f"passband gain {final_gain_units:g} V/V ({20 * np.log10(final_gain_units):+.2f} dB)")
+st.session_state["report_spec_brief"] = ["Spec: " + "; ".join(_brief)]
 
 if engine_results:
     _wn = (2 * np.pi * np.sqrt(f1_val * f2_val) * multiplier
