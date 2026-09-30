@@ -31,6 +31,10 @@ refer to dev/FS-008_ltspice_export_design_note.md §15.1.
      install from a nested vendor zip (path-safe, rejections), consent-gated
      bundling (= IR); spec brief / HF note in the headers, .save V(OUT) in the
      nominal .asc; the wider auto-layout passes its self-check
+  13 FS-029 wrapped vendor models (synthetic TI- and ADI-style files sharing a
+     helper name): subckt scan + pin roles, rejections, per-part FS generic
+     fallback, import behind FS_<PART>.lib, bundle, .cir / .asc = IR with
+     nested scoping, the flat collision, a lost vendor copy, legacy files
 """
 import io
 import math
@@ -217,32 +221,59 @@ def check_3_format():
 # ---------------------------------------------------------------------
 #  4 — independent SPICE-semantics reader for the written netlist
 # ---------------------------------------------------------------------
-def _flatten(text):
-    """Parse the writer's netlist into flat elements. Supports R C V G E X and
-    .subckt/.ends, .param (numbers + {expr} with the given params)."""
-    lines = [ln.strip() for ln in text.splitlines()[1:]]        # line 1 = title
-    params, subckts, top, cur = {}, {}, [], None
-    for ln in lines:
-        if not ln or ln.startswith("*") or ln.startswith(";"):
-            continue
-        ln = ln.split(";")[0].strip()
-        low = ln.lower()
-        if low.startswith(".subckt"):
-            tok = ln.split()
-            cur = {"pins": tok[2:], "body": []}
-            subckts[tok[1].upper()] = cur
-            continue
-        if low.startswith(".ends"):
-            cur = None
-            continue
-        if low.startswith(".param"):
-            for k, v in re.findall(r"(\w+)\s*=\s*(\S+)", ln[6:]):
-                params[k.lower()] = v
-            continue
-        if low.startswith("."):
-            continue
-        (cur["body"] if cur is not None else top).append(ln.split())
-    return params, subckts, top
+def _flatten(text, includes=None):
+    """Parse the writer's netlist into elements. Supports R C V G E X and
+    .subckt/.ends -- nested, with SPICE scoping: a subckt defined inside
+    another is local to it, and one name defined twice in one scope is an
+    error --, .include of the files in `includes` ({name: text}, inlined in
+    place), .param (numbers + {expr} with the given params)."""
+    includes = {os.path.basename(k).lower(): v for k, v in (includes or {}).items()}
+    params, root = {}, {"pins": [], "body": [], "subs": {}, "parent": None}
+    stack = [root]
+
+    def feed(lines):
+        for ln in lines:
+            ln = ln.strip()
+            if not ln or ln.startswith("*") or ln.startswith(";"):
+                continue
+            ln = ln.split(";")[0].strip()
+            low = ln.lower()
+            if re.match(r"\.(include|inc)\s", low):
+                name = os.path.basename(ln.split(None, 1)[1].strip().strip('"')).lower()
+                if name in includes:
+                    feed(includes[name].splitlines())
+                continue
+            if low.startswith(".subckt"):
+                tok = ln.split()
+                scope = stack[-1]["subs"]
+                if tok[1].upper() in scope:
+                    raise ValueError(f"subckt {tok[1]} defined twice in one scope")
+                cur = {"pins": tok[2:], "body": [], "subs": {}, "parent": stack[-1]}
+                scope[tok[1].upper()] = cur
+                stack.append(cur)
+                continue
+            if low.startswith(".ends"):
+                stack.pop()
+                continue
+            if low.startswith(".param"):
+                for k, v in re.findall(r"(\w+)\s*=\s*(\S+)", ln[6:]):
+                    params[k.lower()] = v
+                continue
+            if SO._TOP_ONLY_RE.match(low) and len(stack) > 1:     # as LTspice 26 does
+                raise ValueError(f"{ln!r}: only allowed in global (top level) scope")
+            if low.startswith("."):
+                continue
+            stack[-1]["body"].append(ln.split())
+    feed(text.splitlines()[1:])                                  # line 1 = title
+    return params, root["subs"], root["body"], root
+
+
+def _lookup(scope, name):
+    while scope is not None:
+        if name in scope["subs"]:
+            return scope["subs"][name]
+        scope = scope["parent"]
+    raise KeyError(f"unknown subckt {name}")
 
 
 def _num(tok, params):
@@ -258,11 +289,11 @@ def _num(tok, params):
     return SX.parse_value(tok)
 
 
-def netlist_response(text, f, out="OUT"):
-    params, subckts, top = _flatten(text)
+def netlist_response(text, f, out="OUT", includes=None):
+    params, _subckts, top, root = _flatten(text, includes)
     elems = []
 
-    def expand(tokens, prefix, pinmap):
+    def expand(tokens, prefix, pinmap, scope=root):
         name = tokens[0]
         t = name[0].upper()
 
@@ -272,10 +303,10 @@ def netlist_response(text, f, out="OUT"):
                 return "0"
             return pinmap.get(x, prefix + x)
         if t == "X":
-            sub = subckts[tokens[-1].upper()]
+            sub = _lookup(scope, tokens[-1].upper())
             pm = {p.upper(): nd(n) for p, n in zip(sub["pins"], tokens[1:-1])}
             for b in sub["body"]:
-                expand(b, prefix + name.upper() + ".", pm)
+                expand(b, prefix + name.upper() + ".", pm, sub)
         elif t in "RC":
             elems.append((t, nd(tokens[1]), nd(tokens[2]), _num(tokens[3], params)))
         elif t in "GE":
@@ -401,7 +432,7 @@ def drawing_netlist(text, exp, extra=()):
 def element_set(text):
     """Top-level R / C / V / X lines, upper-cased, order-free; an R / C's two
     nodes in either order (a template draws a part whichever way round)."""
-    _p, _s, top = _flatten(text)
+    _p, _s, top, _r = _flatten(text)
     out = set()
     for tk in top:
         t = [x.upper() for x in tk]
@@ -707,15 +738,18 @@ def check_12_vendor_models():
                 sd["spice_model"] = stem
             return SX.build_export(secs, vs=5.0, mc_params=MC, spec="vend", **kw)
 
-        # 1. not installed: usable, referenced by name, warned, nothing bundled
+        # 1. not installed (FS-029): that part falls back to FS generic, one warning
         exp = export()
-        v = exp["vendor"].get("VENDZ", {})
+        s1 = exp["sections"][0]
         cir = exp["files"]["vend_AC.cir"]
-        if (v.get("missing") != ["vendz.lib"] or exp["extra_files"] or ".lib vendz.lib" not in cir
-                or not any("not installed" in w for w in exp["warnings"])):
-            fail(f"missing vendor file: vendor {v} extra {sorted(exp['extra_files'])}")
+        if (exp["vendor"] or exp["extra_files"] or "vendz.lib" in cir or not s1["fs_generic"]
+                or not s1["not_installed"] or s1["simplified"] != "VENDZ"
+                or sum("not imported yet" in w for w in exp["warnings"]) != 1):
+            fail(f"missing vendor file: section 1 {s1['stem']} vendor {exp['vendor']} "
+                 f"extra {sorted(exp['extra_files'])} warnings {exp['warnings']}")
         else:
-            ok("vendor file not installed: dummy used, '.lib vendz.lib' by name, warning, no bundle")
+            ok("vendor file not installed: that part exported with FS generic, one warning, "
+               "no reference to the missing file")
         # 2. simplified generic models
         exp = export(generic_vendor=True)
         s1 = exp["sections"][0]
@@ -997,6 +1031,196 @@ def check_7_ideal_clamp():
         fail(f"Ideal clamp: {worst_db:.2e} dB, rel {worst_rel:.2e}")
 
 
+# ---------------------------------------------------------------------
+#  13 — FS-029: vendor models imported behind a per-part wrapper
+# ---------------------------------------------------------------------
+# Two synthetic "vendors" (no vendor file is ever committed): both call a
+# top-level helper HELP_0, with different pin orders -- the TI helper-name
+# collision in miniature. TI style: named pins; ADI style: numbered pins with
+# a node-assignment note, shipped as a .txt inside a nested zip.
+_VEND_TI = ("* VENDA test model (TI style)\n"
+            ".subckt VENDA IN+ IN- VCC VEE OUT\n"
+            "XH IN+ IN- x HELP_0\nR1 x 0 200k\nC1 x 0 {c}\nE1 y 0 x 0 1\nR2 y OUT 50\n"
+            ".ends VENDA\n"
+            ".subckt HELP_0 a b y\nG1 0 y a b 1\n.ends\n"
+            ".END\n")                                   # TI's TL07xH file ends like this
+_VEND_ADI = ("* VENDB test model (ADI style)\n"
+             "* Node assignments\n"
+             "*                output\n"
+             "*                |  inverting input\n"
+             "*                |  |  non-inverting input\n"
+             "*                |  |  |  positive supply\n"
+             "*                |  |  |  |  negative supply\n"
+             "*                |  |  |  |  |\n"
+             ".SUBCKT VENDB 45 2 1 99 50\n"
+             "XH x 1 2 HELP_0\nR1 x 0 200k\nC1 x 0 {c}\nE1 y 0 x 0 1\nR2 y 45 50\n"
+             ".ENDS VENDB\n"
+             ".SUBCKT HELP_0 y a b\nG1 0 y a b 1\n.ENDS\n"
+             ".SUBCKT VENDB_SD 45 2 1 99 50 7\nR1 45 0 1k\n.ENDS\n")
+
+
+def check_13_wrapped_models():
+    print("\n[13] FS-029 vendor models behind a per-part wrapper (synthetic vendors)")
+    # 1. reading a vendor file: subckts, pin roles, name match, rejections
+    subs = SO.scan_subckts(".subckt VENDC IN+ IN-\r\n+ VCC VEE OUT PARAMS: G=1\r\nR1 a b 1\r\n"
+                           ".subckt INNER a b\r\n.ends\r\n.ends VENDC\r\n")
+    ti = SO.guess_roles(["IN+", "IN-", "VCC", "VEE", "OUT"])
+    adi = SO.scan_subckts(_VEND_ADI)[0]
+    adi_roles = SO.guess_roles(adi["pins"], adi["comment"])
+    note = SO.guess_roles(["1", "2", "3", "4", "5"], ["PINOUT ORDER +IN -IN +V -V OUT"])
+    if [(s["name"], s["pins"]) for s in subs] != [("VENDC", ["IN+", "IN-", "VCC", "VEE", "OUT"])]:
+        fail(f"scan_subckts (continuation, PARAMS:, nested, CRLF): {subs}")
+    elif ti != (["INP", "INN", "VCC", "VEE", "OUT"], True) or \
+            adi_roles != (["OUT", "INN", "INP", "VCC", "VEE"], True) or \
+            note != (["INP", "INN", "VCC", "VEE", "OUT"], True):
+        fail(f"guess_roles: TI {ti} ADI {adi_roles} pinout note {note}")
+    elif (SO._name_score("TL07XH_TL08XH", "TL072H"), SO._name_score("OPA1656", "OPA1656"),
+          SO._name_score("VNSE_0", "TL072H")) != (2, 3, 0):
+        fail("subckt name match (family wildcard / exact / none)")
+    else:
+        ok("scan_subckts + guess_roles: '+' continuation, PARAMS:, nested scope; roles from pin "
+           "names, a PINOUT ORDER note and ADI's node-assignment columns; TL07XH_TL08XH ~ TL072H")
+    bad = {"6 pins only": ("sd.lib", b".subckt VENDB 1 2 3 4 5 6\n.ends\n", "5 pins"),
+           "encrypted": ("x.lib", b"$CDNENCSTART\n.subckt VENDB a b c d e\n", "encrypted"),
+           "no .subckt": ("x.txt", b"* readme\n", "no")}
+    for what, (nm, blob, word) in bad.items():
+        try:
+            SO.model_candidates(nm, blob, "VENDB")
+            fail(f"model_candidates accepted {what}")
+        except ValueError as e:
+            if word not in str(e):
+                fail(f"model_candidates {what}: unclear reason {e}")
+    ok(f"model_candidates rejects: {', '.join(bad)} (with the reason)")
+
+    tmp = tempfile.mkdtemp(prefix="fs029_")
+    old = os.environ.get("FILTERSYNTHESIZER_LTSPICE_USER_DIR")
+    os.environ["FILTERSYNTHESIZER_LTSPICE_USER_DIR"] = tmp
+    try:
+        md = SO.ensure_user_dirs()
+        for part in ("VENDA", "VENDB"):
+            with open(os.path.join(tmp, "opamps", part + ".asc"), "w", newline="") as fh:
+                fh.write(SO.opamp2_dummy_text(f"FS_{part}",
+                                              f"source=https://example.com/{part.lower()}",
+                                              [f".include FS_{part}.lib"]))
+        stems = ["VENDA", "VENDB", None]
+
+        def export():
+            secs = demo_sections(np.random.default_rng(13),
+                                 ["3LPn-gained", "2BP-AM2", "1HP-inv-gained"], [TL] * 3)
+            for sd, stem in zip(secs, stems):
+                sd["spice_model"] = stem
+            return SX.build_export(secs, vs=5.0, mc_params=MC, spec="wrap")
+
+        # 2. nothing imported: both parts fall back to FS generic, one warning each
+        exp = export()
+        fb = [i["n"] for i in exp["sections"] if i["not_installed"]]
+        if fb != [1, 2] or not exp["all_generic"] or \
+                sum("not imported yet" in w for w in exp["warnings"]) != 2:
+            fail(f"not imported: fallback sections {fb}, warnings {exp['warnings']}")
+        else:
+            ok("not imported: each vendor part exported with FS generic (all_generic), one "
+               "warning per part")
+        # 3. import: TI plain .lib, ADI .txt in a nested zip (CRLF)
+        vend_a = _VEND_TI.format(c=_C).encode()
+        vend_b = _VEND_ADI.format(c=_C).replace("\n", "\r\n").encode()
+        ca = SO.model_candidates("venda.lib", vend_a, "VENDA")
+        z = _zip([("PSpice/vendb_model.zip", _zip([("VENDB model.txt", vend_b)])),
+                  ("readme.pdf", "x")])
+        cb = SO.model_candidates("vendb_models.zip", z, "VENDB")
+        if [c["subckt"] for c in ca] != ["VENDA"] or [c["subckt"] for c in cb] != ["VENDB"] \
+                or not cb[0]["confident"]:
+            fail(f"candidates: TI {[c['subckt'] for c in ca]} ADI "
+                 f"{[(c['subckt'], c['confident']) for c in cb]}")
+        wa = SO.install_wrapped("VENDA", ca[0], source="https://example.com/venda")
+        wb = SO.install_wrapped("VENDB", cb[0], source="https://example.com/vendb")
+        try:
+            SO.install_wrapped("VENDB", cb[0], ["INP", "INP", "VCC", "VEE", "OUT"])
+            fail("install_wrapped accepted a duplicated pin role")
+        except ValueError:
+            pass
+        listed = sorted(os.listdir(md))
+        want = sorted(["README.txt", "consent.json", "FS_VENDA.lib", "VENDA__venda.lib",
+                       "FS_VENDB.lib", "VENDB__VENDB_model.txt"])
+        with open(os.path.join(md, "VENDB__VENDB_model.txt"), "rb") as fh:
+            same = fh.read() == vend_b
+        with open(os.path.join(md, "VENDA__venda.lib"), "rb") as fh:
+            copy_a = fh.read()
+        want_a = vend_a.replace(b"\n.END\n", b"\n* FS-029 wrapper: disabled, top-level only -> .END\n")
+        if copy_a != want_a or SO.part_records()["VENDA"].get("disabled") != [".END"]:
+            fail(f"VENDA copy: the closing .END must be commented out, nothing else changed "
+                 f"(disabled {SO.part_records()['VENDA'].get('disabled')})")
+        else:
+            ok("vendor copy: TI-style closing .END commented out (LTspice: top level only), "
+               "every other byte unchanged; an ADI-style file stored byte-identical")
+        with open(os.path.join(md, "VENDA__venda.lib"), "wb") as fh:    # an import made
+            fh.write(vend_a)                                               # before the fix
+        rep = SO.repair_imports()
+        with open(os.path.join(md, "VENDA__venda.lib"), "rb") as fh:
+            (ok if rep == ["VENDA__venda.lib"] and fh.read() == want_a else fail)(
+                f"repair_imports fixes an earlier import in place: {rep}")
+        wrap_b = SA.read_text(os.path.join(md, "FS_VENDB.lib"))
+        recs = SO.part_records()
+        if (wa, wb) != (("FS_VENDA.lib", "VENDA__venda.lib"), ("FS_VENDB.lib", "VENDB__VENDB_model.txt")) \
+                or listed != want or not same or "XV OUT INN INP VCC VEE VENDB" not in wrap_b \
+                or ".subckt FS_VENDB INP INN VCC VEE OUT" not in wrap_b \
+                or recs.get("VENDB", {}).get("subckt") != "VENDB" \
+                or not all(SO.is_consented(n) for n in wa + wb):
+            fail(f"install_wrapped: {wa} {wb}; models/ = {listed}; vendor copy unchanged {same}; "
+                 f"records {sorted(recs)}")
+        else:
+            ok("install_wrapped: vendor copy as <PART>__<file>, FS_<PART>.lib "
+               "wrapper in the vendor pin order, consent + part record; a duplicated role refused")
+        # 4. export: wrappers + vendor copies bundled; .cir and .asc solve = IR
+        exp = export()
+        extra = sorted(exp["extra_files"])
+        cir = exp["files"]["wrap_AC.cir"]
+        inc = {n: SA.read_text(p) for n, p in exp["extra_files"].items()}
+        f = np.logspace(1, 6, 30)
+        h_ir = SC.mna_ac(exp["cascade"], f)
+        if extra != ["FS_VENDA.lib", "FS_VENDB.lib", "VENDA__venda.lib", "VENDB__VENDB_model.txt"]:
+            fail(f"bundle: {extra}")
+        elif exp["all_generic"] or not re.search(r"^XU\d+ .* FS_VENDA\r?$", cir, re.M) \
+                or ".include FS_VENDB.lib" not in cir:
+            fail("the netlist does not call FS_VENDA / include FS_VENDB.lib: "
+                 + " | ".join(ln for ln in cir.splitlines() if ln[:2] in ("XU", ".i", ".l")))
+        else:
+            for label, text in (("cir", cir), ("asc", drawing_netlist(exp["files"]["wrap_AC.asc"], exp))):
+                err = np.max(np.abs(netlist_response(text, f, includes=inc) - h_ir)) / np.max(np.abs(h_ir))
+                (ok if err <= 1e-6 else fail)(
+                    f"wrap_AC.{label}: two wrapped vendors sharing HELP_0 + FS generic = IR "
+                    f"({err:.1e}); bundled {', '.join(extra)}")
+        rd = exp["files"]["README.txt"]
+        if "wrapper generated by the tool" not in rd or "VENDOR FILE" not in rd or "DO NOT SHARE" not in rd:
+            fail("README: wrapper / VENDOR FILE / DO NOT SHARE lines")
+        # 5. the collision the wrapper removes: the same models flat in one netlist
+        flat = "* flat\n" + _VEND_TI.format(c=_C) + _VEND_ADI.format(c=_C)
+        try:
+            _flatten(flat)
+            fail("a flat netlist with both vendors' HELP_0 was accepted")
+        except ValueError:
+            ok("without the wrapper the two vendors' HELP_0 collide in one scope (as in LTspice)")
+        # 6. a vendor copy deleted by hand: the part is 'not imported' again
+        os.remove(os.path.join(md, "VENDB__VENDB_model.txt"))
+        exp = export()
+        if [i["n"] for i in exp["sections"] if i["not_installed"]] != [2]:
+            fail("wrapper without its vendor copy was used")
+        else:
+            ok("a wrapper whose vendor copy is gone counts as not imported (FS generic)")
+        # 7. a consented pre-FS-029 file in models/ is offered for import
+        with open(os.path.join(md, "vendb_old.lib"), "wb") as fh:
+            fh.write(vend_b)
+        SO.record_consent(["vendb_old.lib"], "test")
+        got = [(c["file"], c["subckt"]) for c in SO.installed_candidates("VENDB")]
+        (ok if got[:1] == [("vendb_old.lib", "VENDB")] else fail)(
+            f"installed_candidates offers the consented legacy file: {got[:1]}")
+    finally:
+        if old is None:
+            os.environ.pop("FILTERSYNTHESIZER_LTSPICE_USER_DIR", None)
+        else:
+            os.environ["FILTERSYNTHESIZER_LTSPICE_USER_DIR"] = old
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     t0 = time.time()
     check_1_ir_vs_tf()
@@ -1011,6 +1235,7 @@ if __name__ == "__main__":
     check_10_real_models()
     check_11_templates()
     check_12_vendor_models()
+    check_13_wrapped_models()
     print(f"\n{time.time() - t0:.0f} s")
     if FAILS:
         print(f"\n{len(FAILS)} CHECK(S) FAILED")

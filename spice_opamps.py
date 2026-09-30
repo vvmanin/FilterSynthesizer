@@ -17,6 +17,13 @@
 #                                          models/ with consent, consent.json;
 #                                          consented files travel in the zip)
 #
+#  FS-029: a vendor part's dummy includes FS_<PART>.lib, a wrapper the app
+#  generates at import: '.subckt FS_<PART> INP INN VCC VEE OUT' around an
+#  unchanged '.include <PART>__<vendor file>' and one X line in the vendor's
+#  pin order. The vendor's helper subckts become local (two vendor models with
+#  the same helper names can share a netlist) and the dummy does not depend on
+#  the vendor's file or subckt name.
+#
 #  opamp_library.json `spice_model` = a dummy stem. Ideal / Custom / unmapped
 #  parts use _FS_generic (the tool's own A_ol/GBWP/Ro model).
 #
@@ -30,6 +37,7 @@
 # =====================================================================
 
 import datetime
+import hashlib
 import io
 import json
 import os
@@ -219,7 +227,10 @@ def models_readme_text():
         "(Resulting Response > LTspice export > Vendor model files), which stores",
         "them in the per-user models folder and records your consent in",
         "consent.json. A dummy's '.lib <file>' with a relative name is looked up",
-        "next to the dummy, then in the per-user models/, then here."]) + SA.EOL
+        "next to the dummy, then in the per-user models/, then here.",
+        "An imported vendor model is stored unchanged as <PART>__<its file name>,",
+        "next to FS_<PART>.lib, a wrapper the app generates (it includes the vendor",
+        "file inside its own .subckt FS_<PART> INP INN VCC VEE OUT)."]) + SA.EOL
 
 
 # =====================================================================
@@ -256,6 +267,9 @@ def vendor_files(d):
     (LTspice built-in) and kind C (embedded text)."""
     out = {os.path.basename(k.strip('"')): v for k, v in d.get("files", {}).items()}
     out.update({m: None for m in d.get("missing", [])})
+    for k, v in out.items():                        # a wrapper without its vendor copy
+        if v and wrapper_part(k) and len(model_closure(v)) < 2:
+            out[k] = None
     return out
 
 
@@ -278,16 +292,30 @@ def is_consented(path_or_name):
     return os.path.basename(path_or_name or "").lower() in consents()
 
 
-def record_consent(names, source=""):
+def part_records():
+    """{PART (upper case): import record} of the vendor models imported
+    behind a wrapper (FS-029): wrapper, file, original, subckt, pins, sha256,
+    source, accepted."""
+    try:
+        with open(_consent_path(), encoding="utf-8") as fh:
+            return {k.upper(): v for k, v in (json.load(fh).get("parts") or {}).items()}
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
+def record_consent(names, source="", part=None):
     """Record the user's consent for these file names (the disclaimer was
-    accepted in the app). Raises OSError when the folder is not writable."""
+    accepted in the app); `part` = an FS-029 import record {part, ...}.
+    Raises OSError when the folder is not writable."""
     ensure_user_dirs()
-    data = {"format": "filtersynthesizer-vendor-model-consent", "version": 1,
-            "files": dict(consents())}
+    data = {"format": "filtersynthesizer-vendor-model-consent", "version": 2,
+            "files": dict(consents()), "parts": part_records()}
     now = datetime.datetime.now().isoformat(timespec="seconds")
     for n in names:
         data["files"][os.path.basename(n).lower()] = {"file": os.path.basename(n),
                                                       "accepted": now, "source": source}
+    if part:
+        data["parts"][part["part"].upper()] = dict(part, accepted=now, source=source)
     with open(_consent_path(), "w", encoding="utf-8") as fh:
         json.dump(data, fh, indent=1)
 
@@ -367,6 +395,303 @@ def install_model(upload_name, data, wanted):
         with open(os.path.join(md, w), "wb") as fh:
             fh.write(blob)
     return sorted(found)
+
+
+# =====================================================================
+#  FS-029: import a vendor model behind a per-part wrapper
+# =====================================================================
+WRAP_PORTS = ("INP", "INN", "VCC", "VEE", "OUT")      # = opamp2's In+ In- V+ V- OUT
+_WRAP_RE = re.compile(r"^FS_(\w+)\.lib$", re.I)
+MODEL_EXTS = ("", ".lib", ".txt", ".mod", ".cir", ".sub", ".inc", ".sp", ".spi",
+              ".ckt", ".lb", ".net", ".mdl")
+_PIN_NAMES = {
+    "INP": {"IN+", "+IN", "INP", "INPUT+", "+INPUT", "NONINV", "NI", "VIN+", "VINP",
+            "INPLUS", "PLUS", "IP", "+"},
+    "INN": {"IN-", "-IN", "INN", "INM", "INPUT-", "-INPUT", "INV", "VIN-", "VINN", "VINM",
+            "INMINUS", "MINUS", "IM", "-"},
+    "VCC": {"VCC", "V+", "+V", "VDD", "VP", "VS+", "+VS", "VPOS", "VCC+", "VSP", "AVDD"},
+    "VEE": {"VEE", "V-", "-V", "VSS", "VN", "VS-", "-VS", "VNEG", "VEE-", "VSN", "AVSS", "GND"},
+    "OUT": {"OUT", "VOUT", "OUTPUT", "VO", "O"},
+}
+_PIN_PHRASES = (("INP", r"non-?\s?inverting\s+input"),
+                ("INN", r"(?<!non-)(?<!non)(?<!non )inverting\s+input"),
+                ("VCC", r"positive\s+(?:power\s+)?supply"),
+                ("VEE", r"negative\s+(?:power\s+)?supply"),
+                ("OUT", r"\boutput\b"))
+
+
+def safe_part(part):
+    """A part name as it goes into FS_<PART> and <PART>__<file> (A-Z 0-9 _)."""
+    return re.sub(r"\W", "_", (part or "").strip()).upper() or "PART"
+
+
+def wrapper_name(part):
+    return f"FS_{safe_part(part)}.lib"
+
+
+def wrapper_part(name):
+    """'FS_TL072H.lib' -> 'TL072H'; None for any other file name."""
+    m = _WRAP_RE.match(os.path.basename(name or ""))
+    return m.group(1).upper() if m else None
+
+
+def vendor_copy_name(part, original):
+    base = re.sub(r"[^\w.+-]", "_", os.path.basename(original.replace("\\", "/")))
+    return f"{safe_part(part)}__{base}"
+
+
+def model_closure(path):
+    """A model file plus the files a wrapper includes from its own folder (the
+    vendor copy), one level: what travels in the zip together."""
+    out = [path]
+    if not path or not wrapper_part(path):
+        return out
+    here = os.path.dirname(path)
+    try:
+        text = SA.read_text(path)
+    except OSError:
+        return out
+    for ln in text.splitlines():
+        m = _LIB_RE.match(ln)
+        if m:
+            p = os.path.join(here, os.path.basename(m.group(2).strip('"')))
+            if os.path.isfile(p):
+                out.append(p)
+    return out
+
+
+def _logical_lines(text):
+    """SPICE lines with '+' continuations joined (stripped, comments kept)."""
+    out = []
+    for ln in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        s = ln.strip()
+        if s.startswith("+") and out and not out[-1].startswith("*"):
+            out[-1] += " " + s[1:].strip()
+        else:
+            out.append(s)
+    return out
+
+
+def scan_subckts(text):
+    """Top-level .subckt definitions of a model text: [{name, pins, comment}].
+    Pins stop at 'PARAMS:' or a key=value token; comment = the '*' lines just
+    above the .subckt (vendors put the pinout there)."""
+    out, depth, cmt = [], 0, []
+    for s in _logical_lines(text):
+        if not s:
+            continue
+        if s.startswith("*"):
+            cmt = (cmt + [s.lstrip("*").strip()])[-40:]
+            continue
+        low = s.lower()
+        if low.startswith(".subckt"):
+            tok = s.split(";")[0].split()
+            if depth == 0 and len(tok) > 1:
+                pins = []
+                for t in tok[2:]:
+                    if t.lower().rstrip(":") in ("params", "param") or "=" in t:
+                        break
+                    pins.append(t)
+                out.append({"name": tok[1], "pins": pins, "comment": cmt})
+            depth += 1
+        elif low.startswith(".ends"):
+            depth = max(0, depth - 1)
+        cmt = []
+    return out
+
+
+def _role_of(pin):
+    p = re.sub(r"[_\s]", "", pin.upper())
+    return next((r for r, names in _PIN_NAMES.items() if p in names), None)
+
+
+def guess_roles(pins, comment=()):
+    """Roles (INP / INN / VCC / VEE / OUT) of a subckt's pins, in pin order,
+    from the pin names, else from a pinout note above it ('PINOUT ORDER ...'
+    tokens, or ADI's 'non-inverting input / inverting input / positive supply
+    / negative supply / output' column heads). (roles, confident): roles may
+    hold None; confident = five distinct roles for five pins."""
+    def done(r):
+        return len(pins) == 5 and None not in r and len(set(r)) == 5
+    roles = [_role_of(p) for p in pins]
+    if done(roles):
+        return roles, True
+    for ln in comment:                               # 'PINOUT ORDER +IN -IN +V -V OUT'
+        m = re.search(r"pin\s*(?:out)?\s*order|pinout|pin\s+order", ln, re.I)
+        if m:
+            r = [_role_of(t) for t in ln[m.end():].replace(",", " ").split()][:len(pins)]
+            if done(r):
+                return r, True
+    text = "\n".join(comment).lower()
+    hits = []
+    for role, rx in _PIN_PHRASES:
+        m = re.search(rx, text)
+        if m:
+            hits.append((m.start(), role))
+    r = [role for _, role in sorted(hits)]
+    if done(r):
+        return r, True
+    return roles, False
+
+
+def _name_score(sub, part):
+    """How well a subckt name matches the part: 3 exact, 2 family ('X' as a
+    wildcard: TL07XH_TL08XH ~ TL072H), 1 prefix, 0 none."""
+    s = re.sub(r"[^A-Z0-9_]", "", sub.upper())
+    p = re.sub(r"[^A-Z0-9]", "", (part or "").upper())
+    if not p:
+        return 0
+    if s.replace("_", "") == p:
+        return 3
+    for piece in s.split("_"):
+        if piece and re.fullmatch(re.escape(piece).replace("X", "[A-Z0-9]"), p):
+            return 2
+    s = s.replace("_", "")
+    return 1 if s and (p.startswith(s) or s.startswith(p)) else 0
+
+
+def model_candidates(upload_name, data, part):
+    """Every 5-pin top-level .subckt in what the user picked (a model file of
+    any extension, or a zip -- by content -- one nested zip deep), best match
+    for `part` first: [{file, data, subckt, pins, roles, confident, score}].
+    Raises ValueError with the reason when there is none."""
+    if len(data) > MAX_MODEL_BYTES:
+        raise ValueError(f"file larger than {MAX_MODEL_BYTES >> 20} MB")
+    is_zip = data[:4] == b"PK\x03\x04"
+    members = _zip_members(data) if is_zip else [(os.path.basename(upload_name), data)]
+    out, why, wide = [], [], []
+    for base, blob in members:
+        if is_zip and os.path.splitext(base)[1].lower() not in MODEL_EXTS:
+            continue
+        prob = _model_problem(blob)
+        if prob:
+            if not is_zip or "encrypted" in prob:
+                why.append(f"{base}: {prob}")
+            continue
+        for sc in scan_subckts(blob.decode("latin-1")):
+            if len(sc["pins"]) != 5:
+                if _name_score(sc["name"], part) >= 2:
+                    wide.append(f"{sc['name']} ({len(sc['pins'])} pins)")
+                continue
+            roles, conf = guess_roles(sc["pins"], sc["comment"])
+            out.append({"file": base, "data": blob, "subckt": sc["name"], "pins": sc["pins"],
+                        "roles": roles, "confident": conf,
+                        "score": 2 * _name_score(sc["name"], part) + conf})
+    if not out:
+        if wide:
+            why.append("the model has other than 5 pins (" + ", ".join(wide) + "): only "
+                       "in+ / in- / V+ / V- / out models are supported")
+        raise ValueError("; ".join(why) or "no SPICE .subckt model found"
+                         + (" in the zip (unpack other archive types first)" if is_zip else ""))
+    out.sort(key=lambda c: -c["score"])
+    return out
+
+
+def wrapper_text(part, vendor_file, subckt, roles):
+    """The FS_<PART> wrapper: the vendor file included unchanged inside it, one
+    X line with the wrapper's ports in the vendor's pin order."""
+    fs = f"FS_{safe_part(part)}"
+    tgt = f'"{vendor_file}"' if " " in vendor_file else vendor_file
+    return SA.EOL.join([
+        f"* {fs}: FilterSynthesizer wrapper for {part} (FS-029) -- generated, not a",
+        "* vendor file. It includes the vendor's model inside its own .subckt, so the",
+        "* vendor's helper subcircuits stay local to it (lines LTspice allows only at top",
+        "* level, e.g. a closing .END, are commented out in the copy). Ports as opamp2.",
+        f"* Vendor subckt {subckt}, vendor pin order {' '.join(roles)}.",
+        f".subckt {fs} {' '.join(WRAP_PORTS)}",
+        f"XV {' '.join(roles)} {subckt}",            # before the include: some vendor
+        f".include {tgt}",                            # files end with a .END line
+        f".ends {fs}", ""])
+
+
+# Directives LTspice accepts only at top level ("This directive is only allowed
+# in global (top level) scope"): inside the wrapper they are commented out.
+# '.end' does not match '.ends' (\b), '.op' not '.options'.
+_TOP_ONLY_RE = re.compile(r"^\s*\.(end|options?|opt|temp|global|backanno|tran|ac|op|dc|"
+                          r"noise|step|save|probe|meas|measure|four|net)\b", re.I)
+_DISABLED = b"* FS-029 wrapper: disabled, top-level only -> "
+
+
+def localize_model(data):
+    """The vendor text as it can sit inside the wrapper's .subckt: every
+    top-level-only directive line (TI's closing '.END', ...) commented out,
+    all other bytes unchanged. Returns (bytes, [disabled lines])."""
+    out, hits = [], []
+    for ln in data.splitlines(keepends=True):
+        txt = ln.decode("latin-1").strip()
+        if _TOP_ONLY_RE.match(txt):
+            hits.append(txt)
+            out.append(_DISABLED + ln)
+        else:
+            out.append(ln)
+    return b"".join(out), hits
+
+
+def repair_imports():
+    """Comment out top-level-only lines in vendor copies imported before
+    localize_model existed (e.g. TL07xH's '.END'). Returns the fixed names;
+    never raises."""
+    fixed = []
+    md = user_models_dir()
+    for rec in part_records().values():
+        p = os.path.join(md, rec.get("file") or "")
+        try:
+            with open(p, "rb") as fh:
+                data = fh.read()
+            new, hits = localize_model(data)
+            if hits:
+                with open(p, "wb") as fh:
+                    fh.write(new)
+                fixed.append(rec["file"])
+        except (OSError, KeyError, TypeError):
+            continue
+    return fixed
+
+
+def install_wrapped(part, cand, roles=None, source=""):
+    """Import a vendor model for `part` from one model_candidates() entry:
+    <PART>__<file> (the vendor's bytes, only top-level-only directive lines
+    commented out -- localize_model) + FS_<PART>.lib, consent recorded for
+    both. roles: the confirmed vendor pin roles (default: the guess).
+    Returns (wrapper name, vendor copy name); raises ValueError / OSError."""
+    roles = [r.upper() for r in (roles or cand["roles"]) if r]
+    if len(roles) != 5 or sorted(roles) != sorted(WRAP_PORTS):
+        raise ValueError("give each of the 5 pins a different role (in+, in-, V+, V-, out)")
+    why = _model_problem(cand["data"])
+    if why:
+        raise ValueError(why)
+    md = ensure_user_dirs()
+    vend, wrap = vendor_copy_name(part, cand["file"]), wrapper_name(part)
+    data, disabled = localize_model(cand["data"])
+    with open(os.path.join(md, vend), "wb") as fh:
+        fh.write(data)
+    with open(os.path.join(md, wrap), "w", encoding="ascii", newline="") as fh:
+        fh.write(wrapper_text(part, vend, cand["subckt"], roles))
+    record_consent([wrap, vend], source, part={
+        "part": safe_part(part), "wrapper": wrap, "file": vend, "original": cand["file"],
+        "subckt": cand["subckt"], "pins": " ".join(cand["pins"]), "roles": " ".join(roles),
+        "sha256": hashlib.sha256(cand["data"]).hexdigest(), "disabled": disabled})
+    return wrap, vend
+
+
+def installed_candidates(part):
+    """Candidates for `part` from model files already in the per-user models
+    folder with consent (e.g. added before FS-029): [candidate], best first."""
+    out = []
+    md = user_models_dir()
+    for name, rec in consents().items():
+        fn = rec.get("file", name)
+        if wrapper_part(fn) or "__" in fn:
+            continue
+        p = os.path.join(md, fn)
+        try:
+            with open(p, "rb") as fh:
+                data = fh.read()
+            out += [c for c in model_candidates(fn, data, part) if c["score"] >= 4]
+        except (OSError, ValueError):
+            continue
+    out.sort(key=lambda c: -c["score"])
+    return out
 
 
 # =====================================================================

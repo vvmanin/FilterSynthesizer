@@ -15,7 +15,7 @@
     "MAX9636 / MAX9637 / MAX9638": {"A_ol": 1e5, "GBWP_hz": 1.5e6,  "Ro_ohm": 100,  "description": "", "spice_model": "MAX9636", "en_nV_rtHz": null, "in_pA_rtHz": null},
     "MAX40100":                 {"A_ol": 1.41e6, "GBWP_hz": 1.5e6,  "Ro_ohm": 100,  "description": "", "spice_model": "MAX40100", "en_nV_rtHz": null, "in_pA_rtHz": null},
     "TL072H":                   {"A_ol": 5.6e5,  "GBWP_hz": 5.25e6, "Ro_ohm": 125,   "description": "", "spice_model": "TL072H", "en_nV_rtHz": null, "in_pA_rtHz": null},
-    "LM358B":                   {"A_ol": 1.4e5,  "GBWP_hz": 1.2e6,  "Ro_ohm": 300,  "description": "", "spice_model": null, "en_nV_rtHz": null, "in_pA_rtHz": null},
+    "LM358B":                   {"A_ol": 1.4e5,  "GBWP_hz": 1.2e6,  "Ro_ohm": 300,  "description": "", "spice_model": "LM358B", "en_nV_rtHz": null, "in_pA_rtHz": null},
     "OPA1656":                  {"A_ol": 5e6,    "GBWP_hz": 20e6,   "Ro_ohm": 26,   "description": "", "spice_model": "OPA1656", "en_nV_rtHz": null, "in_pA_rtHz": null},
     "TLV9001 / TLV9002 / TLV9004": {"A_ol": 1e5,    "GBWP_hz": 1e6,   "Ro_ohm": 1200,   "description": "", "spice_model": "TLV9002", "en_nV_rtHz": null, "in_pA_rtHz": null}
   }

@@ -284,14 +284,17 @@ def build_export(sections_data, vs=5.0, mc_params=None, spec="filter",
                     (LTspice_Library/cells/<template>.asc) when there is one;
                     False = auto-layout for every section.
     generic_vendor: sections whose dummy needs a vendor model file use FS
-                    generic (the library's A_ol / GBWP / Ro) instead.
+                    generic (the library's A_ol / GBWP / Ro) instead. A part
+                    whose vendor model is not installed uses FS generic in any
+                    case (FS-029; info 'not_installed', one warning per part).
     spec_brief    : [lines] -- the overall filter spec, written into every
                     file's header.
     hf_hump       : {db, f_hz, am_sections} of the tool's HF-hump check; a
                     recommendation is written into the headers when >= 1 dB.
     Vendor model files the user added with consent (spice_opamps.consents)
-    travel in the zip and are referenced by bare name; other installed files
-    by absolute path; a file not installed by the name the dummy writes.
+    travel in the zip and are referenced by bare name (an FS_<PART>.lib wrapper
+    together with the vendor copy it includes); other installed files by
+    absolute path.
     Returns {files: {name: text}, extra_files: {name: path}, zip_name,
              cascade (IR), sections: [info], warnings: [str],
              expected: [(probe, f, loaded, unloaded)], all_generic, asc_error,
@@ -310,7 +313,7 @@ def build_export(sections_data, vs=5.0, mc_params=None, spec="filter",
     # ---- IR per section, op-amp models, cascade ----
     lib = SO.dummies()
     fsd = lib[SO.FS_GENERIC]
-    models, real, stage_dummy = {}, {}, {}
+    models, real, stage_dummy, fallback = {}, {}, {}, {}
     irs_tool, irs_spice, info, warnings = [], [], [], []
     for w in fsd["warnings"]:
         warnings.append(f"Op-amp library: {w}")
@@ -324,9 +327,15 @@ def build_export(sections_data, vs=5.0, mc_params=None, spec="filter",
                    "fails the dummy check (" + "; ".join(dm["errors"]) + ")")
             warnings.append(f"Section {n}: SPICE model '{stem}' {why} -- FS generic used")
             dm = None
-        simplified = bool(generic_vendor and dm is not None and not dm["fs_generic"]
-                          and SO.vendor_files(dm))
-        if simplified:
+        vf = SO.vendor_files(dm) if dm is not None and not dm["fs_generic"] else {}
+        simplified = bool(generic_vendor and vf)
+        not_installed = [nm for nm, pth in vf.items() if pth is None]
+        if simplified or not_installed:            # FS-029: per part, never a broken file
+            if not_installed and not simplified:
+                fb = fallback.setdefault(stem, {"files": not_installed, "sections": [],
+                                                "source": dm["meta"].get("source", "")})
+                fb["sections"].append(n)
+            simplified = True
             dm = None
         if dm is None or dm["fs_generic"]:
             key = (p["A_ol"], p["GBWP_hz"], p["Ro_ohm"])
@@ -357,9 +366,17 @@ def build_export(sections_data, vs=5.0, mc_params=None, spec="filter",
                      "model": xmodel, "stem": dm["stem"], "fs_generic": dm["fs_generic"],
                      "dummy": dm, "params": p, "drawing": "auto-layout",
                      "template": ir_sp["template"], "floating": fl,
-                     "simplified": stem if simplified else None})
+                     "simplified": stem if simplified else None,
+                     "not_installed": stem in fallback and n in fallback[stem]["sections"]})
     casc = SC.cascade_ir(irs_spice)
     all_generic = not real
+    for stem, fb in fallback.items():
+        many = len(fb["sections"]) > 1
+        warnings.append(
+            f"{stem} (section{'s' if many else ''} {', '.join(map(str, fb['sections']))}): "
+            f"its vendor model is not imported yet, so {'these sections use' if many else 'it uses'} "
+            f"FS generic with the library's A_ol / GBWP / Ro. Download the model from "
+            f"{fb['source'] or 'the vendor'} and import it under Vendor model files.")
 
     # ---- vendor model files: bundled with consent, else referenced ----
     vendor, bundle = {}, set()
@@ -375,17 +392,9 @@ def build_export(sections_data, vs=5.0, mc_params=None, spec="filter",
                 v["missing"].append(name)
             elif SO.is_consented(path):
                 v["bundled"].append(name)
-                bundle.add(path)
+                bundle.update(SO.model_closure(path))   # a wrapper + its vendor copy
             else:
                 v["unconsented"].append(name)
-        if v["missing"]:
-            warnings.append(
-                f"{stem} (section{'s' if len(v['sections']) > 1 else ''} "
-                f"{', '.join(map(str, v['sections']))}) needs the vendor model file "
-                f"{', '.join(v['missing'])}, which is not installed. Download it from "
-                f"{v['source'] or 'the vendor'} and add it under Vendor model files, or "
-                f"export with the simplified generic model. Until then LTspice stops "
-                f"with an unknown-subcircuit error.")
     tpls = {}
     for inf in info if templates else ():
         t = SO.cell_template(inf["template"])
@@ -435,6 +444,8 @@ def build_export(sections_data, vs=5.0, mc_params=None, spec="filter",
                f"{o['subckt']}"
 
     def model_note(inf):
+        if inf["not_installed"]:
+            return f"{inf['model']} (FS generic, {inf['simplified']}'s vendor model not imported)"
         if inf["simplified"]:
             return f"{inf['model']} (FS generic, simplified in place of {inf['simplified']})"
         if inf["fs_generic"]:
@@ -563,7 +574,8 @@ def build_export(sections_data, vs=5.0, mc_params=None, spec="filter",
             extra[os.path.basename(d["asy"])] = d["asy"]
         for p in d["files"].values():
             if p in bundle:
-                extra[os.path.basename(p)] = p
+                for q in SO.model_closure(p):
+                    extra[os.path.basename(q)] = q
     files["README.txt"] = _readme(spec, now, vs, info, r_bands, c_tol, runs, dist,
                                   grid, expected, dev, warnings, files, real, extra,
                                   bundle, all_generic, vendor, brief, hf)
@@ -613,7 +625,9 @@ def _readme(spec, now, vs, info, r_bands, c_tol, runs, dist, grid, expected, dev
           "  values you can read and edit."]
     for name in extra:
         L.append(f"  {name:<18} used by an op-amp model (keep it next to the .asc/.cir)"
-                 + ("; VENDOR FILE, see below" if os.path.basename(name) in
+                 + ("; wrapper generated by the tool around the vendor file"
+                    if SO.wrapper_part(name) else
+                    "; VENDOR FILE, see below" if os.path.basename(name) in
                     {os.path.basename(p) for p in bundle} else ""))
     if bundle:
         L += ["",
@@ -693,7 +707,10 @@ def _readme(spec, now, vs, info, r_bands, c_tol, runs, dist, grid, expected, dev
                      "the .asc / .cir)" if n in v["missing"] else
                      f" (absolute path {v['files'][n]})") for n in v["files"]))
     for inf in info:
-        if inf["simplified"]:
+        if inf["not_installed"]:
+            L.append(f"  Section {inf['n']}: FS generic with the library's values in place "
+                     f"of {inf['simplified']} -- its vendor model is not imported yet.")
+        elif inf["simplified"]:
             L.append(f"  Section {inf['n']}: simplified -- FS generic with the library's "
                      f"values in place of {inf['simplified']} (its vendor model not used).")
     if real:

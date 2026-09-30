@@ -132,9 +132,8 @@ first.
 
 | ID | Title | P | State | Effort | Depends on |
 |---|---|---|---|---|---|
-| FS-008 | LTspice export with Monte Carlo presets (AC + MC; design note) | P1 | ACTIVE | plan xhigh / build high | FS-005 (hard, done) |
-| FS-009 | Noise analysis in LTspice output | P2 *(s)* | PROPOSED | medium | FS-008 (hard) |
-| FS-010 | QSpice compatibility | P3 | PROPOSED | medium | FS-008 (hard) |
+| FS-009 | Noise analysis in LTspice output | P2 *(s)* | PROPOSED | medium | FS-008 (hard, done) |
+| FS-010 | QSpice compatibility | P3 | PROPOSED | medium | FS-008 (hard, done) |
 | FS-011 | Project save / load | P2 | PROPOSED | high | FS-003 (done), FS-007 (soft, done) |
 | FS-012 | AI integration (external API/MCP or built-in assistant) | P2 | PROPOSED | plan xhigh / build high | FS-011 (soft) |
 | FS-013 | All-pass (phase) responses + all-pass cells | P3 | PROPOSED | max | FS-006 (soft) |
@@ -149,15 +148,15 @@ first.
 | FS-023 | PDF report: group-delay detail plot for delay responses | P3 *(s)* | PROPOSED | medium | FS-006 (hard), FS-022 (soft) |
 | FS-024 | Step and impulse response plots (design vs realized) | P3 *(s)* | PROPOSED | high | — |
 | FS-025 | Gaussian and other non-overshooting responses | P3 *(s)* | PROPOSED | plan xhigh / build high | FS-006 (hard), FS-024 (soft) |
-| FS-026 | LTspice transient export (step; impulse from the step) | P2 *(s)* | PROPOSED | high | FS-008 (hard), FS-024 (hard) |
-| FS-027 | Realized response with inter-stage loading (feasibility first) | P3 *(s)* | PROPOSED | plan high / build high | FS-008 (hard) |
+| FS-026 | LTspice transient export (step; impulse from the step) | P2 *(s)* | PROPOSED | high | FS-008 (hard, done), FS-024 (hard) |
+| FS-027 | Realized response with inter-stage loading (feasibility first) | P3 *(s)* | PROPOSED | plan high / build high | FS-008 (hard, done) |
 | FS-028 | Topology solver performance — analysis first | P2 *(s)* | VALIDATING (Stage 1 analysis) | analysis xhigh / build per finding | — |
-| FS-029 | Vendor op-amp model download from the app (after a disclaimer) | P3 *(s)* | PROPOSED | medium | FS-008 (hard) |
+| FS-029 | Vendor op-amp model import (guided download, per-part wrapper; FS-008's open items) | P1 *(s)* | ACTIVE | medium | FS-008 (hard, done) |
 
 *(s)* = suggested priority, awaiting maintainer confirmation.
 
-Suggested order: FS-008 (the P1 track; FS-005 and FS-006 are
-done); FS-007 is done (built before FS-016, whose gaps it gates). The UI polish
+Suggested order: FS-029 (the P1 track: FS-008 is done, its open items continue
+there; FS-005 and FS-006 are done); FS-007 is done (built before FS-016, whose gaps it gates). The UI polish
 track FS-001 → FS-004 is done.
 
 Non-urgent follow-ups added 2026-09-27, ranked by implementation convenience
@@ -174,54 +173,19 @@ stage assignments); FS-007 gates today's pairer gaps (FS-016 may relax its gate 
 Op-amp data items: FS-018 before FS-009 (it defines how the noise fields are
 sourced) and before FS-019 (additions follow its curation rule).
 
-SPICE track: FS-008 (AC + Monte Carlo) first; FS-026 (transient) after both
+SPICE track: FS-008 (AC + Monte Carlo) done, FS-029 (vendor model import)
+closes its open items; FS-026 (transient) after both
 FS-008 and FS-024; FS-009 / FS-010 plug into FS-008's bundle builder and IR;
 FS-027 (loaded realized response) reuses FS-008's IR and MNA.
 
 ---
-
-### FS-008 — LTspice export with Monte Carlo presets
-- **State:** ACTIVE (phase 1 built, 1b OK 2026-09-28; phase 2 `.asc` by auto-layout + phase-4 model plumbing built 2026-09-29, 2b OK 2026-09-29; phase 3 hand-drawn templates built 2026-09-29 from the maintainer's 18 templates, checked in LTspice 2026-09-29 incl. MFB_N — OK; next round (feedback items 1-4 + refinements, AM templates, real op-amp models wired) built 2026-09-30 — waiting on the maintainer's LTspice check)
-- **Priority:** P1
-- **Effort:** plan xhigh / build high
-- **Tiers:** D (new modules; Tier A/B/C and the TF cache untouched)
-- **Depends on:** FS-005 (hard, done)
-- **Contracts:** §6 (Solution schema is the writer's input — correct its stale keys: R8, `C1a/C1b/C1_parallel`, absent = 0.0 or None); §1 relied on read-only (`topo_for_name`, `all_cells`, `derive_nonideal` for the dev check)
-- **Files:** new `spice_cells.py` (netlist IR per cell superset with open/short gating, `mna_ac`, DC-path check), new `spice_export.py` (no Streamlit: `.asc` model, template transform, auto-layout, column assembly, export-time connectivity self-check, values/MC/directives, FS generic subckt, zip + README), new `spice_ui.py` (Streamlit block), `response_tab.py` (one call after the MC settings), new `LTspice_Library/` (`symbols.asc` calibration, `cells/` superset templates, `opamps/` dummies + `_seat_template.asc`, `models/` for user-supplied model files, `tools/opamp_openloop.asc`), new `dev/fs008/check_spice_export.py` and `dev/fs008/make_opamp_dummy.py`, `FilterSynthesizer.spec` + `build.bat` + `launcher.py` (data dir, env var `FILTERSYNTHESIZER_LTSPICE_DIR`), `opamp_library.json` (`spice_model` = dummy stem, phase 3), `docs/ARCHITECTURE.md`, `docs/CONTRACTS.md` §6, `CLAUDE.md` (new-cell checklist: + IR entry, + optional template)
-- **Goal:** One zip download with LTspice schematics of the whole solved cascade (sections in series, so real inter-stage loading), op-amps copied from a local library of one-op-amp dummy `.asc` files, split supply ±Vs/2 around GND, AC nominal + AC Monte Carlo pre-set from the tool's MC settings — opens and simulates directly.
-- **Scope:**
-  - In — `<spec>_AC.asc` (nominal) and `<spec>_AC_MC.asc` (MC) + `README.txt`; sections stacked in a column (section 1 on top), joined by net labels; drawing per section from an exact-variant template → family superset template (gated: open parts deleted, shorted parts replaced by a wire) → auto-layout fallback, every section re-checked against the IR at export (a mismatching drawing is never written); op-amp dummies (LTspice built-in part / part + external `.lib` / model in a directive block) mapped by `spice_model`, copied into fixed-coordinate **seats** in each cell (adapter wiring in the dummy makes any symbol fit; one copy per instance, no shared labels, directives once per file), FS generic dummy (the tool's A_ol/GBWP/Ro model) for Ideal / Custom / unmapped parts; dummy check, dummy generator and open-loop harness for the maintainer's library work; Vs input (default 5 V); LTspice 24.x only; MC as `.param` per tolerance band + `.func TOL` + `.step param run` + `.save V(out)` + `.meas` probes; UI block in Resulting Response; hooks for FS-026 (source abstraction, per-analysis directives, bundle builder).
-  - Out — transient (FS-026, after FS-024), MC in the time domain (maintainer decision), noise (FS-009), QSpice (FS-010), ideal inter-stage buffers (maintainer: real cascade only), UniversalOpamp modes, MC run 1 as nominal, LTspice XVII, choosing which dummies ship (maintainer), shipping or embedding vendor model files, a loaded realized response inside the tool (FS-027).
-- **Validation:**
-  - `python dev/fs008/check_spice_export.py`: IR vs every cell's non-ideal TF for all 92 cells (80 registry + 12 first-order, random values, |ΔH| ≤ 1e-9·max|H|, split-cap and AM R8 ≠ R7 variants); DC-path check per cell; value formatting round trip (no bare `M`/`F`, ASCII only); `.asc` round trip — re-extracted connectivity equals the IR for auto-layout and every template × variant; MC band assignment equals `hw_plots._r_tol_frac`; buffered cascade MNA equals the tool's product ≤ 1e-9 and the loaded deviation is reported; FS generic Ideal clamp ≤ 1e-6 dB.
-  - `python verify.py` still passes.
-  - Maintainer, LTspice 24, one design per family (SK / MFB / AM × LP/HP/BP/notch, first-order ni/inv): both files open and run without errors; with FS generic dummies the `.meas` values match the README's loaded-MNA expectations ≤ 0.01 dB; MC `.meas` spread comparable to the tool's p1–p99 band; the note's §15.2 [verify] list; FS generic, a built-in-part dummy and an external-`.lib` dummy all fit the same template seat and run at the chosen Vs.
-- **Open questions:** none (answered 2026-09-28 — see Notes and the design note §17).
-- **Notes:**
-  - Design note: `dev/FS-008_ltspice_export_design_note.md` (decisions §0, caveats, build phases §14, validation §15; guides: Appendix A.3a coordinates for op-amp dummies and seats, Appendix B drawing cell templates).
-  - Staging (maintainer, 2026-09-28, second session): **netlist first**. Phase 1 = `.cir` netlists with the FS generic ("universal") model for fast validation; phase 2 = `.asc` by auto-layout; phase 3 = hand-drawn templates; phase 4 = real op-amp models (4a netlist, 4b dummies in seats). Final target unchanged (design note §14).
-  - Phase 1 built 2026-09-28: `spice_cells.py` (IR for all 92 cells, `mna_ac`, DC path, designators, `python spice_cells.py <TEMPLATE>` drawing spec), `spice_export.py` (netlist writer, FS generic subckt, MC block, probes, README, zip), `spice_ui.py` + one call in `response_tab.py`, `dev/fs008/check_spice_export.py` (checks 1-7 pass: IR = every cell's non-ideal TF to 4e-11; netlist parsed back and solved = IR to 1e-8; all 92 cells have a DC path). CONTRACTS §6 Solution schema corrected. `LTspice_Library/`, packaging and `opamp_library.json` changes move to phases 2-4.
-  - Phase 1b (maintainer, 2026-09-28): netlists checked in LTspice 24 — OK.
-  - Phase 2 built 2026-09-29 (with the phase-4 model plumbing, maintainer request: both `.cir` and `.asc` use the op-amp model library): new `spice_asc.py` (`.asc` parse/serialize, symbol calibration, connectivity §4.2, seats, auto-layout + column, export self-check §4.3, geometry→netlist), new `spice_opamps.py` (dummy library + user overlay, dummy check App. A.4, X-line pin order from adapter wiring / `.asy` / `;FS: pins=`, `.lib` resolution, supply range), `spice_export.py` (`.asc` + `.cir` in one zip; FS-generic `.cir` byte-identical to phase 1; per-section dummy model in both files; include-model-files option), `spice_ui.py` (per-section model override, library status), `topology_tab` Edit popover gains *SPICE model* (`spice_model`), `LTspice_Library/` (`symbols.asc`, `_FS_generic`, `_seat_template`, `_cell_template`, `models/` git-ignored) written by `dev/fs008/make_ltspice_library.py`, `dev/fs008/make_opamp_dummy.py` (kinds B/C with pin-order wrapper), packaging (`.spec` datas, `build.bat` copy, `launcher.py` `FILTERSYNTHESIZER_LTSPICE_DIR`). Checks: `check_spice_export.py` 1-8 + 10 pass (4b: all 92 cells drawn, re-read, netlisted from geometry and solved = IR ≤ 1.3e-9; drawing lines == `.cir` lines on 3 cascades; 12 corrupted drawings rejected; 10: embedded-subckt + wrapper, external `.lib`, custom `.asy` dummies solve = IR in both files); `verify.py` passes; app exercised (export block renders, no server errors). Not yet: `spice_model` values for shipped parts (maintainer's models), hand-drawn templates (phase 3), open-loop harness `tools/opamp_openloop.asc` (A.6).
-  - Decision (maintainer, 2026-09-28): the `.cir` format is preserved, and every export cycle zips the `.cir` netlists together with the `.asc` schematics (design note §0, §7, §14).
-  - Decisions (maintainer, 2026-09-28): export from the tool, opened in LTspice; `.asc` schematic, hybrid (hand-drawn superset templates per family + gating, reliable handling of optional and shorted parts); one file = whole cascade in series, column layout, net-label joins; op-amps from a local library of dummy `.asc` files, copied per section, user may swap them later; supply entered in the tool, drawn as two Vs/2 sources with GND at the midpoint; real cascade only; separate nominal and MC files (random functions never return nominal); v1 = AC + AC MC; transient split out to FS-026.
-  - Decisions, second round (maintainer, 2026-09-28): designators `R201` / `C202A` / `U201`; default Vs 5 V; LTspice 24.x only; op-amps copied from dummies into fixed-coordinate seats (hierarchical block with a unified symbol kept as the documented alternative); no MC-run-1 nominal — nominal only in its own file; which dummies ship is the maintainer's call (guidelines: design note Appendix A); loaded realized response in the tool → FS-027, decided on feasibility.
-  - The tool's realized response ignores inter-stage loading (plain product of unloaded sections) — LTspice differs in the far stopband by design; validation compares against the IR's loaded-cascade MNA instead.
-  - Vendor model files are never shipped or embedded; dummies reference them (`.lib`) or use LTspice built-in symbols.
-  - Phase 2b (maintainer, 2026-09-29): export checked in LTspice — works, curves as expected, converge with the tool's Monte Carlo plot.
-  - Phase 3 built 2026-09-29: the maintainer drew 18 templates (`LTspice_Library/cells/`: SK LP/HP/BP/N, MFB LP/HP/BP/BP1HP/BP1LP/LPn/LPn_LS/HPn/HPn2/N, first-order ni/inv LP/HP; split slots C1b / C2b in each). `spice_asc.draw_template`: parts gated by the IR states (open → deleted, short → wire between its pins, unused split slot → deleted), a merged node's lone label dropped, dangling stubs pruned (a net's only label rides back to the surviving junction), seats emptied and filled with the section's dummy (INN accepted anywhere on the left edge above the centre — the templates use −16 — with a jog to the standard −32), each section checked on its own and auto-laid-out if its template fails (reason in the README / UI *Drawing* column). `spice_cells`: non-QE MFB LP/HP/BP now **short** p→GND (R6 / R4) instead of leaving p floating, so the drawing shows In+ grounded (netlist unchanged); `gating()`, `cascade_net()`. `spice_opamps.cell_template()` (user overlay wins); dummies accept `!;FS:` metadata. Check 11: 167 variants (plain + split C1 / C2) of every templated cell drawn, re-read and solved = IR ≤ 2.2e-9, no loose stubs; LMV358A / MAX9636 seated. First run rejected MFB_N.asc (R1 drawn a–p, the cell has in–p); the maintainer redrew it and moved every INN stub to the standard −32 (the edge-jog tolerance stays for future templates) — check 11 then: 173 variants, all pass. Phase 3 check (maintainer, 2026-09-29): generated schematics incl. MFB_N simulate without errors, plots as expected. AM stays auto-layout by decision (net-label outputs).
-  - Next round (maintainer feedback 2026-09-29, deferred): (1) no *Include model files in the zip* option — vendor models are copyrighted; the README / dummy carries a link to the product page instead; (2) the per-section *SPICE model* selectboxes are debug-only — the model is picked automatically from the Topology tab's op-amp, through an internal matching table (library part name → dummy stem; `MAX9636/MAX9637/MAX9638` → `MAX9636`), probably kept in the library file; (3) auto-layout stays for cells without a finished template, with wider part spacing so the net labels read; (4) when a design uses a part whose dummy needs a vendor model file, show an unchecked *Export <parts> with simplified generic models* checkbox; unchecked → warn that the vendor model must be downloaded by hand.
-  - Next round built 2026-09-30 (maintainer feedback 2026-09-29 + refinements, same session plan): (1) the *Include model files in the zip* option is gone; vendor model files are never shipped or fetched by the app — the user downloads them and adds them in *Vendor model files* (a `.lib` or the vendor's zip; `spice_opamps.install_model` takes only the file the dummy's `.include` names, one nested zip deep, by base name — no path extraction; encrypted / non-SPICE files rejected) after a disclaimer + consent (`consent.json` in the per-user `models/`, created by `ensure_user_dirs`); consented files are bundled into the user's own zip by bare name, with a DO-NOT-SHARE notice in the README. Legal basis (checked 2026-09-30): the TI model files carry TI copyright (OPA1656: all rights reserved) and no redistribution grant; TI's Important Notice grants use "only for development of an application that uses the TI products" and prohibits other reproduction — so the project never ships them, while the licensee's own local copy and own working zip are use, not redistribution (not legal advice; other vendors' terms are their own). (2) model picked automatically: `opamp_library.json` `spice_model` = dummy stem (AD8505, LMV358A, MAX9636, MAX40100, TL072H, OPA1656, TLV9002; LM358B none → FS generic); the per-section selectboxes only with `FILTERSYNTHESIZER_DEBUG=1`. (3) auto-layout wider: parts 256, seats 640, label stubs 48. (4) *Export <parts> with simplified generic models* (unchecked): off → the vendor dummy, a warning with the vendor link when its file is not installed (a missing `.lib` is now a dummy state, not a rejection); on → FS generic with the library's values (`simplified`). Refinements: nominal `.asc` carries `.save V(OUT)` (auto-plot with phase, as MC; the frozen `.cir` unchanged); every header + README carries a one-line spec (`report_spec_brief`: type, order, fc / f1-f2, ripple for Chebyshev / Elliptic, A_s for Inverse Chebyshev / Elliptic / notches, passband gain); the tool's HF-hump finding (≥ 1 dB) writes a recommendation (lower Ro / higher GBWP, MFB for AM) into the headers and README. AM templates (maintainer, 8 files): the three seats were all `;SEAT U1` — renumbered U1/U2/U3 left to right (text edit), AM_BP's input label `a` → `IN` (in 2BP-AM a = in by a part-less wire; `python spice_cells.py AM_BP` now prints it); all 26 templates pass check 11. Op-amp list (maintainer revision): TL072H / LM358B / TLV9001-4 added, TL072 / LM358 / NE5532 removed (obsolete; a saved design naming one falls back to Ideal); OPA1656 GBWP 20 MHz / A_ol 5e6 = deliberate worst case; dummy fixes OPA1656 vs_max 36 V, TLV9002 1.8-5.5 V, `tlv9002.asc` → `TLV9002.asc`; `nonideal_solver` / `scoring` demo defaults → TL072H / LM358B. Checks: `check_spice_export.py` all pass incl. new check 12 (missing / simplified / zip install incl. a path-traversal member / rejections / consent bundle = IR / headers / wider auto-layout); `verify.py` passes; app exercised (TL072H section → vendor panel + simplified toggle, no server errors); spec brief read via AppTest (Butterworth, Elliptic). Maintainer to check in LTspice: the AM templates, the nominal `.asc` auto-plot, the header text, a consented TI model bundled and run from a clean folder. Automatic download → FS-029.
-  - Found in the maintainer's LTspice 26 check (2026-09-30): a design mixing two TI parts (LMV358A + TL072H) fails -- TI's Green-Williams-Lis macro-models define their helper subckts at file top level under shared generic names (`VOS_SRC_0`, `VNSE_0`, `VCCS_LIM_ZO_0`, ...; 15 shared between the two files, 12 with different bodies), so one flat netlist holds two definitions of one name. A single TI model per design is fine. Proposed fix: wrap each vendor model in its own scope, `.subckt <MODEL>_W inp inn vp vn out` / `.include <file>` / `XW inp inn vp vn out <MODEL>` / `.ends`, so its helpers become local (X lines use `<MODEL>_W`). Pending the maintainer's LTspice test of two netlists written into the export folder: A = `.include` inside the wrapper (preferred: the model file stays unmodified), B = the model text pasted inside the wrapper (fallback). Then: build the working variant into `.cir` and `.asc`, plus a check for vendor models with colliding helper names. Workaround until then: one TI part per design, or *simplified generic models*.
-  - Rule for new cells (maintainer, 2026-09-29): every cell added by a topology expansion (FS-013, FS-014 follow-ups, …) must be checked for its LTspice outputs — the `spice_cells.py` IR entry (check 1), then either a template in `LTspice_Library/cells/` (check 11) or it stays flagged as auto-layout (check 11 lists the templates missing) until its `.asc` is shipped.
-- **Updated:** 2026-09-30 (next round built)
 
 ### FS-009 — Noise analysis in LTspice output
 - **State:** PROPOSED
 - **Priority:** P2 (suggested)
 - **Effort:** medium
 - **Tiers:** D
-- **Depends on:** FS-008 (hard)
+- **Depends on:** FS-008 (hard, done)
 - **Contracts:** —
 - **Files:** `spice_export.py`, `opamp_library.py` (noise densities)
 - **Goal:** The exported file includes a ready-to-run output-noise analysis.
@@ -236,7 +200,7 @@ FS-027 (loaded realized response) reuses FS-008's IR and MNA.
 - **Priority:** P3
 - **Effort:** medium
 - **Tiers:** D
-- **Depends on:** FS-008 (hard)
+- **Depends on:** FS-008 (hard, done)
 - **Contracts:** —
 - **Files:** `spice_export.py`
 - **Goal:** A QSpice-flavoured export alongside LTspice.
@@ -458,7 +422,7 @@ FS-027 (loaded realized response) reuses FS-008's IR and MNA.
 - **Priority:** P2 (suggested)
 - **Effort:** high
 - **Tiers:** D
-- **Depends on:** FS-008 (hard — writer, bundle builder, hooks), FS-024 (hard — time window and step metrics)
+- **Depends on:** FS-008 (hard, done — writer, bundle builder, hooks), FS-024 (hard — time window and step metrics)
 - **Contracts:** —
 - **Files:** `spice_export.py` (`tran` directives, step source, impulse probe node), `spice_ui.py` (transient options), README template
 - **Goal:** The LTspice bundle gains a nominal step-response file whose window and amplitudes come from the tool's own time-domain evaluation, with the impulse response derived from the step.
@@ -473,7 +437,7 @@ FS-027 (loaded realized response) reuses FS-008's IR and MNA.
 - **Priority:** P3 (suggested)
 - **Effort:** plan high / build high
 - **Tiers:** D (C-adjacent: the realized-response evaluation, not the solvers)
-- **Depends on:** FS-008 (hard — reuses its netlist IR and `mna_ac`)
+- **Depends on:** FS-008 (hard, done — reuses its netlist IR and `mna_ac`)
 - **Contracts:** — (solvers and scoring stay per-section and unloaded)
 - **Files:** `spice_cells.py` (two-port / cascade evaluation), `hw_plots.py` (`monte_carlo`, `cascade`), `response_tab.py` (realized curve, group delay), `report_pdf.py` / `report_ui.py` (same curves), `docs/ARCHITECTURE.md`
 - **Goal:** The Resulting Response tab (and report) shows the realized cascade *with* inter-stage loading — each section's op-amp output impedance driving the next section's input — so it matches the LTspice export instead of an unloaded product.
@@ -508,21 +472,29 @@ FS-027 (loaded realized response) reuses FS-008's IR and MNA.
 
 ---
 
-### FS-029 — Vendor op-amp model download from the app
-- **State:** PROPOSED
-- **Priority:** P3 (suggested)
+### FS-029 — Vendor op-amp model import (guided download, per-part wrapper)
+- **State:** ACTIVE (built 2026-09-30 — waiting on the maintainer's LTspice checks, see Validation)
+- **Priority:** P1 *(s)* (carries FS-008's open items: a design mixing two TI parts fails in LTspice until the wrapper is confirmed)
 - **Effort:** medium
-- **Tiers:** D (`spice_opamps`, `spice_ui`)
-- **Depends on:** FS-008 (hard — dummies, *Vendor model files* panel, `install_model`, consent)
+- **Tiers:** D (`spice_opamps`, `spice_export`, `spice_ui`, 4 TI dummies; Tier A/B/C and the TF cache untouched)
+- **Depends on:** FS-008 (hard, done — dummies, *Vendor model files* panel, `install_model`, consent)
 - **Contracts:** —
-- **Files:** `spice_opamps.py` (fetch + the existing `install_model`), `spice_ui.py` (a *Download* button per missing model), dummies (`;FS: model_url=` per part)
-- **Goal:** One click fetches a missing vendor model into the per-user models folder, instead of the user downloading the zip and adding it by hand.
-- **Scope:** In — per-dummy direct model link (`model_url`, maintainer-verified), fetch only after the FS-008 disclaimer + consent and an explicit *I accept the vendor's terms* tick naming the vendor's terms page, the same `install_model` extraction, clear failure fallback to the manual path. Out — any model the project ships or mirrors, scraping product pages, encrypted models.
-- **Validation:** fetch + install of each linked model on a clean profile; a changed / dead link and a blocked request fall back to the manual path with a message; nothing is fetched without consent.
-- **Open questions:** whether an in-app fetch is acceptable under each vendor's terms (it skips the vendor's own download page); vendor bot protection and revision-numbered links (TI `lit/zip/SBOM…`).
-- **Notes:** Split out of the FS-008 next round (maintainer, 2026-09-30: links + folder + upload first, automatic download later).
-  - Build on the FS-008 per-model subckt wrapper (FS-008 Notes, 2026-09-30: `.subckt <MODEL>_W inp inn vp vn out` around the vendor `.include`, helpers local). Beyond fixing helper-name collisions, the wrapper can make downloads **subckt-name agnostic**: after a fetch, read the file's top-level `.subckt` lines, pick the model subckt (the one with 5 pins / the part name) and its pin order, and generate the wrapper and dummy from that -- no hand-maintained `Value` / subckt name per dummy, and a vendor rename (`TL07XH_TL08XH` vs `TL072H`) or a new revision does not break the dummy.
-- **Updated:** 2026-09-30
+- **Files:** `spice_opamps.py` (subckt scan, pin roles, wrapper, import, `consent.json` v2 `parts`), `spice_export.py` (per-part FS generic fallback, wrapper + vendor copy bundled), `spice_ui.py` (per-part import panel), `LTspice_Library/opamps/{TL072H,OPA1656,LMV358A,TLV9002}.asc` (Value `FS_<PART>`, `.include FS_<PART>.lib` — text edit of two lines), `dev/fs008/check_spice_export.py` (scoped netlist reader, check 12 step 1, new check 13), new `dev/fs029/make_wrapper_test.py`, `docs/ARCHITECTURE.md`
+- **Goal:** A vendor part's SPICE model is imported by the user in a few clicks from the file they downloaded themselves, stored unchanged, and wrapped so any mix of vendor models runs in one LTspice file; a part without an imported model still exports and simulates.
+- **Scope:**
+  - In — per vendor part in the design: product-page link, consent tick, the user's own zip / model file picked from any folder (zip detected by content, one nested zip deep; any extension; encrypted / non-SPICE / not-5-pin rejected with the reason), the model subckt chosen by name (exact, `X` family wildcard, prefix) and its pin roles read from pin names, a `PINOUT ORDER` note or ADI node-assignment columns — shown for confirmation in 5 selectboxes; stored as `<PART>__<file>` (the vendor's bytes; only top-level-only lines such as a closing `.END` commented out) + the generated `FS_<PART>.lib` wrapper; a consented pre-FS-029 file in models/ offered without a new download; re-import for a new revision; per-part FS generic fallback at export for any part not imported (the global *simplified generic models* checkbox kept); wrapper + vendor copy bundled with the DO-NOT-SHARE README notice.
+  - Out — any in-app fetch or direct file link (links are revision-numbered, may need a login, and would skip the vendor's own terms page), scraping, a Downloads-folder scan (maintainer: picker only), non-zip archives, models with other than 5 pins (shutdown / enable), shipping or mirroring any vendor file, encrypted models.
+- **Validation:**
+  - `python dev/fs008/check_spice_export.py` — all pass, incl. check 13 (synthetic TI- and ADI-style models sharing a helper name: scan + roles, rejections, fallback, import, bundle; `.cir` and `.asc` solve = IR 1.5e-11 through nested scoping and `.include`; the same models flat collide; a lost vendor copy = not imported; legacy file offered). `python verify.py` passes. App block exercised through AppTest: fallback warnings → consent → pin roles → *Import* → sections switch to `FS_<PART>` and the files are bundled.
+  - Maintainer, LTspice: (1) `python dev/fs029/make_wrapper_test.py` writes three netlists with LMV358A + TL072H (your local TI files, output outside the repo): `test_C_flat.cir` should fail (the FS-008 collision), `test_A_include.cir` (what the app builds) and `test_B_pasted.cir` (fallback) should run with both followers at ~0 dB; if A fails and B runs, switch `wrapper_text` to pasting. (2) Import the four TI models in the app from their zips on a clean profile; export a design mixing two TI parts and run it from a clean folder. (3) Carried from FS-008's last round: the AM templates, the nominal `.asc` auto-plot, the header text.
+- **Open questions:** none (answered 2026-09-30: product page, not a direct file link; manual download with consent per part; flat `<PART>__<file>` storage; per-part FS generic fallback at export, global checkbox kept; file picker only).
+- **Notes:**
+  - Re-scoped 2026-09-30 (maintainer): from an automatic in-app download to a guided manual import — links to model files are not stable and vendors ship zips, `.lib`, `.txt`, `.mod`, so the handler reads by content; the wrapper isolates helper-name collisions between vendor models (found in FS-008) and makes the dummies independent of the downloaded file's name and subckt name.
+  - Carried from FS-008 (closed 2026-09-30): TI's Green-Williams-Lis macro-models define helpers at file top level under shared names (`VOS_SRC_0`, `VNSE_0`, `VCCS_LIM_ZO_0`, …; 15 shared between LMV358A and TL07xH, 12 with different bodies), so two TI parts in one flat netlist failed. The wrapper puts them inside `.subckt FS_<PART>`. Its `XV` line comes before the `.include`.
+  - Maintainer LTspice 26 check (2026-09-30): wrapper test A (`.include` inside the subckt) runs, C (flat) fails as expected. An exported design with an imported TL072H then failed: `tl07xh_tl08xh.lib` ends with `.END`, which LTspice allows only at top level. Fix: the stored vendor copy has top-level-only directive lines (`.END`, `.options`, `.temp`, analyses, ...) commented out (`localize_model`; every other byte unchanged; the record lists them under `disabled`); earlier imports are repaired in place once per session (`repair_imports`). The check's netlist reader now rejects such a line inside a subckt, and check 13's TI-style fixture ends with `.END`.
+  - Legal position (not legal advice): part numbers are used only to name the parts (no logos, no suggestion of endorsement); the library's A_ol / GBWP / Ro values are datasheet facts, and the FS generic model is the project's own; vendor files stay on the user's PC and in their own zips, and only the generated wrapper (no vendor text) is the tool's.
+  - `consent.json` is kept and extended (v2: `parts` records wrapper, file, original name, subckt, pins, roles, sha256, source, time) instead of a new `models.json`.
+- **Updated:** 2026-09-30 (re-scoped and built)
 
 ---
 
@@ -538,6 +510,7 @@ FS-002 — Response Plots: phase/GD on main plot, compact sections — DONE 2026
 FS-003 — Fold "Roots & Transfer Function" tab into Response Plots — DONE 2026-09-28 — commit "feat(ui): FS-003/FS-004 …" (4 tabs; grey-framed `rp_roots` block with Domain Scale + Root Locations / Pole-Zero Map / H(s) expanders, `tf_form_roots` radio; CSS 7b compaction; fixed mnemoscheme axis units ignoring `unit_pair`)
 FS-004 — Biquad Pairing tab: compact layout, rad/s note font — DONE 2026-09-28 — same commit (`bp_body` container under CSS 7b; rules and `<br>` removed; units note body-size)
 FS-007 — Custom filter design (coefficients or poles/zeros) — DONE 2026-09-28 — commit "feat(custom): FS-007 Custom H(s) …" (`custom_tf.py`, Response "Custom H(s)" + editor panel; design note `dev/FS-007_custom_tf_design_note.md` incl. §14 build notes / maintainer refinements; checks `dev/fs007/check_custom_tf.py`)
+FS-008 — LTspice export with Monte Carlo presets — DONE 2026-09-30 — f7c83f6 (`spice_cells` / `spice_asc` / `spice_opamps` / `spice_export` / `spice_ui`, `LTspice_Library/` with 26 cell templates; design note `dev/FS-008_ltspice_export_design_note.md`; checks `dev/fs008/check_spice_export.py`; open items — the two-TI-model helper collision and the last round's LTspice checks — moved to FS-029; the rule for new cells lives in `CLAUDE.md`)
 
 ---
 
@@ -548,8 +521,37 @@ described in `docs/manual/user_manual.md` / `quick_start.md`. The manuals are
 updated in batches (`docs/manual/DOC_WORKFLOW.md`: `doc_drift.py`, prose,
 screenshots, `--accept`, PDF build); a batch deletes the entries it covered.
 
-- **FS-008** (LTspice export, phase 1): Resulting Response tab, new block *LTspice export* before *Generate Report* — Supply Vs, MC runs, a per-section model table (FS generic parameters, DC-path status), a loading caption and *Download LTspice netlists (.zip)* (AC nominal + AC Monte-Carlo `.cir` + README).
-  - New widget keys: `spice_vs`, `spice_mc_runs`, `spice_dl`.
+- **FS-008 + FS-029** (LTspice export and vendor model import):
+  - Resulting Response tab, block *LTspice export* before *Generate Report*:
+    Supply Vs, MC runs, a per-section table (cell, op-amp, SPICE model,
+    *Drawing* = cell template or auto-layout, DC path), warnings, the
+    loaded-vs-tool caption and *Download LTspice files (.zip)*: AC nominal and
+    AC Monte-Carlo schematics (`.asc`) and netlists (`.cir`) of the whole
+    cascade + README (spec line, expected probe values, how to run; the
+    nominal `.asc` plots V(OUT) with phase on its own).
+  - The SPICE model follows the Topology tab's op-amp automatically (its
+    `spice_model`); Ideal / Custom / parts without one use FS generic (the
+    tool's A_ol / GBWP / Ro). The Topology op-amp Edit popover has a *SPICE
+    model* field.
+  - Parts with a vendor model (TL072H, OPA1656, LMV358A, TLV9002):
+    *Export <parts> with simplified generic models* checkbox; a part whose
+    model is not imported yet is exported with FS generic anyway (warning).
+    *Vendor model files* expander: status table with product-page links, the
+    disclaimer, and per part: *Open the <part> product page*, a consent tick,
+    a file picker (the vendor's zip or model file from any folder), subckt and
+    pin-role selectboxes to confirm, *Import the <part> model*; *Re-import*
+    for a new revision. The manual should explain: download from the vendor
+    yourself, what is stored (`%LOCALAPPDATA%\FilterSynthesizer\LTspice_Library\models`:
+    `<PART>__<file>` + the generated `FS_<PART>.lib`), and that zips
+    with vendor files must not be shared.
+  - Op-amp list: TL072H, LM358B, TLV9001-4 added; TL072, LM358, NE5532
+    removed (a saved design naming one falls back to Ideal).
+  - New widget keys: `spice_vs`, `spice_mc_runs`, `spice_generic_vendor`,
+    `spice_vendor_consent_{stem}`, `spice_vendor_up_{stem}`,
+    `spice_vendor_sub_{stem}`, `spice_vendor_role_{stem}_{subckt}_{k}`,
+    `spice_vendor_inst_{stem}`, `spice_vendor_redo_{stem}`,
+    `spice_vendor_allow`, `spice_dl`; debug only (`FILTERSYNTHESIZER_DEBUG=1`)
+    `spice_opamp_{n}`.
 - **FS-005** (op-amp library): the Topology tab's per-section op-amp picker now
   lists the JSON library (built-in parts + the user overlay
   `%LOCALAPPDATA%\FilterSynthesizer\opamp_library_user.json`); its Edit popover

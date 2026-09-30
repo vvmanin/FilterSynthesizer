@@ -11,13 +11,17 @@ tab's part -> its `spice_model` dummy stem in the op-amp library (FS generic
 for Ideal / Custom / parts without one). A per-section override is shown only
 with FILTERSYNTHESIZER_DEBUG=1. Parts whose dummy needs a vendor model file
 get the *simplified generic models* checkbox and the *Vendor model files*
-panel (links, disclaimer + consent, upload into the per-user models folder).
+panel (FS-029: per part a product-page link, consent, the user's own zip /
+model file, subckt + pin roles confirmed, imported behind FS_<PART>.lib);
+a part whose model is not imported yet is exported with FS generic.
 All file content comes from spice_export (no Streamlit there); this module
 only gathers the inputs and shows the result. The bundle is plain string
 building, so it is rebuilt on every render -- no Generate button.
 
 Widget keys: spice_vs, spice_mc_runs, spice_opamp_{n} (debug), spice_generic_vendor,
-spice_vendor_consent, spice_vendor_up_{stem}, spice_vendor_allow.
+spice_vendor_consent_{stem}, spice_vendor_up_{stem}, spice_vendor_sub_{stem},
+spice_vendor_role_{stem}_{subckt}_{k}, spice_vendor_inst_{stem},
+spice_vendor_redo_{stem}, spice_vendor_allow.
 """
 
 import pandas as pd
@@ -34,9 +38,11 @@ _FS = "FS generic"
 _DISCLAIMER = (
     "Vendor SPICE models are the vendors' copyrighted files. FilterSynthesizer does not "
     "ship them and never downloads them for you. Download the model yourself from the "
-    "vendor's page (link in the table); by downloading it you accept the vendor's terms. "
-    "A file you add here is stored only on this PC, in your models folder, and is copied "
-    "unmodified into **your own** LTspice export zips, so they run as they are. Vendor "
+    "vendor's product page (link below); by downloading it you accept the vendor's terms. "
+    "A file you import here is stored only on this PC, in your models folder, and is copied "
+    "unmodified into **your own** LTspice export zips, together with a small wrapper the "
+    "tool generates around it, so they run as they are. Until a part's model is imported, "
+    "its sections are exported with the FS generic model. Vendor "
     "terms typically allow use only for your own design work with the vendor's parts "
     "(TI: *only for development of an application that uses the TI products*; other "
     "reproduction prohibited) — **do not share export zips that contain vendor model "
@@ -54,7 +60,8 @@ def _model_text(inf):
         return f"{inf['stem']} · model {inf['model']}"
     p = inf["params"]
     ro = _eng(p["Ro_ohm"]) if p["Ro_ohm"] else "0 "
-    return (("Simplified · " if inf["simplified"] else "")
+    return (("Model not imported · " if inf.get("not_installed") else
+             "Simplified · " if inf["simplified"] else "")
             + f"FS generic · A_ol {_eng(p['A_ol']).strip()} · "
             f"GBWP {_eng(p['GBWP_hz'])}Hz · Ro {ro}Ω")
 
@@ -109,53 +116,128 @@ def _vendor_use(stems, lib):
     return out
 
 
+_ROLE_TEXT = {"INP": "in+", "INN": "in−", "VCC": "V+", "VEE": "V−", "OUT": "out"}
+
+
+def _consent_box(stem, part):
+    return st.checkbox(f"I download the {part} model from the vendor myself, under the "
+                       f"vendor's terms, for my own design work, and will not share export "
+                       f"zips that contain it", key=f"spice_vendor_consent_{stem}")
+
+
+def _import_part(stem, u, part, installed):
+    """FS-029: product-page link, consent, pick the vendor's zip / model file,
+    confirm the model subckt and its pin roles, import behind FS_<PART>.lib."""
+    src = u["dummy"]["meta"].get("source", "")
+    who = ", ".join(u["parts"])
+    if installed and not st.checkbox(f"Re-import the {who} model (a new revision)",
+                                     key=f"spice_vendor_redo_{stem}"):
+        return
+    with st.container(border=True):
+        st.markdown(f"**{who}** — import the vendor model")
+        if src.startswith("http"):
+            st.link_button(f"Open the {part} product page ↗", src)
+        ok = _consent_box(stem, part)
+        up = st.file_uploader("The vendor's zip or model file, from wherever you saved it "
+                              "(.zip, .lib, .txt, .mod, .cir, …)",
+                              key=f"spice_vendor_up_{stem}", disabled=not ok)
+        cands = []
+        if up is not None:
+            try:
+                cands = SO.model_candidates(up.name, up.getvalue(), part)
+            except ValueError as e:
+                st.error(f"{up.name}: {e}")
+                return
+        elif not installed:
+            cands = SO.installed_candidates(part)
+            if cands:
+                st.caption(f"`{cands[0]['file']}` is already in your models folder — it can "
+                           f"be imported without a new download.")
+        if not cands or not ok:
+            return
+        i = 0
+        if len(cands) > 1:
+            i = st.selectbox("Model subcircuit", range(len(cands)),
+                             format_func=lambda k: f"{cands[k]['subckt']}  ({cands[k]['file']}, "
+                                                   f"{len(cands[k]['pins'])} pins)",
+                             key=f"spice_vendor_sub_{stem}")
+        c = cands[i]
+        opts = list(SO.WRAP_PORTS)
+        cols = st.columns(5)
+        roles = [cols[k].selectbox(f"Pin {k + 1} `{pin}`", opts,
+                                   index=opts.index(g) if g in opts else k,
+                                   format_func=_ROLE_TEXT.get,
+                                   key=f"spice_vendor_role_{stem}_{c['subckt']}_{k}")
+                 for k, (pin, g) in enumerate(zip(c["pins"], c["roles"]))]
+        st.caption(f"Subckt `{c['subckt']}` in `{c['file']}`. "
+                   + ("Pin roles read from the model's pin names / pinout note — check them."
+                      if c["confident"] else
+                      "**Pin roles could not be read from the model** — set each from the "
+                      "vendor's pinout note (the comment above its .subckt line)."))
+        if st.button(f"Import the {part} model", key=f"spice_vendor_inst_{stem}", type="primary"):
+            try:
+                wrap, vend = SO.install_wrapped(part, c, roles, src)
+            except (ValueError, OSError) as e:
+                st.error(str(e))
+            else:
+                st.success(f"Imported {vend} (unchanged) behind {wrap}.")
+                st.rerun()
+
+
 def _vendor_panel(use):
-    """Status, links, disclaimer + consent and the upload per vendor model."""
+    """Status, product links, disclaimer + consent and the import per vendor part."""
     rows, need = [], False
+    recs = SO.part_records()
     for stem, u in use.items():
         for name, path in u["files"].items():
+            rec = recs.get(SO.wrapper_part(name) or "")
             if path is None:
-                status = "not installed"
+                status = "not imported — FS generic is used"
                 need = True
-            elif SO.is_consented(path):
-                status = "installed — bundled into the zip"
-            else:
+            elif not SO.is_consented(path):
                 status = "installed — not bundled (no consent recorded)"
                 need = True
+            elif rec:
+                status = (f"imported {rec.get('accepted', '')[:10]}: {rec.get('original')}, "
+                          f"subckt {rec.get('subckt')} — bundled into the zip")
+            else:
+                status = "installed — bundled into the zip"
             rows.append({"Part": ", ".join(u["parts"]), "Sections": ", ".join(map(str, u["sections"])),
                          "Model file": name, "Status": status,
-                         "Vendor page": u["dummy"]["meta"].get("model_url")
-                         or u["dummy"]["meta"].get("source") or ""})
+                         "Vendor page": u["dummy"]["meta"].get("source") or ""})
     with st.expander("Vendor model files", expanded=need):
         st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True,
                      column_config={"Vendor page": st.column_config.LinkColumn("Vendor page")})
         st.caption(f"Your models folder: `{SO.user_models_dir()}`")
         st.info(_DISCLAIMER)
-        ok = st.checkbox("I have read this: store the vendor model files I add on this PC and "
-                         "include them in my own export zips", key="spice_vendor_consent")
         for stem, u in use.items():
-            missing = [nm for nm, p in u["files"].items() if p is None]
-            if not missing:
-                continue
-            up = st.file_uploader(f"Add {' / '.join(missing)} for {', '.join(u['parts'])} "
-                                  f"(the vendor's zip or the model file itself)",
-                                  type=["zip", "lib", "sub", "mod", "cir", "txt"],
-                                  key=f"spice_vendor_up_{stem}", disabled=not ok)
-            done = st.session_state.setdefault("spice_vendor_done", set())
-            if up is not None and ok and (stem, up.name, up.size) not in done:
-                try:
-                    names = SO.install_model(up.name, up.getvalue(), missing)
-                    SO.record_consent(names, u["dummy"]["meta"].get("source", ""))
-                except (ValueError, OSError) as e:
-                    st.error(f"{up.name}: {e}")
-                else:
-                    done.add((stem, up.name, up.size))
-                    st.success(f"Installed {', '.join(names)} in your models folder.")
-                    st.rerun()
+            for name, path in u["files"].items():
+                part = SO.wrapper_part(name)
+                if part:
+                    _import_part(stem, u, part, installed=path is not None)
+                    continue
+                if path is not None:
+                    continue
+                # a user dummy that names the vendor file itself (pre-FS-029)
+                ok = _consent_box(stem, ", ".join(u["parts"]))
+                up = st.file_uploader(f"Add {name} for {', '.join(u['parts'])} "
+                                      f"(the vendor's zip or the model file itself)",
+                                      key=f"spice_vendor_up_{stem}", disabled=not ok)
+                done = st.session_state.setdefault("spice_vendor_done", set())
+                if up is not None and ok and (stem, up.name, up.size) not in done:
+                    try:
+                        names = SO.install_model(up.name, up.getvalue(), [name])
+                        SO.record_consent(names, u["dummy"]["meta"].get("source", ""))
+                    except (ValueError, OSError) as e:
+                        st.error(f"{up.name}: {e}")
+                    else:
+                        done.add((stem, up.name, up.size))
+                        st.success(f"Installed {', '.join(names)} in your models folder.")
+                        st.rerun()
         pending = sorted({nm for u in use.values() for nm, p in u["files"].items()
                           if p is not None and not SO.is_consented(p)})
-        if pending and st.button(f"Bundle the installed {', '.join(pending)} into my zips",
-                                 key="spice_vendor_allow", disabled=not ok):
+        if pending and st.button(f"I accept the vendor's terms for {', '.join(pending)}: "
+                                 f"bundle them into my own zips", key="spice_vendor_allow"):
             try:
                 SO.record_consent(pending)
             except OSError as e:
@@ -189,6 +271,9 @@ def render_spice_export(sections_data, mc_params, hf_hump=None):
                                        "slows down plotting thousands of traces."))
 
     SO.ensure_user_dirs()
+    if not st.session_state.get("_spice_repaired"):   # imports made before localize_model
+        st.session_state["_spice_repaired"] = True
+        SO.repair_imports()
     lib = SO.dummies()
     stems = (_model_picker(sections_data, lib) if DEBUG_UI else
              {sd["n"]: _part_model(sd["n"]) for sd in sections_data})
@@ -199,9 +284,9 @@ def render_spice_export(sections_data, mc_params, hf_hump=None):
         generic = st.checkbox(f"Export {parts} with simplified generic models",
                               key="spice_generic_vendor", value=False,
                               help="On: those sections use FS generic with the library's "
-                                   "A_ol / GBWP / Ro, so no vendor file is needed. Off: the "
-                                   "vendor's SPICE model, which you download yourself (Vendor "
-                                   "model files below).")
+                                   "A_ol / GBWP / Ro. Off: the vendor's SPICE model where you "
+                                   "have imported it (Vendor model files below); a part whose "
+                                   "model is not imported yet uses FS generic anyway.")
         _vendor_panel(use)
 
     data = [dict(d, opamp_label=opamp_label(d["n"]) or "Ideal", spice_model=stems[d["n"]])
