@@ -152,6 +152,8 @@ first.
 | FS-027 | Realized response with inter-stage loading (feasibility first) | P3 *(s)* | PROPOSED | plan high / build high | FS-008 (hard, done) |
 | FS-028 | Topology solver performance — analysis first | P2 *(s)* | VALIDATING (Stage 1 analysis) | analysis xhigh / build per finding | — |
 | FS-030 | Topology tab: section spec resets to default when a solve finishes | P2 *(s)* | PROPOSED | plan high / build medium | — |
+| FS-031 | Group-delay equalizer: all-pass stages appended to a designed filter | P3 *(s)* | PROPOSED | plan xhigh / build high | FS-013 (hard, realization stage only), FS-006 (done) |
+| FS-032 | Magnitude correction of an existing system from measured Bode points | P3 *(s)* | PROPOSED | plan max / build xhigh (per stage) | FS-007 (done); FS-014 (hard, realization stage only); FS-031 (soft) |
 
 *(s)* = suggested priority, awaiting maintainer confirmation.
 
@@ -175,6 +177,13 @@ sourced) and before FS-019 (additions follow its curation rule).
 SPICE track: FS-008 (AC + Monte Carlo) and FS-029 (vendor model import) done; FS-026 (transient) after both
 FS-008 and FS-024; FS-009 / FS-010 plug into FS-008's bundle builder and IR;
 FS-027 (loaded realized response) reuses FS-008's IR and MNA.
+
+Correction track (added 2026-09-30): FS-031 (group-delay equalizer) and FS-032
+(magnitude correction from measured data) both run analysis first and can plan
+in parallel (§1 analysis-only exception). Their ideal stages (math + plots)
+need no new cells; their hardware stages wait on FS-013 (all-pass cells) and
+FS-014 (general LHP zeros) respectively. FS-032's joint phase question is
+answered against FS-031's equalizer — plan FS-031 first.
 
 ---
 
@@ -248,6 +257,7 @@ FS-027 (loaded realized response) reuses FS-008's IR and MNA.
 - **Validation:** |H| flat within tolerance across band; group delay matches target; `verify.py` extended for new cells; TF cache version bumped.
 - **Notes:**
   - New all-pass cells follow FS-008's rule for new cells: IR entry in `spice_cells.py`, then an LTspice template or flagged as auto-layout.
+  - FS-031 (2026-09-30) takes the "group-delay equalization of an existing design" use case (equalizer design math, UI, plots); this item keeps the all-pass family itself — classification, cells, dispatch, scoring, schematics — and FS-031's realization stage waits on it.
   - From FS-007 (maintainer, 2026-09-28): Custom H(s) complete mode takes its type **only** from `custom_tf.detect_type` and refuses a shape it does not recognise. An all-pass (|H| flat, |H(0)| = |H(∞)| = peak, no dip) is detected as "other" today and is also stopped earlier by the RHP-zero gate. When all-pass lands, extend `detect_type` with an all-pass class (and the Custom gate rows named in the FS-007 design note §12) — do not change the detector before then.
 - **Updated:** 2026-09-28
 
@@ -469,6 +479,45 @@ FS-027 (loaded realized response) reuses FS-008's IR and MNA.
 - **Updated:** 2026-09-28
 
 ---
+
+### FS-031 — Group-delay equalizer: all-pass stages appended to a designed filter
+- **State:** PROPOSED
+- **Priority:** P3 (suggested)
+- **Effort:** plan xhigh / build high
+- **Tiers:** A (equalizer design), D (UI, plots, report); B/C only through FS-013 in Stage 3
+- **Depends on:** FS-006 (done — group-delay plots and delay-oriented UI); FS-013 (hard, Stage 3 only — all-pass cells); FS-024 (soft — step response shows the payoff)
+- **Contracts:** §2 (all-pass sections carry RHP zeros — classifier and producer rule), §6 (`engine_results` gains the equalizer stages or a separate block — decide in Stage 1)
+- **Files:** Stage 1 — new `dev/FS-031_gd_equalizer_design_note.md` (+ `dev/fs031/` scripts). Stage 2 (expected) — new `gd_equalizer.py`, `app.py` / Response Plots (equalizer controls, overall GD), `hw_plots.py`/`plot_utils.py`, `report_pdf.py`. Stage 3 — per FS-013.
+- **Goal:** For a designed filter, the user asks for phase correction over a chosen band, and the tool adds 1st/2nd-order all-pass sections whose combined group delay flattens the total (filter + equalizer) group delay within a stated ripple, with the magnitude unchanged.
+- **Scope:**
+  - Stage 1 (research/plan, analysis-only, no production code): problem statement (band, target = flat GD at the minimum achievable constant delay, error norm — equiripple vs least squares); order selection (sections vs residual ripple trade-off); optimiser (seeds from the GD-peak locations, constrained on pole Q/ω₀ ranges; Remez-like vs LM); where the equalizer lives in the data model and in pairing; interaction with sensitivity (high-Q all-pass sections); prototype on 4–6 designs (Butterworth/Chebyshev/elliptic LP, one BP) with results tables.
+  - Stage 2 (build, ideal): equalizer design + UI + plots/report of filter, equalizer and total GD; the equalizer's poles/zeros visible in Roots; no hardware yet (sections shown as awaiting FS-013).
+  - Stage 3 (build, hardware): pair and realize the all-pass sections through FS-013's cells; overall realized GD plot.
+  - Out — correcting measured/external systems (FS-032); standalone all-pass responses (FS-013); magnitude change of any kind.
+- **Validation:** Stage 1 — prototype tables: GD ripple vs number of sections for each test design, against published equalizer tables where available. Stage 2 — |H_total| equals |H_filter| to numerical precision; total GD ripple within the requested tolerance; filter-only results (BOMs, plots) unchanged when the equalizer is off. Stage 3 — realized total GD matches the ideal within tolerance; `verify.py` per FS-013.
+- **Open questions:** Band default (passband edge(s)) and tolerance input — absolute (µs) or relative (%)? Max number of equalizer sections the UI offers? For BP/BR: equalize the passband(s) only? Equalizer sections placed after the filter only, or interleaved for dynamic range?
+- **Notes:** Stage 1 may be `ACTIVE` alongside a build item (§1 analysis-only exception). Stage 2 is useful before FS-013 lands (the ideal answer tells how many all-pass sections a design needs).
+- **Updated:** 2026-09-30
+
+### FS-032 — Magnitude correction of an existing system from measured Bode points
+- **State:** PROPOSED
+- **Priority:** P3 (suggested)
+- **Effort:** plan max / build xhigh (Stage 2), high (Stages 3–4)
+- **Tiers:** A (fitting + correction solver), D (new design mode, data table, plots, report); B/C only through FS-014 in Stage 3
+- **Depends on:** FS-007 (done — Custom H(s) pipeline and producer gate the correction reuses); FS-014 (hard, Stage 3 only — cells for general LHP complex zeros); FS-031 (soft — Stage 1's joint-phase answer builds on it; hard for Stage 4 if phase is corrected by a separate equalizer); FS-011 (soft — saving the measured table)
+- **Contracts:** §2 producer rule (a correction filter needs zeros off the jω axis and off the origin, which today's gate refuses — relaxed only together with FS-014), §6 (new `engine_results` producer; `custom_info`-like block for the correction)
+- **Files:** Stage 1 — new `dev/FS-032_magnitude_correction_design_note.md` (+ `dev/fs032/` prototype scripts and sample data). Stage 2 (expected) — new `mag_correction.py`, `app.py` (new design mode "Correct existing Bode", data table + target editor), `custom_tf.py` (reuse gate/snap), `plot_utils.py`, `report_pdf.py`.
+- **Goal:** The user enters measured Bode points of an existing system (frequency, magnitude, optionally phase), specifies the desired output over a passband (flat by default, or a user-defined curve), and the tool finds pole/zero locations of a correction filter so that system × correction meets that target; the correction then continues through pairing and topology like any other design.
+- **Scope:**
+  - Stage 1 (research/plan, analysis-only): data input (table, CSV paste; units dB/V/V, deg; sparse and noisy data; interpolation); whether to fit a rational model of the system first (vector fitting) or optimise directly on the data; the correction problem (log-magnitude error over the band, weights, out-of-band behaviour — gain limits, roll-off; minimum-phase correction; order selection; stability — LHP poles); realizability (which zero patterns today's families take, what needs FS-014); **joint magnitude + phase**: a minimum-phase correction fixes the phase once the magnitude is chosen, so independent phase correction needs an all-pass part — decide whether a joint solve is worth it or phase is corrected afterwards by FS-031 on the corrected system; prototype on 3–4 synthetic systems (known H(s) with noise) + one real measured set if the maintainer has one.
+  - Stage 2 (build, ideal): new design mode, data table, target editor, fitting + correction solver, plots of measured / correction / corrected response, output as `engine_results` for the corrections today's families can realize (others refused with a reason, per the producer rule).
+  - Stage 3 (build, hardware): general-zero corrections realized once FS-014 provides the cells; producer gate relaxed with it.
+  - Stage 4 (optional, per Stage 1): phase correction of the corrected system — joint solve, or FS-031's equalizer driven from the measured phase.
+  - Out — time-domain / impulse-response measurements; automatic measurement import from instruments; digital (FIR/IIR) correction.
+- **Validation:** Stage 1 — synthetic cases recover a known inverse within stated error and degrade gracefully with noise; results tables in the design note. Stage 2 — corrected magnitude within the user tolerance over the passband on the synthetic set; out-of-band gain within limits; the correction's poles/zeros pass the producer gate or are refused with a reason; existing modes unchanged. Stage 3 — realized corrected response matches the ideal (as FS-008's overlay checks).
+- **Open questions:** Typical systems to correct (sensor, loudspeaker, transducer, cable, an existing analog stage)? Frequency span and point count to expect? Is phase data usually available? Target beyond "flat" — slope, custom curve? Correction order limit? Separate design mode or a Custom H(s) sub-mode?
+- **Notes:** Largest-scope item on the board — may split further after Stage 1 (IDs then). Stage 1 may be `ACTIVE` alongside a build item (§1 analysis-only exception). Stage 1 at max effort; consider `/code-review ultra` before committing Stage 2.
+- **Updated:** 2026-09-30
 
 ---
 
