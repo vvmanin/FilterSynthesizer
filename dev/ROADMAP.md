@@ -152,6 +152,7 @@ first.
 | FS-027 | Realized response with inter-stage loading (feasibility first) | P3 *(s)* | PROPOSED | plan high / build high | FS-008 (hard, done) |
 | FS-028 | Topology solver performance — analysis first | P2 *(s)* | VALIDATING (Stage 1 analysis) | analysis xhigh / build per finding | — |
 | FS-029 | Vendor op-amp model import (guided download, per-part wrapper; FS-008's open items) | P1 *(s)* | ACTIVE | medium | FS-008 (hard, done) |
+| FS-030 | Topology tab: section spec resets to default when a solve finishes | P2 *(s)* | PROPOSED | plan high / build medium | — |
 
 *(s)* = suggested priority, awaiting maintainer confirmation.
 
@@ -165,7 +166,7 @@ optional report plot, reuses FS-006's detail plot) → FS-024 (new time-domain
 computation for ideal and realized, UI + report) → FS-025 (new approximation
 families; research first).
 
-Defect items FS-015/016/017 have no hard dependencies and block nothing; slot
+Defect items FS-015/016/017/030 have no hard dependencies and block nothing; slot
 them between feature items. File-overlap notes (to avoid rework, not
 blockers): FS-016 before taking BOM baselines for other items' validation (it can change
 stage assignments); FS-007 gates today's pairer gaps (FS-016 may relax its gate rows).
@@ -495,6 +496,25 @@ FS-027 (loaded realized response) reuses FS-008's IR and MNA.
   - Legal position (not legal advice): part numbers are used only to name the parts (no logos, no suggestion of endorsement); the library's A_ol / GBWP / Ro values are datasheet facts, and the FS generic model is the project's own; vendor files stay on the user's PC and in their own zips, and only the generated wrapper (no vendor text) is the tool's.
   - `consent.json` is kept and extended (v2: `parts` records wrapper, file, original name, subckt, pins, roles, sha256, source, time) instead of a new `models.json`.
 - **Updated:** 2026-09-30 (re-scoped and built)
+
+---
+
+### FS-030 — Topology tab: section spec resets to default when a solve finishes
+- **State:** PROPOSED
+- **Priority:** P2 (suggested — user-visible state loss, but no data loss: restoring the spec by hand brings the solution back from the result cache)
+- **Effort:** plan high / build medium
+- **Tiers:** D
+- **Depends on:** —
+- **Contracts:** —
+- **Files:** `topology_tab.py`: session-state init (~L158), job submit / `_drain_finished` (~L220-335), per-section spec widgets and their `setdefault` defaults (~L1450-1690), the `run_every` BOM fragment and its `st.rerun(scope="app")` (~L2146-2194)
+- **Goal:** A section's spec (topology/cell choice, op-amp, gain and other per-section inputs) is never changed by a solve finishing; only the user changes it.
+- **Scope:** In — reproduce, find the cause, fix the state handling. Out — solver behavior, the result cache and its keys (other than any key-stability fix the cause requires), FS-028's performance work.
+- **Validation:** Fresh launch (new process, cold TF cache and pool), 3 designs (LP, BP, BR; 3–5 sections): set non-default specs on 1, then on several sections, solve, and let them finish one at a time and together. Every spec holds across every completion rerun, repeated ≥ 5 fresh launches. Switching tabs while a solve runs, and re-solving after a spec edit, still behave; BOMs identical to baseline.
+- **Open questions:** Which spec fields reset (all of a section's, or only some widgets)? Only the finished section, or others too? Seen with a single section solving? Does it follow a tab switch or a Pairing/Spec edit during the solve?
+- **Notes:**
+  - Reported 2026-09-30 (maintainer): with one or more sections specified and solving, when a section's solver finishes the spec sometimes returns to its default. Setting it back by hand shows the solution table again, served from the cache — so the result is stored under the right signature and only the widget state is lost. Mostly on a fresh launch, during the first solves.
+  - Suspects to check first: (1) Streamlit drops a keyed widget's state when that widget is not rendered on some run — the `run_every` fragment's app-wide rerun after `_drain_finished` may land on a run where the section widgets are skipped (early return, another tab, a spinner/pending branch), after which `setdefault` re-seeds the defaults; (2) widget keys built from values that change on the first solves (signature, `hw_gen`, op-amp list or defaults computed after a cold start), so the widget comes back under a new key; (3) a `hw_gen` bump or a reset of the `hw_*` dicts on the first completion that also clears the spec keys. A durable, non-widget mirror of the spec (as `bom_picks` does for the BOM pick) is the likely fix shape.
+- **Updated:** 2026-09-30
 
 ---
 
