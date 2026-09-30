@@ -280,12 +280,18 @@ def instrumented(rec):
     import tf_derivation_v2 as TF
 
     saved = []
+    # S2-1: the non-ideal correction runs in-process (no pool, shared memo).
+    ni_pooled = hasattr(NI, "ProcessPoolExecutor")
 
     def patch(mod, name, new):
+        if not hasattr(mod, name):      # hook point removed by a later stage
+            return
         saved.append((mod, name, getattr(mod, name)))
         setattr(mod, name, new)
 
     def timed_stage(mod, name, label):
+        if not hasattr(mod, name):
+            return
         orig = getattr(mod, name)
 
         def w(*a, **k):
@@ -322,7 +328,7 @@ def instrumented(rec):
         return w
 
     patch(US, "ProcessPoolExecutor", SerialPool)
-    patch(NI, "ProcessPoolExecutor", SerialPool)
+    patch(NI, "ProcessPoolExecutor", SerialPool)      # skipped when NI is in-process
     patch(US, "least_squares", ls_wrapper(US.least_squares, "US"))
     patch(ZM, "least_squares", ls_wrapper(ZM.least_squares, "ZM"))
     patch(NI, "least_squares", ls_wrapper(NI.least_squares, "NI"))
@@ -356,6 +362,13 @@ def instrumented(rec):
     timed_stage(US, "dedup", "dedup")
     timed_stage(TF, "dump_cases", "dump_cases")
     timed_stage(TF, "load_cases", "load_cases")
+    # S2-1 compile-once stages (main process): templates + kernel sources
+    timed_stage(TF, "get_templates", "get_templates")
+    try:
+        import cell_kernels as CK
+        timed_stage(CK, "sources", "kernel_sources")
+    except ImportError:
+        pass
     # get_cases is reached as TF.get_cases (US), and by-name in NI and FS.
     _tf_get = TF.get_cases
 
@@ -375,8 +388,10 @@ def instrumented(rec):
     def ni_init_ctx(*a, **k):
         # A real non-ideal worker is a fresh process: its make_response_func memo
         # starts empty. Emulate that, then give the main process its memo back.
+        # (In-process NI, S2-1: the memo IS the main process's -- keep it.)
         memo = dict(TF._RESP_CACHE)
-        TF._RESP_CACHE.clear()
+        if ni_pooled:
+            TF._RESP_CACHE.clear()
         rec.ctx.append("ni_init")
         try:
             return _ni_init(*a, **k)
@@ -430,6 +445,13 @@ def clear_process_caches():
     import unified_solver_v2 as US
     TF._RESP_CACHE.clear()
     US._SENS_FUNCS.clear()
+    getattr(TF, "_TPL", {}).clear()              # S2-1 templates
+    try:
+        import cell_kernels as CK                # S2-1 kernel sources / compiled fns
+        CK._SRC.clear()
+        CK._FNS.clear()
+    except ImportError:
+        pass
     try:
         import sympy as sp
         sp.core.cache.clear_cache()
@@ -475,6 +497,9 @@ def summarize(info, workers=32):
     cpu = {ph: float(sum(v)) for ph, v in tk.items()}
     n = {ph: len(v) for ph, v in tk.items()}
     wall = {ph: sched_wall(v, workers) for ph, v in tk.items()}
+    import nonideal_solver as NI
+    if not hasattr(NI, "ProcessPoolExecutor"):      # S2-1: NI runs in-process, serially
+        wall["ni"] = cpu.get("ni", 0.0)
     init13 = st.get("init_p13", 0.0)
     initni = st.get("init_ni", 0.0)
     rs_total = st.get("run_synthesis_total", 0.0)

@@ -35,6 +35,7 @@ import os
 import json
 import time
 import hashlib
+import threading
 import sympy as sp
 
 # Shared symbols (re-exported below for backward-compatible imports)
@@ -86,6 +87,16 @@ CACHE_PATH_V2 = "tf_cache_v6.json"     # bumped v5->v6: the LP non-ideal nodal
 # rev 2: cells_lp.build_nonideal -- C4 current at the output node; R4/R5
 #        referenced to Vm rather than Vc.
 NONIDEAL_MODEL_REV = 2
+
+# Revision of the IDEAL nodal models (build_ideal), for the design-parametric
+# templates (get_templates) and the compiled kernels built from them
+# (cell_kernels). Same rule as above: bump it when a build_ideal changes shape
+# WITHOUT changing var_list. The per-design ideal entries of get_cases carry
+# their full expressions under a design key and are not affected.
+IDEAL_MODEL_REV = 1
+
+# Design-target symbols in the order the kernels take them after the components.
+TARGETS = ("p1", "w0", "wz", "Q", "K")
 
 
 # =====================================================================
@@ -524,6 +535,89 @@ def get_cases(design_subs=None, path=CACHE_PATH_V2, force=False, verbose=True,
         _save_blob(blob, path)
     elif verbose:
         print(f"Loaded TF cache (v3) from {path} ({n_hit} cell(s))")
+    return cases
+
+
+# =====================================================================
+# Design-parametric templates (FS-028 S2-1): derive once per cell, ever
+# =====================================================================
+# build_ideal(topo, {}) keeps the design targets p1, w0, wz, Q, K symbolic.
+# They then appear ONLY in res_eqs (checked for every cell: R5_constraint,
+# a1/a2 and the TF are target-free), so one template per cell serves every
+# design and every per-cell K. The solver pipeline evaluates res_eqs through
+# cell_kernels (per design: one subs + lambdify of the residuals, source-
+# identical to the old per-design derivation); nothing re-derives per design.
+_TPL = {}                        # name -> (ideal template, nonideal case)
+_TPL_LOCK = threading.Lock()
+
+
+def template_key(name, topo):
+    """Cache key of a cell's design-parametric ideal template. Salted like the
+    non-ideal key, plus IDEAL_MODEL_REV."""
+    return f"{name}|{_cell_struct_sig(topo)}|irev{IDEAL_MODEL_REV}|ideal-param"
+
+
+def get_templates(topo_names, path=CACHE_PATH_V2):
+    """{(name, "ideal"): design-parametric ideal case, (name, "nonideal"):
+    non-ideal case} for the requested cells. Memoized per process and cached
+    in the TF cache file; a cell is derived at most once."""
+    with _TPL_LOCK:
+        missing = [n for n in dict.fromkeys(topo_names) if n not in _TPL]
+        if missing:
+            _sweep_stale_temps(path)
+            blob = _load_blob(path)
+            store = blob["cells"]
+            dirty = False
+            for name in missing:
+                topo = _name_to_topo()[name]
+                ikey = template_key(name, topo)
+                nkey = _ni_key(name, topo)
+                if ikey in store:
+                    di = _deserialize_case("ideal", store[ikey])
+                else:
+                    di = derive_ideal(topo, {})
+                    store[ikey] = _serialize_case(di)
+                    dirty = True
+                if nkey in store:
+                    dn = _deserialize_case("nonideal", store[nkey])
+                else:
+                    dn = derive_nonideal(topo)
+                    store[nkey] = _serialize_case(dn)
+                    dirty = True
+                _TPL[name] = (di, dn)
+            if dirty:
+                _save_blob(blob, path)
+        out = {}
+        for name in topo_names:
+            di, dn = _TPL[name]
+            out[(name, "ideal")] = di
+            out[(name, "nonideal")] = dn
+        return out
+
+
+def design_cases(design_subs, topo_names, k_map=None, path=CACHE_PATH_V2):
+    """Cases for the solver pipeline (run_synthesis, the snapper, the non-ideal
+    correction): the get_cases shape, built from the templates with no symbolic
+    work. Each ideal case is a shallow copy of its template plus
+    `targets` = the cell's numeric (p1, w0, wz, Q, K) in TARGETS order -- K is
+    the cell's own k_map entry in DC/HF-gain mode (as in derive_all), else the
+    design K. Its res_eqs STAY design-parametric: evaluate them through
+    cell_kernels (design_sources, or the "res" group with the targets
+    appended), never by lambdifying over var_list alone.
+    The non-ideal cases are the shared templates (design-independent)."""
+    tpl = get_templates(topo_names, path=path)
+    # values kept as given (not float()-ed): cell_kernels.design_sources
+    # substitutes these very objects, as derive_ideal(topo, design_subs) did
+    base = [design_subs[getattr(_SYM, n)] for n in TARGETS]
+    cases = {}
+    for name in topo_names:
+        t = list(base)
+        if k_map is not None and k_map.get(name) is not None:
+            t[TARGETS.index("K")] = k_map[name]
+        di = dict(tpl[(name, "ideal")])
+        di["targets"] = tuple(t)
+        cases[(name, "ideal")] = di
+        cases[(name, "nonideal")] = tpl[(name, "nonideal")]
     return cases
 
 

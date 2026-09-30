@@ -19,6 +19,7 @@ repository root. The TF cache goes to a private work dir (`$FS028_WORK`, default
 | `probe_batch_p3.py` | Phase 3 as batched solves on harvest's task list (vs production TRF semantics). |
 | `probe_atlas.py` | Learned seeds: valley atlas (kNN) and analytic polynomial seed vs cold multistart, on design-parametric residuals. |
 | `make_tables.py` | Prints the note's appendix tables from `results/`. |
+| `check_kernels.py` | S2-1 check: every compiled cell kernel (`cell_kernels`, all cells, AM Equalize variant) equals the per-design derive + lambdify path it replaced, to rounding; kernels replayed from the disk cache equal the live ones bit for bit. |
 
 `results/` holds the raw outputs: `baseline_balanced.json` (the Stage-2 reference: stage times
 and top BOMs per case), `ab_lm_*.json`, `probe_batch_p1_*.jsonl`, `probe_batch_p3_*.jsonl`,

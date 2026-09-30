@@ -23,7 +23,7 @@
 
 import numpy as np
 
-from tf_derivation_v2 import get_cases, p1, w0, wz, Q, K
+from tf_derivation_v2 import design_cases, p1, w0, wz, Q, K
 from unified_solver_v2 import run_synthesis
 from nonideal_solver import solve_nonideal
 from discrete_snapper import snap_to_hardware, print_snapped_table
@@ -230,7 +230,8 @@ def synthesize(cfg, opamp=None, topologies=None, n_cores=None,
     # +R7 twin, so we scope to the realized set rather than the request). This
     # is family-decoupled -- an LP run derives no HP cells, and vice-versa.
     # In DC/HF-gain mode the ideal cases carry per-topology K (the nonideal TF
-    # used for snapping is K-independent).
+    # used for snapping is K-independent). Built from the once-per-process
+    # templates (FS-028 S2-1): no derivation here, in any gain mode.
     if cases is None:
         import tf_derivation_v2 as _TF
         sol_names = sorted({s["topology"] for s in continuous})
@@ -239,8 +240,7 @@ def synthesize(cfg, opamp=None, topologies=None, n_cores=None,
             _n2t = {_TF.topo_name(t): t for t in _TF.all_cells()}
             kmap = {nm: _TF.dc_gain_to_K(_n2t[nm], _design_subs(cfg), dc_gain)
                     for nm in sol_names if nm in _n2t}
-        cases = get_cases(_design_subs(cfg), verbose=False, k_map=kmap,
-                          topo_names=sol_names)
+        cases = design_cases(_design_subs(cfg), sol_names, k_map=kmap)
 
     # --- Stage 3: discrete hardware snap (exact physics, mode op-amp) ---
     snapped = snap_to_hardware(continuous, cfg, eval_opamp, cases,

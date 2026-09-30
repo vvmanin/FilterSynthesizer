@@ -32,6 +32,7 @@ os.environ.setdefault("MKL_NUM_THREADS", "1")
 import time
 import tempfile
 import uuid
+import pickle
 import gc
 import numpy as np
 import sympy as sp
@@ -42,6 +43,7 @@ from concurrent.futures.process import BrokenProcessPool
 from scipy.optimize import least_squares
 
 import tf_derivation_v2 as TF
+import cell_kernels as CK
 import zero_manifold_solver as ZM
 import cells_mfb_hp
 
@@ -400,65 +402,67 @@ def rescale_isolated_r5r6(full, topo, cfg=None, r5r6_lo=0.01, r5r6_hi=0.15):
 # =====================================================================
 _W = {}
 
-def _init_worker(design_str, cfg, topo_names, k_map=None, cache_file=None):
-    design = {sp.Symbol(k): v for k, v in design_str.items()}
-    if cache_file is not None:
-        # Workers LOAD the orchestrator-derived cases; they never derive or
-        # write a cache. This removes the fork-time 32x-simultaneous derivation
-        # memory spike and every multi-process cache race (the prior worker-side
-        # get_cases() was the source of the intermittent BrokenProcessPool).
-        cases = TF.load_cases(cache_file)
-    else:
-        cases = TF.get_cases(design, verbose=False, k_map=k_map,
-                             topo_names=topo_names)
-    cases = apply_equalize(cases, cfg)     # idempotent; matches orchestrator
+def worker_packs(cases, topo_names):
+    """Everything a Phase-1/3 worker needs per cell, as plain picklable data:
+    the layout and compiled-kernel sources (cell_kernels, FS-028 S2-1) -- the
+    per-design residual / Jacobian / R5 kernels (bit-identical to the old
+    per-design lambdify) and the design-independent gain set. Built in the
+    orchestrator, where each kernel is generated at most once per cell (per
+    design for the residuals); workers never derive or lambdify."""
+    packs = {}
+    for name in topo_names:
+        c = cases[(name, "ideal")]
+        zm = None
+        if name in ZM.PARALLEL_C2_CELLS:
+            zm = {"srcs": CK.sources(c, "zm"),
+                  "tf_var_names": [str(v) for v in c["tf_var_list"]],
+                  "has_notch": bool(c["topo"]["notch"])}
+        packs[name] = {"layout": cell_layout(c), "design": CK.design_sources(c),
+                       "gain": CK.sources(c, "gain"), "zm": zm}
+    return packs
+
+
+def _init_worker(cfg, packs, k_map=None):
+    """`packs` is the path of the file run_synthesis wrote worker_packs() to
+    (or the dict itself, for direct callers). A FILE on purpose: the pool
+    initargs travel down a small Windows pipe, and the parent's Process.start()
+    blocks until the child has read them all. Initargs over the pipe buffer
+    (tens of KB of kernel source) serialized the spawn of every worker behind
+    the previous one's numpy/scipy/sympy import -- 32 x ~2 s of near-idle
+    start-up. A path keeps the initargs tiny, so all workers start at once."""
+    if isinstance(packs, str):
+        with open(packs, "rb") as f:
+            packs = pickle.load(f)
     _W["cfg"] = cfg
     # name -> K actually used in that cell's residuals. For every HP family
     # dc_gain_to_K() returns sign*|HF gain|, so abs(K) IS the target passband
     # gain -- _assemble() gates the realized H(inf) against it.
     _W["k_map"] = dict(k_map or {})
-    _W["cases"] = cases
     _W["funcs"] = {}
     _W["zm_funcs"] = {}
-    for name in topo_names:
-        c = cases[(name, "ideal")]
-        lay = cell_layout(c)
-        vl = c["var_list"]
-        res_f = sp.lambdify(vl, c["res_eqs"], "numpy", cse=True)
-        r5_f = (sp.lambdify(vl, c["R5_constraint"].subs(_design_targets(design)), "numpy", cse=True)
-                if c["R5_constraint"] is not None else None)
-        a1_f = sp.lambdify(vl, c["a1_expr"], "numpy", cse=True)
-        a2_f = sp.lambdify(vl, c["a2_expr"], "numpy", cse=True)
-        # realized DC gain H(0)=num(0)/den(0) (any common s-free factor cancels);
-        # used to report the MFB passband gain, which is an R-ratio rather than
-        # the VCVS 1+R5/R6 form.
-        h0_expr = c["tf_num"].subs(TF.s, 0) / c["tf_den"].subs(TF.s, 0)
-        h0_f = sp.lambdify(vl, h0_expr, "numpy", cse=True)
-        # realized HF gain H(inf) = ratio of leading s-coefficients. For HP cells
-        # H(0)=0 (origin zeros block DC), so h0_f is useless there; the HP passband
-        # gain is this leading-coeff plateau instead (all-pole |C2/C4| etc;
-        # notch R8/(R3+R8)). Cheap: LC of each s-polynomial, ratio taken numerically.
-        hinf_expr = sp.Poly(c["tf_num"], TF.s).LC() / sp.Poly(c["tf_den"], TF.s).LC()
-        hinf_f = sp.lambdify(vl, hinf_expr, "numpy", cse=True)
-        # analytic Jacobian of the residual vector w.r.t. ALL vars; each solve
-        # site slices the columns it varies (see phase1/phase3 workers).
-        jac_f = sp.lambdify(vl, sp.Matrix(c["res_eqs"]).jacobian(list(vl)),
-                            "numpy", cse=True)
-        nidx = {str(v): i for i, v in enumerate(vl)}
+    for name, pk in packs.items():
+        lay = pk["layout"]
+        d = CK.load(pk["design"])
+        g = CK.load(pk["gain"])
+        # res / jac / r5: this design's numeric residuals (the Jacobian is w.r.t.
+        # ALL vars; each solve site slices the columns it varies). h0 = H(0) =
+        # num(0)/den(0): the MFB/AM passband-gain readout (an R-ratio, not the
+        # VCVS 1+R5/R6 form). hinf = H(inf) = ratio of leading s-coefficients:
+        # the HP passband plateau (H(0)=0 there).
+        res_f, jac_f, r5_f = d["res"], d["jac"], d.get("r5")
+        nidx = {n: i for i, n in enumerate(lay["names"])}
         _W["funcs"][name] = dict(layout=lay, res_f=res_f, r5_f=r5_f,
-                                 a1_f=a1_f, a2_f=a2_f, h0_f=h0_f, hinf_f=hinf_f,
+                                 a1_f=g["a1"], a2_f=g["a2"],
+                                 h0_f=g["h0"], hinf_f=g["hinf"],
                                  var_names=lay["names"],
                                  jac_f=jac_f, nidx=nidx,
                                  res_cols=[nidx[n] for n in lay["res_names"]])
         # zero-manifold C2 cells also get the parallel-C2 prepped funcs
-        if name in ZM.PARALLEL_C2_CELLS:
-            _W["zm_funcs"][name] = ZM.prep_cell_funcs(c, design)
-
-def _design_targets(design):
-    # design dict already has the numeric target subs; R5_constraint was
-    # stored already substituted in tf_derivation? No -- it is symbolic in
-    # p1,w0,wz,Q,K. Substitute here.
-    return design
+        if pk["zm"] is not None:
+            z = pk["zm"]
+            _W["zm_funcs"][name] = ZM.assemble_cell_funcs(
+                name, lay, z["tf_var_names"], res_f, g["a1"], g["a2"], r5_f,
+                jac_f, CK.load(z["srcs"]), z["has_notch"])
 
 
 # =====================================================================
@@ -1031,19 +1035,21 @@ def _sens_funcs(name, cases):
     False for cells whose full component vector is NOT spanned by caps + solved
     resistors (i.e. there is a derived resistor such as a constrained R5); for
     those a1_f/a2_f are None and the proxy degrades to +inf (cost/magnitude
-    retention is then used unchanged -> no behaviour change for such cells)."""
-    if name not in _SENS_FUNCS:
-        case = cases[(name, "ideal")]
+    retention is then used unchanged -> no behaviour change for such cells).
+    Memoized per (cell, Equalize variant): the two variants have different
+    a1/a2 and var_list."""
+    case = cases[(name, "ideal")]
+    key = (name, CK.variant(case))
+    if key not in _SENS_FUNCS:
         lay = cell_layout(case)
         covered = set(lay["names"]) <= (set(lay["cap_names"]) | set(lay["res_names"]))
         if covered:
-            vl = case["tf_var_list"]
-            a1_f = sp.lambdify(vl, case["a1_expr"], "numpy", cse=True)
-            a2_f = sp.lambdify(vl, case["a2_expr"], "numpy", cse=True)
+            k = CK.load(CK.sources(case, "sens"))
+            a1_f, a2_f = k["a1"], k["a2"]
         else:
             a1_f = a2_f = None
-        _SENS_FUNCS[name] = (a1_f, a2_f, lay, covered)
-    return _SENS_FUNCS[name]
+        _SENS_FUNCS[key] = (a1_f, a2_f, lay, covered)
+    return _SENS_FUNCS[key]
 
 
 def _valley_sens_proxy(v, lay, a1_f, a2_f):
@@ -1302,6 +1308,8 @@ def apply_equalize(cases, cfg):
             if c.get(key) is not None:
                 nc[key] = c[key].subs(sub)
         nc["var_list"] = [v for v in c["var_list"] if v not in (R6, C3)]
+        nc["equalized"] = True         # its own compiled-kernel variant (cell_kernels)
+        nc["equalize_subs"] = sub      # re-applied after the design subs (design_sources)
         out[(name, kind)] = nc
     return out
 
@@ -1380,7 +1388,10 @@ def run_synthesis(cfg, topologies=None, n_cores=None,
 
         k_map = {name: TF.dc_gain_to_K(_name2topo[name], design, _cell_dc(_name2topo[name]))
                  for name in topologies if name in _name2topo}
-    cases = TF.get_cases(design, verbose=False, k_map=k_map, topo_names=topologies)
+    # Design-parametric cases (FS-028 S2-1): each cell is derived once per
+    # process (TF cache on disk), never per design; the targets ride along as
+    # numbers and enter only through the compiled kernels.
+    cases = TF.design_cases(design, topologies, k_map=k_map)
     cases = apply_equalize(cases, cfg)     # handbook R5=R6, C2=C3 for AM (Issue 4)
 
     # name -> topo for every registered cell. Needed independently of the
@@ -1430,24 +1441,19 @@ def run_synthesis(cfg, topologies=None, n_cores=None,
               f"f1={cfg['f1']} f0={cfg['f0']} fz={cfg['fz']}")
         print(f"  Phase 1: dispatching {len(p1_tasks)} starts...")
 
-    # Hand the orchestrator-derived cases to workers via a per-run file they
-    # only LOAD (derivation happens once, here; workers never derive or write a
-    # cache). Removes the 32x-simultaneous fork-time derivation memory spike and
-    # all cache races -- part of the "a process in the process pool was
-    # terminated abruptly" (BrokenProcessPool) failure.
-    _wcache = os.path.join(tempfile.gettempdir(),
-                           f"fc_wcache_{os.getpid()}_{uuid.uuid4().hex}.json")
-    # IDEAL-ONLY: Phase-1/Phase-3 workers only ever read cases[(name,"ideal")]
-    # (see every cases[(...)] access below). The non-ideal TFs are used solely by
-    # the snapper and nonideal_solver, which run in THIS (main) process off the
-    # full `cases` dict. Serialising the non-ideal cases into the worker file was
-    # pure waste -- and for 3rd-order AM the non-ideal TF is ~766k ops, so its
-    # srepr is a ~20 MB blob that every worker rebuilt into a 766k-node SymPy tree
-    # on load (RAM x n_cores + a huge temp file -> the memory blow-up). MFB/VCVS
-    # non-ideal TFs are tiny, so they never hit this. Dumping ideal-only keeps the
-    # worker file small and its parse instant, with zero behavioural change.
-    _ideal_cases = {k: v for k, v in cases.items() if k[1] == "ideal"}
-    TF.dump_cases(_ideal_cases, _wcache)
+    # Hand the workers compiled-kernel SOURCES, not cases (FS-028 S2-1): the
+    # orchestrator derives nothing per design; it generates the design-independent
+    # kernels at most once per cell (cell_kernels, cached on disk) and this
+    # design's residual / Jacobian kernels once per process (one subs + lambdify,
+    # the same code the workers used to build). A worker only exec's the
+    # sources (~ms) -- no sympy parse, no lambdify, no derivation.
+    # Workers never derive or write a cache, which keeps the fork-time memory
+    # low and the pool free of cache races (the BrokenProcessPool history).
+    # Via a per-run file, not the initargs: see _init_worker (Windows spawn).
+    _wpacks = os.path.join(tempfile.gettempdir(),
+                           f"fc_wpacks_{os.getpid()}_{uuid.uuid4().hex}.pkl")
+    with open(_wpacks, "wb") as f:
+        pickle.dump(worker_packs(cases, topologies), f, protocol=pickle.HIGHEST_PROTOCOL)
 
     # Shrink the parent heap BEFORE forking workers. A COLD solve just ran heavy
     # symbolic derivation (HP 3rd-order especially), leaving a large sympy cache
@@ -1465,8 +1471,7 @@ def run_synthesis(cfg, topologies=None, n_cores=None,
 
     def _pool_phase(workers):
         with ProcessPoolExecutor(max_workers=workers, initializer=_init_worker,
-                                 initargs=(design_str, cfg, topologies, k_map,
-                                           _wcache)) as pool:
+                                 initargs=(cfg, _wpacks, k_map)) as pool:
             t0 = time.time()
             p1_results = list(pool.map(phase1_worker, p1_tasks, chunksize=1))
             n_ok = sum(1 for r in p1_results if r)
@@ -1517,14 +1522,13 @@ def run_synthesis(cfg, topologies=None, n_cores=None,
 
     try:
         _shrink()
-        # Each worker independently lambdifies the (heavy, for 3rd-order/+R8)
-        # analytic Jacobian at init; forking many such workers off a freshly
-        # derived parent is what intermittently kills one ("a process in the
-        # process pool was terminated abruptly"). A retry at the SAME width can
-        # spike again, so each retry HALVES the worker count -- fewer concurrent
-        # lambdify allocations -> less fork-time memory -- ending at 1 worker,
-        # which is lean enough to always succeed. This is the automatic version
-        # of the user's manual "re-solve", and it no longer surfaces as an error.
+        # Safety net for a worker that dies at start-up ("a process in the process
+        # pool was terminated abruptly"). Historically each worker lambdified the
+        # heavy 3rd-order/+R8 Jacobian at init off a freshly derived parent; since
+        # S2-1 a worker only exec's kernel sources, but the retry stays: each retry
+        # HALVES the worker count -- less concurrent start-up memory -- ending at
+        # 1 worker, which is lean enough to always succeed. This is the automatic
+        # version of the user's manual "re-solve"; it never surfaces as an error.
         schedule = []
         w = max(1, int(n_cores))
         while True:
@@ -1562,7 +1566,7 @@ def run_synthesis(cfg, topologies=None, n_cores=None,
         return sols
     finally:
         try:
-            os.remove(_wcache)
+            os.remove(_wpacks)
         except OSError:
             pass
 

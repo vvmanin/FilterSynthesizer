@@ -26,6 +26,26 @@ For the tier model and file map see `docs/ARCHITECTURE.md`.
   by structure (`md5(var_list)`). A change to a nodal model that keeps
   `var_list` is invisible to that key — bump `NONIDEAL_MODEL_REV` (model-only
   change) or the cache file version (`CACHE_PATH_V2`).
+- **Design-parametric templates and compiled kernels (FS-028 S2-1).** The
+  solver pipeline (`run_synthesis`, the snapper, `solve_nonideal`) takes its
+  cases from `tf_derivation_v2.design_cases`: each cell's ideal case is derived
+  ONCE with symbolic targets (`build_ideal(topo, {})`); the design targets
+  p1, w0, wz, Q, K may appear only in `res_eqs` (never in `R5_constraint`,
+  `a1_expr`/`a2_expr` or the TF — a `build_ideal` must keep it so). Those
+  cases carry numeric `targets`, and their `res_eqs` are evaluated only through
+  `cell_kernels`; never lambdify them over `var_list` alone. The TRF path uses
+  `design_sources` (the targets substituted into the raw template, then any
+  Equalize substitution — the old derive-then-equalize order), which is
+  source-identical to the old per-design lambdify, so results are
+  bit-identical. The design-parametric `res` group (targets as arguments)
+  agrees only to rounding, which re-samples the chaotic multistart; it is for
+  solvers that are validated on their own (S2-2/S2-3). The template key is the non-ideal salt plus
+  `IDEAL_MODEL_REV`: bump it when a `build_ideal` changes shape without
+  changing `var_list`. The kernel cache file is named after the TF cache
+  (`<stem>_kernels_k<KERNEL_REV>.json`) and keyed by the template key, so any
+  TF-cache bump above invalidates the kernels too; bump
+  `cell_kernels.KERNEL_REV` when the kernel generator changes. `get_cases`
+  (per-design, numeric `res_eqs`) stays for the other callers.
 
 ## 2. Section classification (Tier A → D)
 
@@ -141,4 +161,19 @@ Custom H(s) entered with a negative K is used as |K|, with a warning.
   polynomials are about the size of the response, so finite differences are
   already near-optimal.
 - Considered, not applied: loosening `nonideal_solver` `xtol/ftol` 1e-12 → 1e-9
-  (the snapper quantizes anyway) — it changes converged values.
+  (the snapper quantizes anyway) — it changes converged values. FS-028 measured
+  the correction tasks at ≈ 1 % of the solve, so the lever is moot.
+- Compile once (FS-028 S2-1): no per-design derivation (templates, §1), no
+  per-worker lambdify (Phase-1/3 workers exec the kernel sources handed over in
+  the pool's initargs), and the non-ideal correction runs in-process — its
+  per-section pool re-derived every cell in every worker for 0.1–3 CPU-s of
+  work. Every kernel on the solve path is source-identical to what the old
+  code lambdified (`dev/fs028/check_kernels.py`), so the BOMs are
+  bit-identical; the only per-design symbolic work left is one subs + lambdify
+  of res/jac per cell in the orchestrator (0.01-2.7 s, memoized per process).
+- Keep process-pool `initargs` small (a path, names, numbers). On Windows
+  spawn, `Process.start()` blocks until the child has read the pickled
+  initargs through a small pipe; initargs above the buffer serialize the start
+  of every worker behind the previous child's numpy/scipy/sympy import (32 × ~2 s
+  of near-idle CPU). Bulk data for workers goes in a per-run file
+  (`unified_solver_v2` writes the kernel packs to one).

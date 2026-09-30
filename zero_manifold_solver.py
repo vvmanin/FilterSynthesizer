@@ -147,6 +147,30 @@ def prep_cell_funcs(case, design):
     }
 
 
+def assemble_cell_funcs(name, lay, tf_var_names, res_f, a1_f, a2_f, r5_f,
+                        jac_f, zm_kernels, has_notch):
+    """prep_cell_funcs' dict from already-built callables: the Phase-1/3 worker
+    passes its compiled kernels (cell_kernels: per-design res / jac / r5, the
+    "gain" a1 / a2) plus the "zm" group (den_i / num_i coefficient functions).
+    Same functions, same dict -- no sympy work in the worker (FS-028 S2-1)."""
+    nidx = {n: i for i, n in enumerate(lay["names"])}
+    n_den = sum(1 for k in zm_kernels if k.startswith("den_"))
+    n_num = sum(1 for k in zm_kernels if k.startswith("num_"))
+    return {
+        "name": name,
+        "layout": lay,
+        "cap_names": lay["cap_names"],
+        "res_names": lay["res_names"],
+        "var_names": lay["names"],
+        "tf_var_names": list(tf_var_names),
+        "res_f": res_f, "a1_f": a1_f, "a2_f": a2_f, "r5_f": r5_f,
+        "jac_f": jac_f, "res_cols": [nidx[n] for n in lay["res_names"]],
+        "den_cf": [zm_kernels[f"den_{i}"] for i in range(n_den)],
+        "num_cf": [zm_kernels[f"num_{i}"] for i in range(n_num)],
+        "has_notch": bool(has_notch),
+    }
+
+
 def _roots_fast(funcs, full):
     args = [full[n] for n in funcs["tf_var_names"]]
     try:

@@ -69,6 +69,9 @@ Measured over the 31-section benchmark set (Balanced, ideal op-amp) unless marke
 | E | **Learned seeds** (the ML idea): analytic polynomial seed and/or valley atlas, + LM polish (S2-3) + D | **0.013**; Phase 1 → 2–35 ms per cell | **0.18 on one core** *est.* | measured on 3 cells: best valley as good as a full cold multistart | med | **do after D** (robustness, retries) |
 | F | Explicit sensitivity descent on the solution manifold (quality safeguard) | small in batch form | — | best sens **better** than baseline where it applies | low–med | **pair with D** |
 
+**Stage 2 progress:** S2-1 (B) landed 2026-09-30, BOMs bit-identical to HEAD — results and one
+correction to row B ("same math" alone is not enough for identical BOMs) in §11.
+
 Recommended path (§7): **B → D + F → E → the self-adjusting orchestrator**. B removes the
 fixed overhead at no change in results. D moves the multistart off the process pool and cuts
 its CPU by one to three orders of magnitude, with F as its quality guard. E makes seeds, and
@@ -688,6 +691,87 @@ python dev/fs028/make_tables.py
 
 The scripts run the TF cache in a private work dir (`$FS028_WORK`, default
 `<tmp>/fs028_work`), so nothing is written next to the app.
+
+---
+
+## 11. Stage 2 — S2-1 compile-once cell kernels (landed 2026-09-30)
+
+**What changed.** Each cell's ideal case is derived once with symbolic targets
+(`tf_derivation_v2.get_templates`, cached in the TF cache); the solver pipeline builds its
+cases from those templates (`design_cases`) in `run_synthesis`, the snapper and
+`solve_nonideal` — no per-design derivation anywhere. Lambdified functions are kept as
+generated Python source (`cell_kernels.py`) and Phase-1/3 workers rebuild them by `exec`
+(~ms) from a per-run packs file: no sympify, no lambdify in a worker. (First cut passed the
+sources in the pool initargs; on Windows spawn that serialized the start of all 32 workers
+— `Process.start()` waits until each child has read initargs larger than the pipe buffer —
+and showed up in the app as minutes of near-idle CPU per 3rd-order solve. Found by the
+maintainer on 2026-10-01, fixed the same day, now a CONTRACTS §7 rule.) The
+non-ideal correction runs in-process on the main process's response memo; its per-section
+pool is gone. Checks: `python dev/fs028/check_kernels.py`; `python verify.py` passes; app
+run (Elliptic LP, VCVS + TL072H and MFB sections, BOM pick, Resulting Response with group
+delay) clean.
+
+**Correction to row B ("same math → results identical").** Design-parametric residuals
+(targets as arguments) agree with the per-design ones to ≤ 3.4e-13 over all 80 cells, yet
+they do **not** give identical BOMs: sympy no longer folds the numbers into the expression,
+and the TRF multistart is chaotic — rounding-level differences re-sample which valleys the
+failing starts end in. Measured over the 31 sections (Balanced, ideal): same BOM set in
+18 / 31, same top-5 in 13, same best BOM in 20; best sens 26 same / 3 better / 2 worse. That
+is a reseed, not a quality change, but it is a result change bought for ≈ 10 % of speed, so
+the TRF path uses **per-design residual kernels** instead: the numeric targets substituted
+into the template (`build_ideal`'s own last step, so the expression is srepr-identical for
+every cell) and lambdified once per design in the orchestrator (0.01–2.7 s per cell,
+memoized). All 4 308 solve-path kernels (80 cells × designs × Equalize variants) are
+**source-identical** to the old code's, and the design-parametric group stays built and
+verified for S2-2 / S2-3, whose solvers change results anyway and are validated per §6.
+
+**Result identity.** Every ideal, corrected and snapped row of all 31 sections, ideal and
+TL072, is bit-identical to HEAD (every field, exact float compare).
+
+**Time, instrumented (serial CPU, 32-core model, warm, same design).**
+
+| | ideal: HEAD → S2-1 | TL072: HEAD → S2-1 |
+|---|---|---|
+| 32-core model, sum over 31 sections | 119.1 → 58.0 s (0.49×) | 186.4 → 68.1 s (0.37×) |
+| per section median / max | 2.48 / 18.6 → 1.37 / 8.5 s | 2.96 / 29.5 → 1.59 / 8.3 s |
+| main process (derivation, task build) | 21.4 → 4.2 s | 34.2 → 3.6 s |
+| Phase-1/3 worker initializer | 20.3 → 0.0 s | 26.3 → 0.0 s |
+| non-ideal: pool initializer + tasks | — | 37.4 + 2.1 → 0.0 + 13.3 s (serial, in-process) |
+| snapper re-derivation (fs_main) | 19.0 → 0.0 s | 15.3 → 0.0 s |
+
+**Time, real pools on the maintainer's box** (i9-14900HX: 8 P + 16 E cores, 32 threads;
+Windows spawn, 32 workers). Fixed per-section cost, isolated by running the full pipeline
+with a near-zero search budget; new design in a warm app ("first") and re-solve; medians of
+2 alternating rounds:
+
+| Section | ideal first | ideal re-solve | TL072 first | TL072 re-solve |
+|---|---|---|---|---|
+| HPn3-VCVS | 11.4 → 4.4 s | 10.2 → 3.7 s | 30.4 → 5.0 s | 32.7 → 4.3 s |
+| LPn3-MFB | 10.4 → 3.4 s | 10.8 → 3.3 s | 22.5 → 3.9 s | 22.9 → 3.9 s |
+| LPn3g-VCVS | 21.7 → 14.4 s | 20.6 → 10.9 s | 31.8 → 14.5 s | 33.9 → 11.0 s |
+| N2-MFB | 3.0 → 2.6 s | 3.1 → 2.5 s | 6.0 → 2.6 s | 6.2 → 2.7 s |
+| LP2-VCVS | 1.8 → 1.9 s | 1.9 → 1.9 s | 4.0 → 2.0 s | 4.0 → 2.0 s |
+| HPn3-AM | 6.5 → 6.3 s | 8.1 → 7.6 s | 8.6 → 6.6 s | 10.5 → 7.9 s |
+
+End-to-end Balanced solves on the same box (single runs) move the same way where the fixed
+cost dominated (TL072: LPn3-MFB 27.0 → 8.2 s, HPn3-VCVS 34.7 → 12.1 s, LP2-VCVS 7.1 → 3.5 s)
+and stay inside run-to-run noise where the search dominates (LPn3g-VCVS ≈ 40–50 s, HPn3-AM
+≈ 20 s either way). On this hybrid CPU the 32-core model is optimistic for the search
+phases: E-cores and SMT make 32 workers far less than 32× one P-core, and repeat solves of
+one design differ by up to ~20 %.
+
+**What is left of the fixed cost** (what S2-2 removes): the spawn + import of 32 workers per
+section (≈ 1.8 s floor, LP2-VCVS); the per-design residual/Jacobian lambdify in the
+orchestrator for 3rd-order VCVS notch cells (LPn3g-VCVS: 3LPn-gained + its R7 twin,
+3.6–7.8 s by core type; free on a re-solve); the serial non-ideal correction (≤ 2.2 s per
+section). The Phase-3 fallback storms (§3.3) are search, not fixed cost — LPn3g-VCVS keeps
+≈ 25 CPU-s of Phase 3 even at a 2-start budget. Out of scope and unchanged: the failure-path
+solvability probe (`solvability_probe`) still derives per call; it could use the templates.
+
+**Reproduce:** `dev/fs028/check_kernels.py`; the identity and timing runs used the §10
+harness (`fs028_common.run_section`, instrumented) with a snapshot of every row per section
+against a `git archive HEAD` copy, and real-pool timings via `run_section(instrument=False)`
+with 32 spawn workers.
 
 ---
 

@@ -43,15 +43,16 @@ Streamlit app for analog active-filter design: spec → poles/zeros → biquad c
 | `cells_mfb_notch.py` | 16K | Notch | MFB |
 | `cells_am.py` / `cells_am_hp.py` / `cells_am_bp.py` / `cells_am_notch.py` | 4-5K each | LP / HP / BP / Notch | Ackerberg-Mossberg (thin per-family wrappers) |
 | `cells_am_core.py` | 16K | — | Shared Ackerberg-Mossberg nodal (MNA) model |
-| `tf_derivation_v2.py` | 20K | — | **Cell registry/dispatcher**: `all_cells()`, `derive_all()`, `get_cases()`, caching. Routes to cell modules by `topo["family"]` |
+| `tf_derivation_v2.py` | 31K | — | **Cell registry/dispatcher**: `all_cells()`, `derive_all()`, `get_cases()`, caching. Routes to cell modules by `topo["family"]`. FS-028 S2-1: `get_templates()` = each cell's design-parametric ideal case (`build_ideal(topo, {})`, targets symbolic) + non-ideal case, derived once per process and cached in the TF cache (`template_key`, `IDEAL_MODEL_REV`); `design_cases()` = the solver pipeline's cases from those templates, per-cell numeric `targets` attached, no symbolic work |
 | `tf_symbols.py` | 4K | — | Shared SymPy symbols (s, R1-R7, C1-C4, A_ol, etc.) |
 
 ### Tier C — Synthesis Engine (family-agnostic)
 | File | Size | Purpose |
 |---|---|---|
-| `unified_solver_v2.py` | 56K | **Second largest.** Phase-1/Phase-3/ZM multistart optimization. `run_synthesis()` entry point. Lines ~1-130 = grids/layout helpers; ~270-450 = worker init + phase1; ~450-660 = phase3 worker; ~660-930 = snap/sensitivity/harvest; ~926+ = `run_synthesis` orchestrator |
-| `zero_manifold_solver.py` | 20K | Alternative solver using zero-manifold approach: `solve_zero_manifold()` |
-| `nonideal_solver.py` | 16K | Op-amp GBW correction: `solve_nonideal()` — adjusts ideal solutions for finite op-amp bandwidth |
+| `unified_solver_v2.py` | 80K | **Second largest.** Phase-1/Phase-3/ZM multistart optimization. `run_synthesis()` entry point. Lines ~1-400 = grids/layout helpers, `rescale_isolated_r5r6`; ~400-460 = `worker_packs` (per-cell layout + kernel sources, built in the orchestrator) + `_init_worker` (exec's the kernel sources — no sympy work); ~460-620 = bounds + phase1; ~620-910 = phase3 worker + zm worker; ~910-1300 = snap scale / sensitivity proxy (`_sens_funcs`, kernels) / harvest / dedup / `apply_equalize`; ~1300+ = `run_synthesis` orchestrator |
+| `zero_manifold_solver.py` | 21K | Alternative solver using zero-manifold approach: `solve_zero_manifold()`; `prep_cell_funcs` (lambdify, serial path) / `assemble_cell_funcs` (same dict from compiled kernels, the pool path) |
+| `nonideal_solver.py` | 16K | Op-amp GBW correction: `solve_nonideal()` — adjusts ideal solutions for finite op-amp bandwidth. Runs in-process (FS-028 S2-1), on `design_cases` and the process's `make_response_func` memo |
+| `cell_kernels.py` | 12K | **Compile-once cell kernels (FS-028 S2-1).** Lambdified functions kept as generated Python source, rebuilt anywhere by `load(srcs)` (exec in lambdify's numpy namespace, ~ms). Design-independent groups per (cell, Equalize variant), generated once and cached on disk (`<tf cache stem>_kernels_k<KERNEL_REV>.json`) by `sources(case, group)`: `gain` (a1, a2, h0, hinf — worker set), `sens` (harvest's a1/a2 proxy), `zm` (den_i/num_i), `res` (DESIGN-PARAMETRIC res/jac/r5, targets as trailing args, `bind`; for S2-2/S2-3, not on the TRF path). `design_sources(case)` = this design's numeric res/jac/r5, source-identical to the old per-design lambdify (memory LRU) — the Phase-1/3 path, so results stay bit-identical. Check: `python dev/fs028/check_kernels.py` |
 | `discrete_snapper.py` | 20K | E-series resistor/cap snapping: `snap_to_hardware()` |
 | `scoring.py` | 16K | Solution quality scoring: `score_solution()`, response metrics (fc error, Q error, gain error, passband ripple) |
 | `filter_synthesis.py` | 8K | Thin wrapper: `synthesize()` — calls unified_solver → nonideal → snap → score pipeline |
@@ -126,7 +127,8 @@ Sidebar specs
   → [Tab 1-2: plots + roots, pairing in app.py]
   → [Tab 3: topology_tab]
     → topology_tab.section_kind() → pairing_utils.family_from_section() → solver kind
-    → tf_derivation_v2.get_cases() → symbolic TFs
+    → tf_derivation_v2.design_cases() → per-design cases from once-derived templates
+      (cell_kernels → compiled residual / Jacobian / gain kernels for the workers)
     → solvability_probe.assess() → feasibility
     → unified_solver_v2.run_synthesis() → continuous solutions
     → nonideal_solver.solve_nonideal() → op-amp corrected
@@ -146,7 +148,7 @@ Sidebar specs
 - **stage**: dict with `pole_id`, `zero_ids`, `absorbed_real_id`, `type`. Created by `auto_pair_stages()`.
 - **brick**: dict with `id`, `root`, `w0`, `Q`, `type` ("Complex Pair"/"Real"). From `build_stage_bricks()`.
 - **topo**: dict with `family`, `order`, `gain`, `notch`, `has_R7`, plus symbolic circuit equations.
-- **case**: dict with ideal/nonideal TF expressions, component names, substitution maps. From `derive_all()`.
+- **case**: dict with ideal/nonideal TF expressions, component names, substitution maps. From `derive_all()` / `get_cases()` (per-design: `res_eqs` numeric in the targets). Solver-path cases from `design_cases()` (FS-028 S2-1) keep `res_eqs` design-parametric and add `targets` = the cell's numeric (p1, w0, wz, Q, K) (`TF.TARGETS` order; K per cell in DC/HF-gain mode); `apply_equalize` adds `equalized: True` (its own kernel variant) and `equalize_subs` (re-applied after the design subs by `cell_kernels.design_sources`). Evaluate a design-parametric `res_eqs` only through `cell_kernels`.
 - **cfg**: synthesis config dict — `w0`, `Q`, `wz`, `K`, cap/res series, ranges. Built by `topology_tab._build_cfg()`.
 
 ---
@@ -156,7 +158,7 @@ Sidebar specs
 1. **For sidebar/UI changes**: look at `ui_components.py` (widget blocks) or `app.py` L250-290 (sidebar chassis).
 2. **For plot changes**: `plot_utils.py` (main response plots) or `hw_plots.py` (hardware-level/MC plots).
 3. **For adding a new cell topology**: see any `cells_*.py` as template + register in `tf_derivation_v2.py`.
-4. **For solver/optimization bugs**: `unified_solver_v2.py` (main solver), `zero_manifold_solver.py` (alt solver).
+4. **For solver/optimization bugs**: `unified_solver_v2.py` (main solver), `zero_manifold_solver.py` (alt solver). Solver performance (FS-028): analysis in `dev/FS-028_solver_performance_analysis.md`, harness in `dev/fs028/`; compiled kernels in `cell_kernels.py` (checked by `python dev/fs028/check_kernels.py`).
 5. **For filter math/approximation**: `filter_solvers.py` (prototype), `filter_engine.py` (orchestrator). Bessel / Equiripple Delay live in `delay_solvers.py`; their sidebar is `ui_components.draw_delay_order_block` / `draw_delay_block` plus the resolution step in `app.py` (L389-532); math base in `dev/FS-006_bessel_eqdelay_design_note.md`, numeric checks `python dev/fs006/check_delay_solvers.py`.
 6. **For schematic rendering**: `schematic_svg.py`.
 7. **For scoring/metrics**: `scoring.py`.

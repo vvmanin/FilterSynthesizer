@@ -19,8 +19,8 @@
 #
 #  This reuses the validated tf_derivation cache + make_response_func,
 #  and the same caps-fixed / resistors-free philosophy as the ideal
-#  solver's Phase 3. Each correction is independent -> parallelized
-#  across all cores with a ProcessPoolExecutor + per-worker init.
+#  solver's Phase 3. Each correction is independent; they run in-process
+#  (FS-028 S2-1: a per-section pool cost far more to start than the work).
 # =====================================================================
 
 import os
@@ -28,13 +28,13 @@ os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
 
+import threading
 import time
 import numpy as np
 import sympy as sp
 from scipy.optimize import least_squares
-from concurrent.futures import ProcessPoolExecutor
 
-from tf_derivation_v2 import (get_cases, make_response_func, cell_components,
+from tf_derivation_v2 import (get_cases, design_cases, make_response_func, cell_components,
                               all_cells, topo_name, p1, w0, wz, Q, K)
 from scoring import score_solution
 import opamp_library
@@ -191,15 +191,12 @@ def _correct(ideal_sol, Hid, Hni, opamp, cfg, fz, comp_names, band="LP"):
 
 
 # =====================================================================
-# 2. WORKER (rebuilds response funcs once per process)
+# 2. WORKER (in-process; response funcs from the make_response_func memo)
 # =====================================================================
 _W = {}
+_LOCK = threading.Lock()
 
-def _init_worker(design_subs_str, opamp, cfg, fz, k_map=None, topo_names=None):
-    design = {sp.Symbol(k): v for k, v in design_subs_str.items()}
-    if topo_names is None:
-        topo_names = [topo_name(t) for t in all_cells()]
-    cases = get_cases(design, verbose=False, k_map=k_map, topo_names=topo_names)
+def _init_worker(cases, opamp, cfg, fz, topo_names):
     _W["cases"] = cases
     _W["opamp"] = opamp
     _W["cfg"] = cfg
@@ -238,8 +235,15 @@ def solve_nonideal(ideal_solutions, cfg, opamp="TL072H",
     dc_gain         : if set, per-topology K is used (DC-gain mode), matching
                       the solver; the ideal target the pre-distortion tracks
                       then carries the correct per-topology gain.
+    n_cores         : accepted for API compatibility; unused (runs in-process).
+
+    Runs IN-PROCESS (FS-028 S2-1). The corrections are 0.1-3 CPU-s per section,
+    while the per-section process pool it used to spin up re-derived every cell
+    in every worker (up to ~10 s each, x n_cores). Here the cases come from the
+    once-per-process templates and the response functions from this process's
+    make_response_func memo (shared with the snapper), so nothing is derived or
+    lambdified twice. Same _correct / score_solution per row, same order.
     """
-    n_cores = n_cores or os.cpu_count()
     if isinstance(opamp, str):
         op = opamp_library.named_params(opamp); op_name = opamp
     else:
@@ -248,37 +252,30 @@ def solve_nonideal(ideal_solutions, cfg, opamp="TL072H",
     fz = cfg["fz"]
     design = {p1: 2*np.pi*cfg["f1"], w0: 2*np.pi*cfg["f0"],
               wz: 2*np.pi*cfg["fz"], Q: cfg["Q"], K: cfg.get("K", 1.0)}
-    design_str = {str(k): float(v) for k, v in design.items()}
     # Only the topologies that actually appear in the ideal solutions need their
-    # (ideal+nonideal) cases derived and response funcs lambdified -- deriving the
-    # whole catalog in every worker is what made this stage dominate runtime.
+    # cases and response funcs.
     topo_names = sorted({s["topology"] for s in ideal_solutions})
     import tf_derivation_v2 as _TF
+    k_map = None
     if dc_gain is not None:
-        k_map = {_TF.topo_name(t): _TF.dc_gain_to_K(t, design, dc_gain)
-                 for t in _TF.all_cells()}
-    else:
-        # K-mode: still force the FRESH-derive path (a non-None k_map routes
-        # get_cases through derive_all) instead of the shared disk cache. The
-        # cache round-trips the non-ideal TF through srepr/sympify, and the
-        # 3rd-order AM non-ideal TF is ~766k ops -- its parse is catastrophically
-        # slow and memory-heavy PER WORKER (x n_cores), the same blow-up the
-        # Phase-1/3 worker cache had. Re-deriving it is ~5 s and bounded. K does
-        # not affect the TFs this stage uses (Hid/Hni), so cfg["K"] for all is fine.
-        _kK = cfg.get("K", 1.0)
-        k_map = {_TF.topo_name(t): _kK for t in _TF.all_cells()}
+        _n2t = {_TF.topo_name(t): t for t in _TF.all_cells()}
+        k_map = {nm: _TF.dc_gain_to_K(_n2t[nm], design, dc_gain)
+                 for nm in topo_names if nm in _n2t}
+    # K does not enter the TFs this stage uses (Hid/Hni); the cases are the
+    # design-independent templates (the AM non-ideal ones are MNA, so the old
+    # ~766k-op parse/derive problem never arises).
+    cases = design_cases(design, topo_names, k_map=k_map)
 
     if verbose:
-        print(f"Non-ideal synthesis | {n_cores} cores | op-amp '{op_name}' "
+        print(f"Non-ideal synthesis | in-process | op-amp '{op_name}' "
               f"(A_ol={op['A_ol']:.0e}, GBWP={op['GBWP_hz']:.1e} Hz, "
               f"Ro={op['Ro']*1e6:.0f} ohm)")
         print(f"  Correcting {len(ideal_solutions)} ideal solutions...")
 
     t0 = time.time()
-    with ProcessPoolExecutor(max_workers=n_cores,
-                             initializer=_init_worker,
-                             initargs=(design_str, op, cfg, fz, k_map, topo_names)) as pool:
-        results = list(pool.map(_worker, ideal_solutions, chunksize=1))
+    with _LOCK:                          # _W is module state; one correction batch at a time
+        _init_worker(cases, op, cfg, fz, topo_names)
+        results = [_worker(s) for s in ideal_solutions]
 
     out = [r for r in results if r is not None]
     if sort_by:
