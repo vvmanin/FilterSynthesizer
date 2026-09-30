@@ -151,13 +151,11 @@ first.
 | FS-026 | LTspice transient export (step; impulse from the step) | P2 *(s)* | PROPOSED | high | FS-008 (hard, done), FS-024 (hard) |
 | FS-027 | Realized response with inter-stage loading (feasibility first) | P3 *(s)* | PROPOSED | plan high / build high | FS-008 (hard, done) |
 | FS-028 | Topology solver performance — analysis first | P2 *(s)* | VALIDATING (Stage 1 analysis) | analysis xhigh / build per finding | — |
-| FS-029 | Vendor op-amp model import (guided download, per-part wrapper; FS-008's open items) | P1 *(s)* | ACTIVE | medium | FS-008 (hard, done) |
 | FS-030 | Topology tab: section spec resets to default when a solve finishes | P2 *(s)* | PROPOSED | plan high / build medium | — |
 
 *(s)* = suggested priority, awaiting maintainer confirmation.
 
-Suggested order: FS-029 (the P1 track: FS-008 is done, its open items continue
-there; FS-005 and FS-006 are done); FS-007 is done (built before FS-016, whose gaps it gates). The UI polish
+Suggested order: the P1 track (FS-005, FS-006, FS-008, FS-029) is done; FS-007 is done (built before FS-016, whose gaps it gates). The UI polish
 track FS-001 → FS-004 is done.
 
 Non-urgent follow-ups added 2026-09-27, ranked by implementation convenience
@@ -174,8 +172,7 @@ stage assignments); FS-007 gates today's pairer gaps (FS-016 may relax its gate 
 Op-amp data items: FS-018 before FS-009 (it defines how the noise fields are
 sourced) and before FS-019 (additions follow its curation rule).
 
-SPICE track: FS-008 (AC + Monte Carlo) done, FS-029 (vendor model import)
-closes its open items; FS-026 (transient) after both
+SPICE track: FS-008 (AC + Monte Carlo) and FS-029 (vendor model import) done; FS-026 (transient) after both
 FS-008 and FS-024; FS-009 / FS-010 plug into FS-008's bundle builder and IR;
 FS-027 (loaded realized response) reuses FS-008's IR and MNA.
 
@@ -473,30 +470,6 @@ FS-027 (loaded realized response) reuses FS-008's IR and MNA.
 
 ---
 
-### FS-029 — Vendor op-amp model import (guided download, per-part wrapper)
-- **State:** ACTIVE (built 2026-09-30 — waiting on the maintainer's LTspice checks, see Validation)
-- **Priority:** P1 *(s)* (carries FS-008's open items: a design mixing two TI parts fails in LTspice until the wrapper is confirmed)
-- **Effort:** medium
-- **Tiers:** D (`spice_opamps`, `spice_export`, `spice_ui`, 4 TI dummies; Tier A/B/C and the TF cache untouched)
-- **Depends on:** FS-008 (hard, done — dummies, *Vendor model files* panel, `install_model`, consent)
-- **Contracts:** —
-- **Files:** `spice_opamps.py` (subckt scan, pin roles, wrapper, import, `consent.json` v2 `parts`), `spice_export.py` (per-part FS generic fallback, wrapper + vendor copy bundled), `spice_ui.py` (per-part import panel), `LTspice_Library/opamps/{TL072H,OPA1656,LMV358A,TLV9002}.asc` (Value `FS_<PART>`, `.include FS_<PART>.lib` — text edit of two lines), `dev/fs008/check_spice_export.py` (scoped netlist reader, check 12 step 1, new check 13), new `dev/fs029/make_wrapper_test.py`, `docs/ARCHITECTURE.md`
-- **Goal:** A vendor part's SPICE model is imported by the user in a few clicks from the file they downloaded themselves, stored unchanged, and wrapped so any mix of vendor models runs in one LTspice file; a part without an imported model still exports and simulates.
-- **Scope:**
-  - In — per vendor part in the design: product-page link, consent tick, the user's own zip / model file picked from any folder (zip detected by content, one nested zip deep; any extension; encrypted / non-SPICE / not-5-pin rejected with the reason), the model subckt chosen by name (exact, `X` family wildcard, prefix) and its pin roles read from pin names, a `PINOUT ORDER` note or ADI node-assignment columns — shown for confirmation in 5 selectboxes; stored as `<PART>__<file>` (the vendor's bytes; only top-level-only lines such as a closing `.END` commented out) + the generated `FS_<PART>.lib` wrapper; a consented pre-FS-029 file in models/ offered without a new download; re-import for a new revision; per-part FS generic fallback at export for any part not imported (the global *simplified generic models* checkbox kept); wrapper + vendor copy bundled with the DO-NOT-SHARE README notice.
-  - Out — any in-app fetch or direct file link (links are revision-numbered, may need a login, and would skip the vendor's own terms page), scraping, a Downloads-folder scan (maintainer: picker only), non-zip archives, models with other than 5 pins (shutdown / enable), shipping or mirroring any vendor file, encrypted models.
-- **Validation:**
-  - `python dev/fs008/check_spice_export.py` — all pass, incl. check 13 (synthetic TI- and ADI-style models sharing a helper name: scan + roles, rejections, fallback, import, bundle; `.cir` and `.asc` solve = IR 1.5e-11 through nested scoping and `.include`; the same models flat collide; a lost vendor copy = not imported; legacy file offered). `python verify.py` passes. App block exercised through AppTest: fallback warnings → consent → pin roles → *Import* → sections switch to `FS_<PART>` and the files are bundled.
-  - Maintainer, LTspice: (1) `python dev/fs029/make_wrapper_test.py` writes three netlists with LMV358A + TL072H (your local TI files, output outside the repo): `test_C_flat.cir` should fail (the FS-008 collision), `test_A_include.cir` (what the app builds) and `test_B_pasted.cir` (fallback) should run with both followers at ~0 dB; if A fails and B runs, switch `wrapper_text` to pasting. (2) Import the four TI models in the app from their zips on a clean profile; export a design mixing two TI parts and run it from a clean folder. (3) Carried from FS-008's last round: the AM templates, the nominal `.asc` auto-plot, the header text.
-- **Open questions:** none (answered 2026-09-30: product page, not a direct file link; manual download with consent per part; flat `<PART>__<file>` storage; per-part FS generic fallback at export, global checkbox kept; file picker only).
-- **Notes:**
-  - Re-scoped 2026-09-30 (maintainer): from an automatic in-app download to a guided manual import — links to model files are not stable and vendors ship zips, `.lib`, `.txt`, `.mod`, so the handler reads by content; the wrapper isolates helper-name collisions between vendor models (found in FS-008) and makes the dummies independent of the downloaded file's name and subckt name.
-  - Carried from FS-008 (closed 2026-09-30): TI's Green-Williams-Lis macro-models define helpers at file top level under shared names (`VOS_SRC_0`, `VNSE_0`, `VCCS_LIM_ZO_0`, …; 15 shared between LMV358A and TL07xH, 12 with different bodies), so two TI parts in one flat netlist failed. The wrapper puts them inside `.subckt FS_<PART>`. Its `XV` line comes before the `.include`.
-  - Maintainer LTspice 26 check (2026-09-30): wrapper test A (`.include` inside the subckt) runs, C (flat) fails as expected. An exported design with an imported TL072H then failed: `tl07xh_tl08xh.lib` ends with `.END`, which LTspice allows only at top level. Fix: the stored vendor copy has top-level-only directive lines (`.END`, `.options`, `.temp`, analyses, ...) commented out (`localize_model`; every other byte unchanged; the record lists them under `disabled`); earlier imports are repaired in place once per session (`repair_imports`). The check's netlist reader now rejects such a line inside a subckt, and check 13's TI-style fixture ends with `.END`.
-  - Legal position (not legal advice): part numbers are used only to name the parts (no logos, no suggestion of endorsement); the library's A_ol / GBWP / Ro values are datasheet facts, and the FS generic model is the project's own; vendor files stay on the user's PC and in their own zips, and only the generated wrapper (no vendor text) is the tool's.
-  - `consent.json` is kept and extended (v2: `parts` records wrapper, file, original name, subckt, pins, roles, sha256, source, time) instead of a new `models.json`.
-- **Updated:** 2026-09-30 (re-scoped and built)
-
 ---
 
 ### FS-030 — Topology tab: section spec resets to default when a solve finishes
@@ -531,6 +504,7 @@ FS-003 — Fold "Roots & Transfer Function" tab into Response Plots — DONE 202
 FS-004 — Biquad Pairing tab: compact layout, rad/s note font — DONE 2026-09-28 — same commit (`bp_body` container under CSS 7b; rules and `<br>` removed; units note body-size)
 FS-007 — Custom filter design (coefficients or poles/zeros) — DONE 2026-09-28 — commit "feat(custom): FS-007 Custom H(s) …" (`custom_tf.py`, Response "Custom H(s)" + editor panel; design note `dev/FS-007_custom_tf_design_note.md` incl. §14 build notes / maintainer refinements; checks `dev/fs007/check_custom_tf.py`)
 FS-008 — LTspice export with Monte Carlo presets — DONE 2026-09-30 — f7c83f6 (`spice_cells` / `spice_asc` / `spice_opamps` / `spice_export` / `spice_ui`, `LTspice_Library/` with 26 cell templates; design note `dev/FS-008_ltspice_export_design_note.md`; checks `dev/fs008/check_spice_export.py`; open items — the two-TI-model helper collision and the last round's LTspice checks — moved to FS-029; the rule for new cells lives in `CLAUDE.md`)
+FS-029 — Vendor op-amp model import (guided download, per-part wrapper) — DONE 2026-09-30 — maintainer's commit (`spice_opamps` model_candidates / install_wrapped / localize_model / repair_imports, FS_<PART>.lib wrapper isolates vendor helper subckts; per-part FS generic fallback; checks `dev/fs008/check_spice_export.py` 13, LTspice test `dev/fs029/make_wrapper_test.py`; LTspice 26: two TI parts run)
 
 ---
 
