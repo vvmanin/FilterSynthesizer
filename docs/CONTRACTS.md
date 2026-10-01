@@ -38,8 +38,13 @@ For the tier model and file map see `docs/ARCHITECTURE.md`.
   Equalize substitution — the old derive-then-equalize order), which is
   source-identical to the old per-design lambdify, so results are
   bit-identical. The design-parametric `res` group (targets as arguments)
-  agrees only to rounding, which re-samples the chaotic multistart; it is for
-  solvers that are validated on their own (S2-2/S2-3). The template key is the non-ideal salt plus
+  agrees only to rounding, which re-samples the chaotic multistart; it is the
+  batched solver's (S2-2, the default; validated on its own, §7), replayed on
+  N rows at once by `cell_kernels.load_batched`. That replay swaps only
+  `array` (a lambdified Matrix) for a broadcasting stand-in, so a `res` / `jac`
+  / `r5` kernel may use arithmetic and `array` only: a new cell must pass
+  `python dev/fs028/check_kernels.py --cells <name>` (batched vs scalar
+  replay). The template key is the non-ideal salt plus
   `IDEAL_MODEL_REV`: bump it when a `build_ideal` changes shape without
   changing `var_list`. The kernel cache file is named after the TF cache
   (`<stem>_kernels_k<KERNEL_REV>.json`) and keyed by the template key, so any
@@ -176,4 +181,22 @@ Custom H(s) entered with a negative K is used as |K|, with a warning.
   initargs through a small pipe; initargs above the buffer serialize the start
   of every worker behind the previous child's numpy/scipy/sympy import (32 × ~2 s
   of near-idle CPU). Bulk data for workers goes in a per-run file
-  (`unified_solver_v2` writes the kernel packs to one).
+  (`unified_solver_v2` writes the kernel packs to one). Since S2-2 this
+  concerns only the `FS_SOLVER=trf` fallback and any future pool.
+- Batched solve (FS-028 S2-2): a section solve runs in ONE process, no pool.
+  `batched_lm.solve` takes every start of a Phase-1 / Phase-3 / ZM task list
+  (and the non-ideal corrections of a topology) as one numpy batch: projected
+  LM in u = log x, the TRF calls' own termination tolerances, `success` =
+  stopped by a criterion (not the iteration cap). Measured on the 31-section
+  benchmark: ~50–80× less serial CPU than the TRF multistart, 0.1–3 s per
+  section on one core against 2–20 s on 32 workers. Rules that keep result
+  quality (each measured in `dev/FS-028_solver_performance_analysis.md` §12):
+  Phase 1 solves every start twice, with minimum-norm steps in x (TRF-like)
+  and in log x (`P1_METRICS`), because the step metric decides which root a
+  start reaches and neither sample contains the other; `harvest(...,
+  merge_dup_hints=True)` keeps distinct duplicate roots of a cap vector as
+  extra hints (LM roots all end near cost 1e-20, so "lowest cost per cap
+  vector" no longer means anything); Phase 3 solves each hint with both step
+  metrics too and keeps the lowest-sens root within `accept` (not the first
+  hint's). `FS_SOLVER=trf` restores the
+  S2-1 path bit for bit (scipy TRF, Phase-1/3 pool, per-row non-ideal TRF).

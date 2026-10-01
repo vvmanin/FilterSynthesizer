@@ -20,8 +20,12 @@
 #  handled per cell: algebraic constraint (notch), free variable
 #  (notchless-gained), or absent (unity followers).
 #
-#  Parallel across all cores via ProcessPoolExecutor + per-worker
-#  topology rebuild (BLAS pinned to 1 thread/worker).
+#  Solve (FS-028 S2-2): every task list (Phase-1 starts, Phase-3 cap
+#  combos, zero-manifold combos) runs in THIS process as a few numpy batches
+#  per cell -- batched projected log-space LM (batched_lm.py) on the
+#  design-parametric kernels (cell_kernels). The previous path -- scipy TRF,
+#  one ProcessPoolExecutor task per start, BLAS pinned to 1 thread/worker --
+#  stays selectable with FS_SOLVER=trf.
 # =====================================================================
 
 import os
@@ -44,6 +48,7 @@ from scipy.optimize import least_squares
 
 import tf_derivation_v2 as TF
 import cell_kernels as CK
+import batched_lm as BLM
 import zero_manifold_solver as ZM
 import cells_mfb_hp
 
@@ -631,6 +636,187 @@ def phase1_worker(task):
 
 
 # =====================================================================
+# Phase-3 solution assembly (shared by the TRF worker and the batched path)
+# =====================================================================
+def _assemble_solution(F, cfg, k_map, name, cap_combo, xvec, cost):
+    """Turn a Phase-3 resistor vector + its target-cost into a full scored
+    solution dict (R5 from the notch constraint, gain, bound/ratio checks,
+    coefficient sensitivity). Returns None if it fails a hard check. Shared by
+    phase3_worker (TRF path) and the batched path (FS-028 S2-2): `F` is the
+    cell's function dict (layout, r5_f, a1_f, a2_f, h0_f, hinf_f -- scalar
+    callables), `k_map` the per-cell K of DC/HF-gain mode (or {})."""
+    lay = F["layout"]; r5_f = F["r5_f"]
+    res_names = lay["res_names"]
+    Rsol = {n: float(v) for n, v in zip(res_names, xvec)}
+    full = dict(cap_combo); full.update(Rsol)
+    # equalize (handbook R5=R6, C2=C3): the ideal solve dropped R6,C3 -> mirror
+    # them back before anything reads them (rescale pins R7=R8=sqrt(R5*R6)).
+    if cfg.get("equalize_rc") and str(lay.get("family","")).endswith("-AM"):
+        if full.get("R5") is not None and "R6" not in full:
+            full["R6"] = full["R5"]
+        if full.get("C2") is not None and "C3" not in full:
+            full["C3"] = full["C2"]
+    if r5_f is not None:
+        va = [full[n] for n in lay["names"]]
+        R5_val = float(r5_f(*va))
+        if R5_val <= 0:
+            return None
+        full["R5"] = R5_val
+    elif "R5" in Rsol:
+        full["R5"] = Rsol["R5"]          # free (notchless-gained)
+    rescale_isolated_r5r6(full, lay, cfg)
+    fam = lay.get("family", "LP")
+    if fam == "HP":
+        if lay["gain"] == "gained":
+            r7 = full.get("R7")
+            internal_gain = 1.0 + full.get("R5", 0)/r7 if r7 else 1.0
+        elif lay["gain"] == "atten":
+            C2v, C4v = full.get("C2"), full.get("C4")
+            if C2v and C4v:
+                if lay["order"] == 3:
+                    C1v = full.get("C1") or 0.0
+                    den = C1v*C2v + C1v*C4v + C2v*C4v
+                    internal_gain = (C1v*C2v/den) if den else 1.0
+                else:
+                    internal_gain = C2v/(C2v + C4v)
+            else:
+                internal_gain = 1.0
+        else:
+            internal_gain = 1.0
+    elif fam == "NOTCH":
+        # Inverting biquad: |H(0)| = |H(inf)| = R5/R4 (the same at DC and HF).
+        # The atten cell (no R6) still reports its emergent R5/R4 magnitude.
+        r4 = full.get("R4"); r5 = full.get("R5")
+        internal_gain = (r5 / r4) if (r4 and r5) else 1.0
+    elif fam == "BP":
+        # Band-pass passband gain is the swept CENTER-frequency peak (= Ki Q/w0),
+        # not a DC/HF plateau; it is read per-solution by the realized-peak
+        # evaluator (topology_tab._realized_dc), so the BOM "_dc" comes from
+        # there. Report a neutral 1.0 here. Sign stays +1 (non-inverting).
+        internal_gain = 1.0
+    elif fam == "LP-MFB":
+        # Gain is a free R-ratio on a fixed circuit (-R4/R2 all-pole; a
+        # node-divider for the notch). Read it straight off the realized DC
+        # transfer function rather than any VCVS 1+R5/R6 form.
+        internal_gain = abs(float(F["h0_f"](*[full[n] for n in lay["names"]])))
+    elif fam == "HP-MFB":
+        # HP passband gain is the HIGH-FREQUENCY plateau = |H(inf)| (H(0)=0
+        # here -- origin zeros block DC, so h0_f is meaningless). all-pole:
+        # |C2/C4| (2nd) etc; notch: R8/(R3+R8) < 1 structurally. Read straight
+        # off the realized TF via the leading-coeff ratio.
+        internal_gain = abs(float(F["hinf_f"](*[full[n] for n in lay["names"]])))
+    elif fam == "BP-MFB":
+        # Band-pass passband gain is the swept CENTER-frequency peak (= |Ki| Q/w0),
+        # read per-solution by the realized-peak evaluator (topology_tab._realized_dc),
+        # so the BOM "_dc" comes from there. Report a neutral 1.0 here. The stage is
+        # INVERTING; sign is set below (out["sign"] = -1).
+        internal_gain = 1.0
+    elif fam == "NOTCH-MFB":
+        # Pure-notch MFB passband gain = |H(0)| = |H(inf)| = R4/(R1+R4), a positive
+        # divider < 1. Read straight off the realized DC transfer function (h0_f),
+        # exactly like the LP-MFB all-pole gain readout.
+        internal_gain = abs(float(F["h0_f"](*[full[n] for n in lay["names"]])))
+    elif fam == "LP-AM":
+        # AM LP gain is a free R-ratio (-R6/R2 at out1, -R5/R1 at out2):
+        # read it straight off the realized DC transfer function.
+        internal_gain = abs(float(F["h0_f"](*[full[n] for n in lay["names"]])))
+    elif fam == "HP-AM":
+        # AM HP passband gain is the HF plateau |H(inf)| = C1/C2 (x input
+        # divider at 3rd order); H(0) = 0 -- read the leading-coeff ratio.
+        internal_gain = abs(float(F["hinf_f"](*[full[n] for n in lay["names"]])))
+    elif fam == "BP-AM":
+        # Band-pass passband gain is the swept CENTER-frequency peak, read
+        # per-solution by topology_tab._realized_dc. Neutral 1.0 here;
+        # the stage is INVERTING (out["sign"] = -1 below).
+        internal_gain = 1.0
+    elif fam == "NOTCH-AM":
+        # AM pure-notch plateau |H(0)| = |H(inf)| = C1/C2 -- read the
+        # leading-coeff ratio (well-defined at both ends once wz = w0).
+        internal_gain = abs(float(F["hinf_f"](*[full[n] for n in lay["names"]])))
+    else:
+        if lay["gain"] == "gained":
+            if lay["has_R7"]:
+                internal_gain = 1.0 + full.get("R7", 0)/full["R6"]
+            else:
+                internal_gain = 1.0 + full.get("R5", 0)/full["R6"] if "R6" in full else 1.0
+        else:
+            internal_gain = 1.0
+    # R-range check. Every resistor honours R_max; lower bound is R_min,
+    # except LP-MFB's R8 which may sit down to R_min*R8_RELAX_FACTOR.
+    r8_floor = cfg["R_min"] * R8_RELAX_FACTOR
+    for k, v in full.items():
+        if not k.startswith("R") or v is None:
+            continue
+        lo = r8_floor if (k == "R8" and fam == "LP-MFB") else cfg["R_min"]
+        if v < lo or v > cfg["R_max"]:
+            return None
+    # MAX_R_RATIO bounds the RC-NETWORK spread. The HPn-MFB2 (+)-input
+    # divider R3 (a->p) / R4 (p->gnd) touches NO capacitor -- node p is
+    # cap-free -- so R4/R3 = D/(1-D) IS the passband-gain setting, not a
+    # network spread, and it necessarily blows up as the cell approaches its
+    # structural gain floor K -> 1+. Policing it as a spread makes the routed
+    # cell return ZERO solutions for every target in ~(0.99, 1.012): the
+    # minimum achievable R1..R4 ratio at K=1.00005 is 1.08e4 against a 9000
+    # limit, while R1..R3 alone is 83. Same escape LP-MFB grants R8 via
+    # R8_RELAX_FACTOR.
+    core_names = (("R1", "R2", "R3")
+                  if (fam == "HP-MFB" and lay["notch"] and lay.get("v2"))
+                  else ("R1", "R2", "R3", "R4"))
+    core = [full[r] for r in core_names if r in full]
+    if len(core) >= 2 and max(core)/min(core) > cfg["MAX_R_RATIO"]:
+        return None
+    # HF-gain gate (HP-MFB notch cells). 3HPn-MFB2 is MANIFOLD-0 (6 resistors,
+    # 6 residuals), so phase3_worker's acceptance is 5e-3 on the AGGREGATE
+    # squared residual -- it can bury sqrt(5e-3) = 7.1% of RELATIVE gain error
+    # and still report "converged" (measured: target 1.05 -> realized 1.1157;
+    # target 1.5 -> realized 1.557). Now that the 0.99 margin makes MFB2 the
+    # SOLE cell above unity, that is the dominant error, so check the realized
+    # H(inf) directly. internal_gain is |hinf_f(...)| off the exact TF and, for
+    # every HP cell, |K| is the target HF gain (dc_gain_to_K -> sign*|gain|).
+    # Slack = max(gain_tol, GAIN_SLACK): targets between the routing margin and
+    # MFB2's envelope-limited floor (~1.006) land within 1.6%, i.e. inside the
+    # +-2% window the UI already calls "unity".
+    gain_err = None
+    if fam == "HP-MFB" and lay["notch"]:
+        Kt = abs(float((k_map or {}).get(name) or 0.0))
+        if Kt > 0.0:
+            gain_err = abs(internal_gain - Kt) / Kt
+            slack = max(float(cfg.get("gain_tol", 0.005) or 0.005), GAIN_SLACK)
+            if gain_err > slack:
+                return None
+    va = [full[n] for n in lay["names"]]
+    a1b = F["a1_f"](*va); a2b = F["a2_f"](*va)
+    ss = 0.0
+    for i in range(len(va)):
+        p = list(va); p[i] *= 1.01
+        ss += ((F["a1_f"](*p)-a1b)/a1b/0.01)**2 + ((F["a2_f"](*p)-a2b)/a2b/0.01)**2
+    out = {"topology": name, "sens_score": float(np.sqrt(ss)),
+           "internal_gain": internal_gain, "cost": cost,
+           "gain_err": gain_err}
+    if fam == "NOTCH":
+        out["sign"] = -1        # single-op-amp notch is inverting (H = -R5/R4)
+    elif fam == "LP-MFB":
+        out["sign"] = +1 if lay["notch"] else -1   # notch non-inv; all-pole inv
+    elif fam == "HP-MFB":
+        out["sign"] = +1 if lay["notch"] else -1   # notch non-inv; all-pole inv
+    elif fam == "BP-MFB":
+        out["sign"] = -1        # MFB band-pass is inverting (Ki = b_lead/a_lead < 0)
+    elif fam == "NOTCH-MFB":
+        out["sign"] = +1        # MFB pure notch is non-inverting (H(0)=R4/(R1+R4)>0)
+    elif isinstance(fam, str) and fam.endswith("-AM"):
+        out["sign"] = -1        # every AM cell inverts (see cells_am_core)
+    for k in ["C1","C2","C3","C4","R1","R2","R3","R4","R5","R6","R7","R8"]:
+        out[k] = full.get(k, None if k in ("R5","R7","R8") else 0.0)
+    # carry parallel-cap provenance (-C1s twins: C1 = C1a||C1b) so the snapper
+    # (out = dict(sol)), the BOM display, and the schematic-name suffix all
+    # see the split. C1 itself already holds the parallel sum.
+    for k in ("C1a", "C1b", "C1_parallel", "C2a", "C2b", "C2_parallel"):
+        if full.get(k) is not None:
+            out[k] = full[k]
+    return out
+
+
+# =====================================================================
 # PHASE 3 worker
 # =====================================================================
 def phase3_worker(task):
@@ -689,173 +875,8 @@ def phase3_worker(task):
     # scored solution dict (R5 from the notch constraint, gain, bound/ratio
     # checks, coefficient sensitivity). Returns None if it fails a hard check.
     def _assemble(xvec, cost):
-        Rsol = {n: float(v) for n, v in zip(res_names, xvec)}
-        full = dict(task["cap_combo"]); full.update(Rsol)
-        # equalize (handbook R5=R6, C2=C3): the ideal solve dropped R6,C3 -> mirror
-        # them back before anything reads them (rescale pins R7=R8=sqrt(R5*R6)).
-        if cfg.get("equalize_rc") and str(lay.get("family","")).endswith("-AM"):
-            if full.get("R5") is not None and "R6" not in full:
-                full["R6"] = full["R5"]
-            if full.get("C2") is not None and "C3" not in full:
-                full["C3"] = full["C2"]
-        if r5_f is not None:
-            va = [full[n] for n in lay["names"]]
-            R5_val = float(r5_f(*va))
-            if R5_val <= 0:
-                return None
-            full["R5"] = R5_val
-        elif "R5" in Rsol:
-            full["R5"] = Rsol["R5"]          # free (notchless-gained)
-        rescale_isolated_r5r6(full, lay, cfg)
-        fam = lay.get("family", "LP")
-        if fam == "HP":
-            if lay["gain"] == "gained":
-                r7 = full.get("R7")
-                internal_gain = 1.0 + full.get("R5", 0)/r7 if r7 else 1.0
-            elif lay["gain"] == "atten":
-                C2v, C4v = full.get("C2"), full.get("C4")
-                if C2v and C4v:
-                    if lay["order"] == 3:
-                        C1v = full.get("C1") or 0.0
-                        den = C1v*C2v + C1v*C4v + C2v*C4v
-                        internal_gain = (C1v*C2v/den) if den else 1.0
-                    else:
-                        internal_gain = C2v/(C2v + C4v)
-                else:
-                    internal_gain = 1.0
-            else:
-                internal_gain = 1.0
-        elif fam == "NOTCH":
-            # Inverting biquad: |H(0)| = |H(inf)| = R5/R4 (the same at DC and HF).
-            # The atten cell (no R6) still reports its emergent R5/R4 magnitude.
-            r4 = full.get("R4"); r5 = full.get("R5")
-            internal_gain = (r5 / r4) if (r4 and r5) else 1.0
-        elif fam == "BP":
-            # Band-pass passband gain is the swept CENTER-frequency peak (= Ki Q/w0),
-            # not a DC/HF plateau; it is read per-solution by the realized-peak
-            # evaluator (topology_tab._realized_dc), so the BOM "_dc" comes from
-            # there. Report a neutral 1.0 here. Sign stays +1 (non-inverting).
-            internal_gain = 1.0
-        elif fam == "LP-MFB":
-            # Gain is a free R-ratio on a fixed circuit (-R4/R2 all-pole; a
-            # node-divider for the notch). Read it straight off the realized DC
-            # transfer function rather than any VCVS 1+R5/R6 form.
-            internal_gain = abs(float(F["h0_f"](*[full[n] for n in lay["names"]])))
-        elif fam == "HP-MFB":
-            # HP passband gain is the HIGH-FREQUENCY plateau = |H(inf)| (H(0)=0
-            # here -- origin zeros block DC, so h0_f is meaningless). all-pole:
-            # |C2/C4| (2nd) etc; notch: R8/(R3+R8) < 1 structurally. Read straight
-            # off the realized TF via the leading-coeff ratio.
-            internal_gain = abs(float(F["hinf_f"](*[full[n] for n in lay["names"]])))
-        elif fam == "BP-MFB":
-            # Band-pass passband gain is the swept CENTER-frequency peak (= |Ki| Q/w0),
-            # read per-solution by the realized-peak evaluator (topology_tab._realized_dc),
-            # so the BOM "_dc" comes from there. Report a neutral 1.0 here. The stage is
-            # INVERTING; sign is set below (out["sign"] = -1).
-            internal_gain = 1.0
-        elif fam == "NOTCH-MFB":
-            # Pure-notch MFB passband gain = |H(0)| = |H(inf)| = R4/(R1+R4), a positive
-            # divider < 1. Read straight off the realized DC transfer function (h0_f),
-            # exactly like the LP-MFB all-pole gain readout.
-            internal_gain = abs(float(F["h0_f"](*[full[n] for n in lay["names"]])))
-        elif fam == "LP-AM":
-            # AM LP gain is a free R-ratio (-R6/R2 at out1, -R5/R1 at out2):
-            # read it straight off the realized DC transfer function.
-            internal_gain = abs(float(F["h0_f"](*[full[n] for n in lay["names"]])))
-        elif fam == "HP-AM":
-            # AM HP passband gain is the HF plateau |H(inf)| = C1/C2 (x input
-            # divider at 3rd order); H(0) = 0 -- read the leading-coeff ratio.
-            internal_gain = abs(float(F["hinf_f"](*[full[n] for n in lay["names"]])))
-        elif fam == "BP-AM":
-            # Band-pass passband gain is the swept CENTER-frequency peak, read
-            # per-solution by topology_tab._realized_dc. Neutral 1.0 here;
-            # the stage is INVERTING (out["sign"] = -1 below).
-            internal_gain = 1.0
-        elif fam == "NOTCH-AM":
-            # AM pure-notch plateau |H(0)| = |H(inf)| = C1/C2 -- read the
-            # leading-coeff ratio (well-defined at both ends once wz = w0).
-            internal_gain = abs(float(F["hinf_f"](*[full[n] for n in lay["names"]])))
-        else:
-            if lay["gain"] == "gained":
-                if lay["has_R7"]:
-                    internal_gain = 1.0 + full.get("R7", 0)/full["R6"]
-                else:
-                    internal_gain = 1.0 + full.get("R5", 0)/full["R6"] if "R6" in full else 1.0
-            else:
-                internal_gain = 1.0
-        # R-range check. Every resistor honours R_max; lower bound is R_min,
-        # except LP-MFB's R8 which may sit down to R_min*R8_RELAX_FACTOR.
-        r8_floor = cfg["R_min"] * R8_RELAX_FACTOR
-        for k, v in full.items():
-            if not k.startswith("R") or v is None:
-                continue
-            lo = r8_floor if (k == "R8" and fam == "LP-MFB") else cfg["R_min"]
-            if v < lo or v > cfg["R_max"]:
-                return None
-        # MAX_R_RATIO bounds the RC-NETWORK spread. The HPn-MFB2 (+)-input
-        # divider R3 (a->p) / R4 (p->gnd) touches NO capacitor -- node p is
-        # cap-free -- so R4/R3 = D/(1-D) IS the passband-gain setting, not a
-        # network spread, and it necessarily blows up as the cell approaches its
-        # structural gain floor K -> 1+. Policing it as a spread makes the routed
-        # cell return ZERO solutions for every target in ~(0.99, 1.012): the
-        # minimum achievable R1..R4 ratio at K=1.00005 is 1.08e4 against a 9000
-        # limit, while R1..R3 alone is 83. Same escape LP-MFB grants R8 via
-        # R8_RELAX_FACTOR.
-        core_names = (("R1", "R2", "R3")
-                      if (fam == "HP-MFB" and lay["notch"] and lay.get("v2"))
-                      else ("R1", "R2", "R3", "R4"))
-        core = [full[r] for r in core_names if r in full]
-        if len(core) >= 2 and max(core)/min(core) > cfg["MAX_R_RATIO"]:
-            return None
-        # HF-gain gate (HP-MFB notch cells). 3HPn-MFB2 is MANIFOLD-0 (6 resistors,
-        # 6 residuals), so phase3_worker's acceptance is 5e-3 on the AGGREGATE
-        # squared residual -- it can bury sqrt(5e-3) = 7.1% of RELATIVE gain error
-        # and still report "converged" (measured: target 1.05 -> realized 1.1157;
-        # target 1.5 -> realized 1.557). Now that the 0.99 margin makes MFB2 the
-        # SOLE cell above unity, that is the dominant error, so check the realized
-        # H(inf) directly. internal_gain is |hinf_f(...)| off the exact TF and, for
-        # every HP cell, |K| is the target HF gain (dc_gain_to_K -> sign*|gain|).
-        # Slack = max(gain_tol, GAIN_SLACK): targets between the routing margin and
-        # MFB2's envelope-limited floor (~1.006) land within 1.6%, i.e. inside the
-        # +-2% window the UI already calls "unity".
-        gain_err = None
-        if fam == "HP-MFB" and lay["notch"]:
-            Kt = abs(float(_W.get("k_map", {}).get(name) or 0.0))
-            if Kt > 0.0:
-                gain_err = abs(internal_gain - Kt) / Kt
-                slack = max(float(cfg.get("gain_tol", 0.005) or 0.005), GAIN_SLACK)
-                if gain_err > slack:
-                    return None
-        va = [full[n] for n in lay["names"]]
-        a1b = F["a1_f"](*va); a2b = F["a2_f"](*va)
-        ss = 0.0
-        for i in range(len(va)):
-            p = list(va); p[i] *= 1.01
-            ss += ((F["a1_f"](*p)-a1b)/a1b/0.01)**2 + ((F["a2_f"](*p)-a2b)/a2b/0.01)**2
-        out = {"topology": name, "sens_score": float(np.sqrt(ss)),
-               "internal_gain": internal_gain, "cost": cost,
-               "gain_err": gain_err}
-        if fam == "NOTCH":
-            out["sign"] = -1        # single-op-amp notch is inverting (H = -R5/R4)
-        elif fam == "LP-MFB":
-            out["sign"] = +1 if lay["notch"] else -1   # notch non-inv; all-pole inv
-        elif fam == "HP-MFB":
-            out["sign"] = +1 if lay["notch"] else -1   # notch non-inv; all-pole inv
-        elif fam == "BP-MFB":
-            out["sign"] = -1        # MFB band-pass is inverting (Ki = b_lead/a_lead < 0)
-        elif fam == "NOTCH-MFB":
-            out["sign"] = +1        # MFB pure notch is non-inverting (H(0)=R4/(R1+R4)>0)
-        elif isinstance(fam, str) and fam.endswith("-AM"):
-            out["sign"] = -1        # every AM cell inverts (see cells_am_core)
-        for k in ["C1","C2","C3","C4","R1","R2","R3","R4","R5","R6","R7","R8"]:
-            out[k] = full.get(k, None if k in ("R5","R7","R8") else 0.0)
-        # carry parallel-cap provenance (-C1s twins: C1 = C1a||C1b) so the snapper
-        # (out = dict(sol)), the BOM display, and the schematic-name suffix all
-        # see the split. C1 itself already holds the parallel sum.
-        for k in ("C1a", "C1b", "C1_parallel", "C2a", "C2b", "C2_parallel"):
-            if full.get(k) is not None:
-                out[k] = full[k]
-        return out
+        return _assemble_solution(F, cfg, _W.get("k_map", {}), name,
+                                  task["cap_combo"], xvec, cost)
 
     sols = []
     nat = _assemble(best_r.x, best_c)
@@ -1079,7 +1100,27 @@ def _valley_sens_proxy(v, lay, a1_f, a2_f):
         return float("inf")
 
 
-def harvest(p1_results, cases, cfg, max_valleys, hints_per_combo):
+def _add_hint(lst, h, rep_hint, rtol=0.08):
+    """Append resistor hint `h` to `lst` unless it matches the representative's
+    own hint or one already listed (harvest's 8 % valley tolerance)."""
+    hv = np.asarray(h, float)
+    E = np.array([rep_hint] + lst, dtype=float)
+    if np.all(np.abs(hv - E) <= 1e-8 + rtol * np.abs(E), axis=1).any():
+        return                              # = np.allclose(hv, e, rtol) for some e
+    lst.append(list(h))
+
+
+def harvest(p1_results, cases, cfg, max_valleys, hints_per_combo, merge_dup_hints=False):
+    """Phase-1 valleys -> Phase-3 tasks (E-series cap combos + resistor hints).
+    merge_dup_hints (batched solver, FS-028 S2-2): a root whose caps duplicate
+    a kept valley's is not dropped -- its r_hint, if distinct (8 %) from the
+    hints that valley already carries, becomes an extra hint of the valley's
+    combos (outside the hints_per_combo cap). On a
+    resistor manifold of dimension >= 1, same caps do not mean the same
+    resistors: LM roots all end near cost 1e-20, so "the lowest-cost root per
+    cap vector" is an arbitrary pick between resistor configurations whose
+    sensitivity differs severalfold (BP2-VCVS). batch_phase3 keeps the
+    lowest-sens root among the hints."""
     results = sorted((r for r in p1_results if r), key=lambda v: v["cost"])
     # Collect the DISTINCT valleys per cell (dedup by cap vector). When the
     # [C_min,C_max] window is wide, phase-1 finds valleys spread across the whole
@@ -1088,23 +1129,39 @@ def harvest(p1_results, cases, cfg, max_valleys, hints_per_combo):
     # range -- so a wide window paradoxically loses mid-cap realisations that a
     # narrow window keeps. We therefore stratify retention across cap magnitude.
     distinct = defaultdict(list)
+    alt = defaultdict(list)                 # id(kept valley) -> duplicates' r_hints
+    kept_cv = {}                            # name -> cap vectors of distinct[name] (rows)
+    cap_names_of = {}
     for v in results:
         name = v["topo_name"]
-        cap_names = cell_layout(cases[(name,"ideal")])["cap_names"]
+        if name not in cap_names_of:
+            cap_names_of[name] = cell_layout(cases[(name, "ideal")])["cap_names"]
+        cap_names = cap_names_of[name]
         cv = np.array([v["caps"][c] for c in cap_names])
         dup = None
-        for e in distinct[name]:
-            if np.allclose(cv, np.array([e["caps"][c] for c in cap_names]), rtol=0.08):
-                dup = e; break
+        E = kept_cv.get(name)
+        if E is not None:
+            # first kept valley with np.allclose(cv, e, rtol=0.08) -- the same
+            # test (|cv - e| <= 1e-8 + 0.08 |e|), all kept vectors at once
+            hit = np.all(np.abs(cv - E) <= 1e-8 + 0.08 * np.abs(E), axis=1)
+            if hit.any():
+                j = int(np.argmax(hit))
+                dup = distinct[name][j]
         if dup is None:
             distinct[name].append(v)        # results is cost-sorted -> so is this
+            kept_cv[name] = cv[None, :] if E is None else np.vstack([E, cv])
         elif dup.get("wide") and not v.get("wide"):
             # Same valley already represented by a WIDE root, but this is a LEGACY
             # root: prefer the legacy representative so the legacy passes' exact
             # r_hint (hence their exact BOMs) is preserved. (Cost ordering is only
             # a tie-break here; all kept roots already satisfy the phase-1 cost
             # gate, so swapping the representative changes no acceptance.)
+            if merge_dup_hints:
+                _add_hint(alt[id(dup)], dup["r_hint"], v["r_hint"])
             dup.update(v)
+            E[j] = cv                       # later roots compare to the new caps
+        elif merge_dup_hints:
+            _add_hint(alt[id(dup)], v["r_hint"], dup["r_hint"])
 
     cmin = max(cfg["C_min"], 1e-15)
     span = float(np.log(cfg["C_max"] / cmin)) or 1.0
@@ -1168,6 +1225,7 @@ def harvest(p1_results, cases, cfg, max_valleys, hints_per_combo):
 
     cg = cap_grid(cfg["C_series"], cfg["C_min"], cfg["C_max"])
     combo_map = defaultdict(list)
+    combo_alt = defaultdict(list)           # merge_dup_hints: after the valleys' own
     for name, valleys in kept.items():
         # zero-manifold C2 cells are routed to the parallel-C2 path instead
         # of the standard cap-snap Phase-3 (their valleys are returned in
@@ -1216,6 +1274,7 @@ def harvest(p1_results, cases, cfg, max_valleys, hints_per_combo):
                         combo["C1_parallel"] = True
                         key = (name, tuple(sorted(combo.items())))
                         combo_map[key].append(v["r_hint"])
+                        combo_alt[key].extend(alt[id(v)])
                 continue
             # (1) LEGACY scale (largest cap pinned at C_max, f=1) -- emitted
             # UNCONDITIONALLY and verbatim, so every BOM the prior solver produced
@@ -1225,6 +1284,7 @@ def harvest(p1_results, cases, cfg, max_valleys, hints_per_combo):
                 combo = {c: round(val,10) for c, val in zip(cap_names, combo_vals)}
                 key = (name, tuple(sorted(combo.items())))
                 combo_map[key].append(v["r_hint"])
+                combo_alt[key].extend(alt[id(v)])
 
             # (2) ADDED RC-scale seeds -- the scale (C*f, R/f) is a free DOF that
             # leaves the response and the coefficient sensitivity unchanged. The
@@ -1251,8 +1311,10 @@ def harvest(p1_results, cases, cfg, max_valleys, hints_per_combo):
     tasks = []
     for (name, _k), hints in combo_map.items():
         combo = dict(_k)
+        # the valleys' own hints are capped as always; distinct duplicate-root
+        # hints (merge_dup_hints) ride along uncapped -- a batched hint costs ~us
         tasks.append({"topo_name": name, "cap_combo": combo,
-                      "r_hints": hints[:hints_per_combo]})
+                      "r_hints": hints[:hints_per_combo] + combo_alt[(name, _k)]})
     return tasks, {k: len(v) for k, v in kept.items()}, kept
 
 
@@ -1273,6 +1335,305 @@ def dedup(results):
         if key not in best or s["sens_score"] < best[key]["sens_score"]:
             best[key] = s
     return list(best.values())
+
+
+# =====================================================================
+# BATCHED IN-PROCESS SOLVE (FS-028 S2-2)
+# The Phase-1 / Phase-3 / zero-manifold task lists run_synthesis builds are
+# solved here as a few numpy batches per cell (batched_lm: projected log-space
+# LM) instead of one process-pool task per start. Same task lists, same
+# acceptance rules and gates (phase1_worker's cost / envelope checks,
+# phase3_worker's hint -> fallback -> accept logic and R5 ladder,
+# ZM.gate_combo); only the local solver changes, so results move like a
+# reseed of the multistart, not like a new method. The residuals come from
+# the design-parametric "res" kernels (cell_kernels), so there is no
+# per-design lambdify either. FS_SOLVER=trf selects the old pool path.
+# =====================================================================
+P1_MAX_ITER = 100            # LM iterations per start (TRF: max_nfev 700)
+P3_MAX_ITER = 100            # Phase 3 / fallback / ladder / ZM (TRF: 300 / 500 / 200 / 500)
+# LM step metric per phase (batched_lm.solve). The metric decides WHICH root a
+# start lands on, so it decides the valley sample. Minimum-norm steps in x (as
+# TRF takes) move a start's small components most and build the component
+# spread of the low-sensitivity valleys; steps in log x keep a start's ratios.
+# Neither sample contains the other (FS-028 S2-2, Balanced benchmark: log only
+# -> BP2-VCVS best sens 2.9 -> 8.6, LP2-VCVS 30 -> 25 BOMs; x only ->
+# LPn3-VCVS finds no root, LPn3-MFB 2.02 -> 2.72), so Phase 1 runs every start
+# with both and harvest takes the union. Phase 3 (caps fixed, the hint next to
+# the root) solves each hint with both too and keeps the lowest-sens accepted
+# root (2LPn-MFB at Q = 10: TRF's best BOM sat where TRF drifts along the
+# resistor manifold -- sens 1.39; log steps only 1.44, both 1.38); the fallback
+# starts and the R5 ladder use log steps (nearest root in relative terms).
+P1_METRICS = ("x", "log")
+P3_HINT_METRICS = ("log", "x")
+P3_METRIC = "log"
+
+
+def cell_kit(case):
+    """One cell's functions for the batched path, from the design-parametric
+    "res" kernels bound to the case's numeric targets: batched res_b / jac_b /
+    r5_b (X = (N, n) in var_list order) plus the scalar res_f / jac_f / r5_f and
+    the gain set that _assemble_solution and ZM.gate_combo read (the same dict
+    shape as a Phase-1/3 worker's). ZM cells also get their ZM.gate_combo
+    function dict under "zm"."""
+    lay = cell_layout(case)
+    if lay["names"] != lay["cap_names"] + lay["res_names"]:
+        raise ValueError(f"{TF.topo_name(case['topo'])}: var_list is not caps then "
+                         "resistors; the Phase-1/3 row layout assumes it")
+    T = case["targets"]
+    rs = CK.sources(case, "res")
+    ks, kb = CK.load(rs), CK.load_batched(rs)
+    g = CK.load(CK.sources(case, "gain"))
+    nidx = {n: i for i, n in enumerate(lay["names"])}
+    F = dict(layout=lay, var_names=lay["names"], nidx=nidx,
+             res_cols=[nidx[n] for n in lay["res_names"]],
+             res_f=CK.bind(ks["res"], T), jac_f=CK.bind(ks["jac"], T),
+             r5_f=CK.bind(ks.get("r5"), T),
+             res_b=CK.bind_rows(kb["res"], T), jac_b=CK.bind_rows(kb["jac"], T),
+             r5_b=CK.bind_rows(kb.get("r5"), T),
+             a1_f=g["a1"], a2_f=g["a2"], h0_f=g["h0"], hinf_f=g["hinf"], zm=None)
+    name = TF.topo_name(case["topo"])
+    if name in ZM.PARALLEL_C2_CELLS:
+        F["zm"] = ZM.assemble_cell_funcs(
+            name, lay, [str(v) for v in case["tf_var_list"]], F["res_f"], g["a1"],
+            g["a2"], F["r5_f"], F["jac_f"], CK.load(CK.sources(case, "zm")),
+            bool(case["topo"]["notch"]))
+    return F
+
+
+def _by_cell(tasks):
+    """{cell name: [task indices]} in first-seen order."""
+    by = {}
+    for i, t in enumerate(tasks):
+        by.setdefault(t["topo_name"], []).append(i)
+    return by
+
+
+def _lm(F, X0, LB, UB, ftol, max_iter=P3_MAX_ITER, metric=P3_METRIC):
+    """Batched LM on the cell's residuals (caps fixed where LB == UB)."""
+    res_b, jac_b = F["res_b"], F["jac_b"]
+    return BLM.solve(lambda X, rows: res_b(X), lambda X, rows: jac_b(X), X0, LB, UB,
+                     tol=1e-20, ftol=ftol, xtol=ftol, max_iter=max_iter, metric=metric)
+
+
+def batch_phase1(p1_tasks, kits, cfg):
+    """phase1_worker over the whole Phase-1 task list: one batch per cell and
+    step metric (ratio, wide, anchored and seed starts together; the anchored
+    mode's anchor cap is a fixed variable at C_max), then phase1_worker's
+    acceptance per row. Termination tolerances are the TRF calls' (1e-10
+    ratio, 1e-11 anchored); an iteration-capped start is rejected like a
+    max_nfev one. Every start is solved once per metric in P1_METRICS, so the
+    result list is len(P1_METRICS) x the task list (metric-major, task order
+    within); harvest dedups the valleys both metrics reach."""
+    outs = [[None] * len(p1_tasks) for _m in P1_METRICS]
+    for name, ids in _by_cell(p1_tasks).items():
+        F = kits[name]; lay = F["layout"]
+        nC = lay["n_caps"]; n = len(lay["names"])
+        lb_a, ub_a, anchor, free_caps = anchored_bounds(lay, cfg)
+        a_i = F["nidx"][anchor]
+        a_cols = [F["nidx"][c] for c in free_caps] + F["res_cols"]
+        X0 = np.empty((len(ids), n)); LB = np.empty_like(X0); UB = np.empty_like(X0)
+        ftol = np.empty(len(ids))
+        for k, i in enumerate(ids):
+            t = p1_tasks[i]
+            if t["mode"] == "ratio":
+                lb, ub = t.get("lb"), t.get("ub")
+                if lb is None:
+                    lb, ub = ratio_bounds(lay, cfg)
+                X0[k], LB[k], UB[k], ftol[k] = t["x0"], lb, ub, 1e-10
+            else:
+                X0[k, a_cols], LB[k, a_cols], UB[k, a_cols] = t["x0"], lb_a, ub_a
+                X0[k, a_i] = LB[k, a_i] = UB[k, a_i] = cfg["C_max"]
+                ftol[k] = 1e-11
+        for out, metric in zip(outs, P1_METRICS):
+            r = _lm(F, X0, LB, UB, ftol, max_iter=P1_MAX_ITER, metric=metric)
+            for k, i in enumerate(ids):
+                if not r.conv[k]:
+                    continue
+                t = p1_tasks[i]
+                cost = float(r.cost[k]); x = r.X[k]
+                if t["mode"] == "ratio":
+                    if not cost < 1e-5:
+                        continue
+                    gamma = cfg["C_max"] / np.max(x[:nC])
+                    c_phys = (x[:nC]*gamma).tolist(); r_phys = (x[nC:]/gamma).tolist()
+                    if min(c_phys) < cfg["C_min"]*0.95 or max(r_phys) > cfg["R_max"]*1.5:
+                        continue
+                    out[i] = {"topo_name": name,
+                              "caps": dict(zip(lay["cap_names"], c_phys)),
+                              "r_hint": r_phys, "cost": cost,
+                              "wide": bool(t.get("wide", False))}
+                else:
+                    if not cost < 1e-6:
+                        continue
+                    caps = {c: float(x[F["nidx"][c]]) for c in lay["cap_names"]}
+                    caps[anchor] = cfg["C_max"]
+                    out[i] = {"topo_name": name, "caps": caps,
+                              "r_hint": x[nC:].tolist(), "cost": cost, "wide": False}
+    return [r for out in outs for r in out]
+
+
+def _phase3_accept(lay):
+    """phase3_worker's acceptance threshold by solution-manifold dimension."""
+    manifold = lay["n_res"] - lay["n_residuals"]
+    return (1e-6 if manifold >= 2 else 1e-3 if manifold == 1 else 5e-3), manifold
+
+
+def _fd_r5_jac(r5_b, X, cols, rel=1e-7):
+    """dR5/dx for the columns `cols` (forward differences), (k, 1, n)."""
+    J = np.zeros((X.shape[0], 1, X.shape[1]))
+    r0 = r5_b(X)
+    for j in cols:
+        Xp = X.copy()
+        h = rel * X[:, j]
+        Xp[:, j] += h
+        J[:, 0, j] = (r5_b(Xp) - r0) / h
+    return J
+
+
+def batch_phase3(p3_tasks, kits, cfg, k_map):
+    """phase3_worker over the whole Phase-3 task list, per cell: (A) every
+    (task, hint) row in one batch per step metric (P3_HINT_METRICS); (B) the
+    log-uniform fallback starts of the tasks no hint brought within `accept`,
+    in one more batch (a fallback row must have converged, as TRF's
+    r.success); the natural solution is the
+    lowest-sens_score root within `accept` that passes _assemble_solution
+    (phase3_worker: the FIRST hint within `accept` -- see (A)); then the R5
+    trade-off ladder (six pinned-R5 solves per natural solution, one batch).
+    Caps are fixed variables; resistors keep phase3_res_bounds (R8's relaxed
+    floor included). Returns per-task solution lists (or None) in task order."""
+    out = [None] * len(p3_tasks)
+    k_map = k_map or {}
+    for name, ids in _by_cell(p3_tasks).items():
+        F = kits[name]; lay = F["layout"]
+        nC = lay["n_caps"]
+        lb3, ub3 = phase3_res_bounds(lay, cfg)
+        accept, manifold = _phase3_accept(lay)
+        caps = {i: np.array([p3_tasks[i]["cap_combo"][c] for c in lay["cap_names"]],
+                            dtype=float) for i in ids}
+
+        def rows_for(pairs):
+            X0 = np.array([np.concatenate([caps[i], x]) for i, x in pairs])
+            LB = np.array([np.concatenate([caps[i], lb3]) for i, _x in pairs])
+            UB = np.array([np.concatenate([caps[i], ub3]) for i, _x in pairs])
+            return X0, LB, UB
+
+        # (A) hints. Every hint is solved anyway, so a task keeps ALL hints that
+        # land within `accept` (phase3_worker stops at the first): on a solution
+        # manifold of dimension >= 1 they are different roots, and the first one
+        # is often not the valley the sensitivity floor of harvest picked
+        # (BP2-VCVS: the best-sens valley was the 2nd/3rd hint of its combo).
+        pairs = [(i, np.clip(np.asarray(h, float), lb3+1e-12, ub3-1e-12))
+                 for i in ids for h in p3_tasks[i]["r_hints"]]
+        cand = {i: [] for i in ids}                    # task -> [(x, cost)] within accept
+        for metric in P3_HINT_METRICS:
+            ra = _lm(F, *rows_for(pairs), ftol=1e-9, metric=metric)
+            k = 0
+            for i in ids:
+                nh = len(p3_tasks[i]["r_hints"])
+                cand[i] += [(ra.X[kk, nC:], float(ra.cost[kk])) for kk in range(k, k + nh)
+                            if ra.cost[kk] <= accept]
+                k += nh
+        # (B) fallback restarts for the tasks no hint brought within `accept`;
+        # a fallback root must have converged (TRF: r.success)
+        left = [i for i in ids if not cand[i]]
+        if left:
+            fb = loguniform_starts(24 if manifold == 0 else 8, lb3, ub3)
+            rb = _lm(F, *rows_for([(i, x0) for i in left for x0 in fb]), ftol=1e-11)
+            for a, i in enumerate(left):
+                cand[i] = [(rb.X[kk, nC:], float(rb.cost[kk]))
+                           for kk in range(a*len(fb), (a+1)*len(fb))
+                           if rb.conv[kk] and rb.cost[kk] <= accept]
+        # natural solution: the lowest-sens_score root that passes the gates
+        # (the ranking dedup / top_k apply anyway; nothing is optimised here)
+        nat, best = {}, {}
+        for i in ids:
+            sols = []
+            for x, c in cand[i]:
+                s = _assemble_solution(F, cfg, k_map, name, p3_tasks[i]["cap_combo"], x, c)
+                if s is not None:
+                    sols.append((s["sens_score"], len(sols), s, x))
+            if sols:
+                _ss, _k, s, x = min(sols, key=lambda t: t[:2])
+                out[i] = [s]
+                nat[i], best[i] = s, (x, s["cost"])
+        # R5 trade-off ladder (see phase3_worker): same targets, gates and
+        # buckets; the pin row R5(x)/t - 1 joins the residuals (its gradient by
+        # forward differences), so each target is one row of one batch.
+        w5 = float(cfg.get("reg_weight", 0.0) or 0.0)
+        if w5 > 0.0 and manifold >= 1 and F["r5_f"] is not None and nat:
+            lad = []                                   # (task, R5 target)
+            for i, s in nat.items():
+                R5_nat = s.get("R5") or 0.0
+                lo = cfg["R_min"] * 1.05
+                hi = R5_nat * 0.92
+                if R5_nat > cfg["R_min"]*1.5 and hi > lo:
+                    lad += [(i, float(t)) for t in np.geomspace(lo, hi, 6)]
+            if lad:
+                tgt = np.array([t for _i, t in lad])
+                res_b, jac_b, r5_b = F["res_b"], F["jac_b"], F["r5_b"]
+                rcols = F["res_cols"]
+
+                def fun_l(X, rows):
+                    return np.hstack([res_b(X), (r5_b(X) / tgt[rows] - 1.0)[:, None]])
+
+                def jac_l(X, rows):
+                    Jr = _fd_r5_jac(r5_b, X, rcols) / tgt[rows][:, None, None]
+                    return np.concatenate([jac_b(X), Jr], axis=1)
+                X0, LB, UB = rows_for([(i, best[i][0]) for i, _t in lad])
+                rl = BLM.solve(fun_l, jac_l, X0, LB, UB, tol=1e-20, ftol=1e-10,
+                               xtol=1e-10, max_iter=P3_MAX_ITER, metric=P3_METRIC)
+                Rres = res_b(rl.X)
+                seen = {}
+                for kk, (i, _t) in enumerate(lad):
+                    try:
+                        cb = float(np.sum(Rres[kk]**2))
+                        if not cb <= max(accept, 1e-4):
+                            continue                   # left the design manifold
+                        s = _assemble_solution(F, cfg, k_map, name,
+                                               p3_tasks[i]["cap_combo"], rl.X[kk, nC:], cb)
+                        if s is None or not s.get("R5"):
+                            continue
+                        if s["R5"] >= (nat[i].get("R5") or 0.0)*0.98:
+                            continue                   # not genuinely lower
+                        b = round(np.log10(s["R5"]) * 40)   # ~6%-wide R5 buckets
+                        if b in seen.setdefault(i, set()):
+                            continue                   # near-duplicate R5
+                        seen[i].add(b)
+                        out[i].append(s)
+                    except Exception:                  # noqa: BLE001 (as phase3_worker)
+                        pass
+    return out
+
+
+def batch_zm(zm_tasks, kits, cfg):
+    """zm_worker over the whole zero-manifold task list: every (combo, start)
+    row of a cell in one batch (ZM.combo_starts), the lowest-cost start per
+    combo, then ZM.gate_combo's bounds / ratio / pole / notch / DC-gain gates
+    and scoring. Returns the solutions (or None) in task order."""
+    out = [None] * len(zm_tasks)
+    for name, ids in _by_cell(zm_tasks).items():
+        F = kits[name]; lay = F["layout"]; zf = F["zm"]
+        nC = lay["n_caps"]; nR = lay["n_res"]
+        lb3 = np.full(nR, float(cfg["R_min"])); ub3 = np.full(nR, float(cfg["R_max"]))
+        starts = ZM.combo_starts(nR, lb3, ub3, weyl_starts)
+        cv = [np.array([zm_tasks[i]["cap_map"][c] for c in lay["cap_names"]], dtype=float)
+              for i in ids]
+        X0 = np.array([np.concatenate([c, s]) for c in cv for s in starts])
+        LB = np.array([np.concatenate([c, lb3]) for c in cv for _s in starts])
+        UB = np.array([np.concatenate([c, ub3]) for c in cv for _s in starts])
+        r = _lm(F, X0, LB, UB, ftol=1e-11)
+        ns = len(starts)
+        for a, i in enumerate(ids):
+            cost = r.cost[a*ns:(a+1)*ns]
+            k = int(np.argmin(cost))                   # first lowest, as `cc < best_c`
+            if not np.isfinite(cost[k]):
+                continue
+            t = zm_tasks[i]
+            out[i] = ZM.gate_combo(zf, t["cap_map"], t["c2rep"], cfg,
+                                   r.X[a*ns + k, nC:], float(cost[k]), t["w0_t"],
+                                   t["wz_t"], t["pole_tol"], gain_tol=t["gain_tol"],
+                                   target_dc=t["target_dc"])
+    return out
 
 
 # =====================================================================
@@ -1436,11 +1797,86 @@ def run_synthesis(cfg, topologies=None, n_cores=None,
                                      "x0": _x0, "lb": lb_r, "ub": ub_r,
                                      "seed": True})
 
+    batched = not BLM.legacy_trf()
     if verbose:
-        print(f"Synthesis v2 | {n_cores} cores | {len(topologies)} topologies | "
+        print("Synthesis v2 | " + ("batched LM, in-process" if batched else f"{n_cores} cores")
+              + f" | {len(topologies)} topologies | "
               f"f1={cfg['f1']} f0={cfg['f0']} fz={cfg['fz']}")
         print(f"  Phase 1: dispatching {len(p1_tasks)} starts...")
 
+    def _search(map_p1, map_p3, map_zm):
+        """Phase 1 -> harvest -> Phase 3 + zero-manifold. map_*(tasks) solves a
+        task list and returns the results in task order: the batch_* functions
+        (batched path) or a process pool's map (TRF path)."""
+        t0 = time.time()
+        p1_results = map_p1(p1_tasks)
+        n_ok = sum(1 for r in p1_results if r)
+        if verbose:
+            print(f"  Phase 1: {n_ok}/{len(p1_results)} converged in {time.time()-t0:.1f}s")
+
+        p3_tasks, vc, kept = harvest(p1_results, cases, cfg, max_valleys, hints_per_combo,
+                                     merge_dup_hints=batched)
+
+        # Build zero-manifold parallel-C2 tasks (one per (C2,C3,C4) combo)
+        zm_tasks = []
+        w0_t = 2*np.pi*cfg["f0"]; wz_t = 2*np.pi*cfg["fz"]
+        for name in topologies:
+            if name not in ZM.PARALLEL_C2_CELLS:
+                continue
+            valleys = kept.get(name, [])
+            if not valleys:
+                continue
+            cands = ZM.build_candidates(cases[(name, "ideal")], valleys, cfg,
+                                        max_c2_cands=max_c2_cands)
+            tdc = ZM.target_dc_gain(cases[(name, "ideal")], cfg, dc_gain=dc_gain)
+            for cap_map, c2rep in cands:
+                zm_tasks.append({"topo_name": name, "cap_map": cap_map,
+                                 "c2rep": c2rep, "w0_t": w0_t, "wz_t": wz_t,
+                                 "pole_tol": pole_tol, "gain_tol": gain_tol,
+                                 "target_dc": tdc})
+
+        if verbose:
+            print(f"  Valleys: {vc}")
+            print(f"  Phase 3: dispatching {len(p3_tasks)} cap combos"
+                  + (f" + {len(zm_tasks)} zero-manifold parallel-C2 combos"
+                     if zm_tasks else "") + "...")
+        if not p3_tasks and not zm_tasks:
+            return None                     # legitimately no solutions
+
+        t0 = time.time()
+        p3_raw = map_p3(p3_tasks) if p3_tasks else []
+        p3_results = []
+        for r in p3_raw:                        # each task: a list (ladder) or None
+            if r is None:
+                continue
+            p3_results.extend(r if isinstance(r, list) else [r])
+        zm_results = map_zm(zm_tasks) if zm_tasks else []
+        res = p3_results + zm_results
+        n_ok = sum(1 for r in res if r)
+        if verbose:
+            print(f"  Phase 3: {n_ok}/{len(p3_tasks)+len(zm_tasks)} solved in {time.time()-t0:.1f}s")
+        return res
+
+    def _finish(all_results):
+        if all_results is None:
+            return []
+        sols = dedup(all_results)
+        sols.sort(key=lambda x: x["sens_score"])
+        if verbose:
+            print(f"Done. {len(sols)} unique solutions.")
+        return sols
+
+    if batched:
+        # FS-028 S2-2: the whole search in this process, a few numpy batches per
+        # cell -- no pool (no worker spawn / import / init) and no per-design
+        # lambdify (the design-parametric "res" kernels take the targets as
+        # arguments; they are generated once per cell and cached on disk).
+        kits = {name: cell_kit(cases[(name, "ideal")]) for name in topologies}
+        return _finish(_search(lambda t: batch_phase1(t, kits, cfg),
+                               lambda t: batch_phase3(t, kits, cfg, k_map),
+                               lambda t: batch_zm(t, kits, cfg)))
+
+    # ---- Legacy path (FS_SOLVER=trf): scipy TRF, one pool task per start ----
     # Hand the workers compiled-kernel SOURCES, not cases (FS-028 S2-1): the
     # orchestrator derives nothing per design; it generates the design-independent
     # kernels at most once per cell (cell_kernels, cached on disk) and this
@@ -1472,53 +1908,9 @@ def run_synthesis(cfg, topologies=None, n_cores=None,
     def _pool_phase(workers):
         with ProcessPoolExecutor(max_workers=workers, initializer=_init_worker,
                                  initargs=(cfg, _wpacks, k_map)) as pool:
-            t0 = time.time()
-            p1_results = list(pool.map(phase1_worker, p1_tasks, chunksize=1))
-            n_ok = sum(1 for r in p1_results if r)
-            if verbose:
-                print(f"  Phase 1: {n_ok}/{len(p1_tasks)} converged in {time.time()-t0:.1f}s")
-
-            p3_tasks, vc, kept = harvest(p1_results, cases, cfg, max_valleys, hints_per_combo)
-
-            # Build zero-manifold parallel-C2 tasks (one per (C2,C3,C4) combo)
-            zm_tasks = []
-            w0_t = 2*np.pi*cfg["f0"]; wz_t = 2*np.pi*cfg["fz"]
-            for name in topologies:
-                if name not in ZM.PARALLEL_C2_CELLS:
-                    continue
-                valleys = kept.get(name, [])
-                if not valleys:
-                    continue
-                cands = ZM.build_candidates(cases[(name, "ideal")], valleys, cfg,
-                                            max_c2_cands=max_c2_cands)
-                tdc = ZM.target_dc_gain(cases[(name, "ideal")], cfg, dc_gain=dc_gain)
-                for cap_map, c2rep in cands:
-                    zm_tasks.append({"topo_name": name, "cap_map": cap_map,
-                                     "c2rep": c2rep, "w0_t": w0_t, "wz_t": wz_t,
-                                     "pole_tol": pole_tol, "gain_tol": gain_tol,
-                                     "target_dc": tdc})
-
-            if verbose:
-                print(f"  Valleys: {vc}")
-                print(f"  Phase 3: dispatching {len(p3_tasks)} cap combos"
-                      + (f" + {len(zm_tasks)} zero-manifold parallel-C2 combos"
-                         if zm_tasks else "") + "...")
-            if not p3_tasks and not zm_tasks:
-                return None                     # legitimately no solutions
-
-            t0 = time.time()
-            p3_raw = list(pool.map(phase3_worker, p3_tasks, chunksize=1)) if p3_tasks else []
-            p3_results = []
-            for r in p3_raw:                        # workers return a list (ladder) or None
-                if r is None:
-                    continue
-                p3_results.extend(r if isinstance(r, list) else [r])
-            zm_results = list(pool.map(zm_worker, zm_tasks, chunksize=1)) if zm_tasks else []
-            res = p3_results + zm_results
-            n_ok = sum(1 for r in res if r)
-            if verbose:
-                print(f"  Phase 3: {n_ok}/{len(p3_tasks)+len(zm_tasks)} solved in {time.time()-t0:.1f}s")
-            return res
+            def pmap(fn):
+                return lambda tasks: list(pool.map(fn, tasks, chunksize=1))
+            return _search(pmap(phase1_worker), pmap(phase3_worker), pmap(zm_worker))
 
     try:
         _shrink()
@@ -1556,14 +1948,7 @@ def run_synthesis(cfg, topologies=None, n_cores=None,
                 time.sleep(0.5)
         if last_exc is not None:
             raise last_exc
-        if all_results is None:
-            return []
-
-        sols = dedup(all_results)
-        sols.sort(key=lambda x: x["sens_score"])
-        if verbose:
-            print(f"Done. {len(sols)} unique solutions.")
-        return sols
+        return _finish(all_results)
     finally:
         try:
             os.remove(_wpacks)

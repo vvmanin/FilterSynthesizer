@@ -20,7 +20,9 @@
 #  This reuses the validated tf_derivation cache + make_response_func,
 #  and the same caps-fixed / resistors-free philosophy as the ideal
 #  solver's Phase 3. Each correction is independent; they run in-process
-#  (FS-028 S2-1: a per-section pool cost far more to start than the work).
+#  (FS-028 S2-1: a per-section pool cost far more to start than the work),
+#  all rows of a topology as one batched LM (S2-2, _correct_batch; the per-row
+#  scipy TRF stays behind FS_SOLVER=trf).
 # =====================================================================
 
 import os
@@ -38,6 +40,7 @@ from tf_derivation_v2 import (get_cases, design_cases, make_response_func, cell_
                               all_cells, topo_name, p1, w0, wz, Q, K)
 from scoring import score_solution
 import opamp_library
+import batched_lm as BLM
 
 
 # =====================================================================
@@ -190,6 +193,83 @@ def _correct(ideal_sol, Hid, Hni, opamp, cfg, fz, comp_names, band="LP"):
     return out
 
 
+# LM iterations per correction batch. The fits are non-zero-residual and some
+# valleys are flat (N2-VCVS: TRF needed ~140 evaluations per row); at 100 a
+# third of those rows stopped short (fit cost up to +11 % vs TRF), from ~400 on
+# every row ends at TRF's fit or better. Only the slow rows use the budget.
+NI_MAX_ITER = 500
+
+
+def _flat_response(H, comp, w):
+    """H for k component rows at once -> (k, F). `comp` maps a name to a (k,)
+    array (per row) or a scalar. The rows are flattened into k*F frequency
+    points, each carrying its row's component values: the lambdified TFs
+    broadcast that elementwise, and the AM MNA evaluator (am_mna) solves one
+    nodal system per point, so both accept it unchanged."""
+    k = next(len(v) for v in comp.values() if np.ndim(v))
+    nf = len(w)
+    flat = {n: (np.repeat(v, nf) if np.ndim(v) else v) for n, v in comp.items()}
+    return np.asarray(H(flat, np.tile(w, k))).reshape(k, nf)
+
+
+def _correct_batch(sols, Hid, Hni, opamp, cfg, fz, comp_names, band="LP"):
+    """_correct for several ideal solutions of ONE topology in a single batched
+    LM (batched_lm, FS-028 S2-2): the same residual (weighted in-band response
+    error + resistor regularization), the same bounds, the same R6 = R5
+    (Equalize) and R8 = R7 (AM matched pair) locks, the same output fields.
+    The Jacobian is forward differences in log space, every row and column in
+    one response evaluation; termination mirrors the TRF call (1e-12). Returns
+    a list aligned with `sols` (None = hard failure, as _correct)."""
+    cap_names = comp_names["caps"]
+    R_names = comp_names["resistors"]
+    equalize = bool(cfg.get("equalize_rc")) and ("R5" in R_names) and ("R6" in R_names)
+    opt_R = [r for r in R_names if not (equalize and r == "R6")]
+    f, w, wt = _fit_grid_weight(cfg, fz, band)
+    capv = {c: np.array([s[c] for s in sols], dtype=float) for c in cap_names}
+    H_target = _flat_response(
+        Hid, {**capv, **{r: np.array([s[r] for s in sols], dtype=float) for r in R_names}}, w)
+    lb = np.full(len(opt_R), cfg["R_min"])
+    ub = np.full(len(opt_R), cfg["R_max"])
+    X0 = np.clip(np.array([[s[r] for r in opt_R] for s in sols], dtype=float),
+                 lb + 1e-12, ub - 1e-12)
+    reg = cfg.get("reg_weight", 0.02)
+
+    def resid(X, rows):
+        comp = {c: capv[c][rows] for c in cap_names}
+        comp.update({nm: X[:, j] for j, nm in enumerate(opt_R)})
+        comp.update(opamp)
+        if equalize:
+            comp["R6"] = comp["R5"]          # R6 locked to R5 (dropped from opt_R)
+        if "R8" not in comp and "R7" in comp:
+            comp["R8"] = comp["R7"]          # AM matched pair (see _correct)
+        d = (_flat_response(Hni, comp, w) - H_target[rows]) * wt
+        return np.hstack([d.real, d.imag, reg * (X - X0[rows]) / X0[rows]])
+
+    r = BLM.solve(resid, None, X0, lb, ub, tol=0.0, ftol=1e-12, xtol=1e-12,
+                  max_iter=NI_MAX_ITER)
+    n_resp = 2 * len(w)
+    with np.errstate(all="ignore"):
+        fun = resid(r.X, np.arange(len(sols)))
+    out = []
+    for k, sol in enumerate(sols):
+        # like _correct: keep an iteration-capped fit (the snapper re-scores
+        # it); drop only a row that never had a finite residual
+        if not np.isfinite(r.cost[k]) or not np.all(np.isfinite(r.X[k])):
+            out.append(None)
+            continue
+        o = dict(sol)
+        for n, v in zip(opt_R, r.X[k]):
+            o[n] = float(v)
+        if equalize:
+            o["R6"] = o["R5"]
+        if o.get("R8") is not None and "R8" not in R_names and "R7" in o:
+            o["R8"] = o["R7"]
+        o["ni_fit_cost"] = float(np.sum(fun[k, :n_resp] ** 2))
+        o["ni_R_shift_pct"] = float(np.max(np.abs((r.X[k] - X0[k]) / X0[k])) * 100)
+        out.append(o)
+    return out
+
+
 # =====================================================================
 # 2. WORKER (in-process; response funcs from the make_response_func memo)
 # =====================================================================
@@ -220,6 +300,24 @@ def _worker(ideal_sol):
     # re-score the corrected design
     scored = score_solution(corrected, _W["cases"], _W["opamp"])
     return scored
+
+
+def _batch_worker(ideal_sols):
+    """_worker over a whole list: each topology's corrections as ONE batched
+    LM (_correct_batch), then score_solution per row. Input order kept."""
+    out = [None] * len(ideal_sols)
+    by = {}
+    for i, s in enumerate(ideal_sols):
+        by.setdefault(s["topology"], []).append(i)
+    for topo, ids in by.items():
+        Hid, Hni = _W["resp"][topo]
+        band = _band_of(_W["cases"][(topo, "ideal")]["topo"])
+        corr = _correct_batch([ideal_sols[i] for i in ids], Hid, Hni, _W["opamp"],
+                              _W["cfg"], _W["fz"], _W["comp"][topo], band=band)
+        for i, c in zip(ids, corr):
+            if c is not None:
+                out[i] = score_solution(c, _W["cases"], _W["opamp"])
+    return out
 
 
 # =====================================================================
@@ -275,7 +373,10 @@ def solve_nonideal(ideal_solutions, cfg, opamp="TL072H",
     t0 = time.time()
     with _LOCK:                          # _W is module state; one correction batch at a time
         _init_worker(cases, op, cfg, fz, topo_names)
-        results = [_worker(s) for s in ideal_solutions]
+        if BLM.legacy_trf():             # FS_SOLVER=trf: one scipy TRF per row
+            results = [_worker(s) for s in ideal_solutions]
+        else:                            # FS-028 S2-2: one batched LM per topology
+            results = _batch_worker(ideal_solutions)
 
     out = [r for r in results if r is not None]
     if sort_by:

@@ -358,6 +358,12 @@ def instrumented(rec):
     patch(NI, "_worker", task_wrapper(NI._worker, "ni", ni_meta))
     timed_stage(US, "_init_worker", "init_p13")
     timed_stage(NI, "_init_worker", "init_ni")
+    # S2-2 batched path: whole task lists in-process (serial = wall, one core)
+    timed_stage(US, "cell_kit", "cell_kit")
+    timed_stage(US, "batch_phase1", "batch_p1")
+    timed_stage(US, "batch_phase3", "batch_p3")
+    timed_stage(US, "batch_zm", "batch_zm")
+    timed_stage(NI, "_batch_worker", "batch_ni")
     timed_stage(US, "harvest", "harvest")
     timed_stage(US, "dedup", "dedup")
     timed_stage(TF, "dump_cases", "dump_cases")
@@ -500,6 +506,11 @@ def summarize(info, workers=32):
     import nonideal_solver as NI
     if not hasattr(NI, "ProcessPoolExecutor"):      # S2-1: NI runs in-process, serially
         wall["ni"] = cpu.get("ni", 0.0)
+    for ph in ("p1", "p3", "zm"):                   # S2-2: batched, in-process
+        if "batch_" + ph in st:
+            cpu[ph] = wall[ph] = st["batch_" + ph]
+    if "batch_ni" in st:
+        cpu["ni"] = wall["ni"] = st["batch_ni"]
     init13 = st.get("init_p13", 0.0)
     initni = st.get("init_ni", 0.0)
     rs_total = st.get("run_synthesis_total", 0.0)

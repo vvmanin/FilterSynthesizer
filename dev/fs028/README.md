@@ -19,7 +19,12 @@ repository root. The TF cache goes to a private work dir (`$FS028_WORK`, default
 | `probe_batch_p3.py` | Phase 3 as batched solves on harvest's task list (vs production TRF semantics). |
 | `probe_atlas.py` | Learned seeds: valley atlas (kNN) and analytic polynomial seed vs cold multistart, on design-parametric residuals. |
 | `make_tables.py` | Prints the note's appendix tables from `results/`. |
-| `check_kernels.py` | S2-1 check: every compiled cell kernel (`cell_kernels`, all cells, AM Equalize variant) equals the per-design derive + lambdify path it replaced, to rounding; kernels replayed from the disk cache equal the live ones bit for bit. |
+| `check_kernels.py` | S2-1 check: every compiled cell kernel (`cell_kernels`, all cells, AM Equalize variant) equals the per-design derive + lambdify path it replaced, to rounding; kernels replayed from the disk cache equal the live ones bit for bit. S2-2: the batched replay of the `res` group (`load_batched` / `bind_rows`) equals the scalar replay row by row. |
+| `compare_s22.py` | S2-2: two `bench_sections.py` runs (baseline vs new) by the §6 rule — best sens, best and median-10 snap cost, BOM count, no-BOM sections, baseline best BOM kept, serial CPU; `--md` writes the tables. |
+
+The solver under test is the batched one by default; `FS_SOLVER=trf` (environment) runs the
+legacy scipy-TRF pool path, bit-identical to S2-1, so both can be benchmarked from one checkout.
+`bench_sections.py` rows carry `snapped_q` (every snapped BOM's topology, sens, snap cost).
 
 `results/` holds the raw outputs: `baseline_balanced.json` (the Stage-2 reference: stage times
 and top BOMs per case), `ab_lm_*.json`, `probe_batch_p1_*.jsonl`, `probe_batch_p3_*.jsonl`,

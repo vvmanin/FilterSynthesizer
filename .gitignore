@@ -252,3 +252,11 @@ desktop.ini
 # --- FS-008: vendor SPICE model files are never committed ---------------
 LTspice_Library/models/*
 !LTspice_Library/models/README.txt
+
+# --- FS-028 benchmark runs kept local (dev/fs028/results) ---------------
+# Committed: the stage references (baseline_*.json, base_s21.json, s22_final.json).
+# Local only: cross-checks whose outcome is recorded in the analysis note, and
+# runs tagged by the default timestamp of bench_sections.py.
+dev/fs028/results/s22_trfpath.json
+dev/fs028/results/s22_final_bv.json
+dev/fs028/results/20[0-9][0-9][0-9][0-9][0-9][0-9]-*.json

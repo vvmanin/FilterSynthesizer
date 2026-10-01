@@ -110,6 +110,11 @@ def run_case(args):
     row["n_snapped"] = len(res.get("snapped") or [])
     row["n_ideal"] = len(res.get("ideal_continuous") or [])
     row["top_bom"] = _bom_rows(res)
+    # every snapped BOM's quality (S2-2 validation: list quality, not just the best)
+    row["snapped_q"] = [[s.get("topology"), round(float(s.get("sens_score", 0.0)), 6),
+                         None if s.get("snap_cost") is None else round(float(s["snap_cost"]), 6)]
+                        for s in sorted(res.get("snapped") or [],
+                                        key=lambda s: s.get("sens_score", 1e99))]
     return row
 
 

@@ -145,9 +145,11 @@ def _gain_label_for(topo_name):
 # =====================================================================
 @st.cache_resource
 def _job_runner():
-    """`pool`: dispatch threads (each calls synthesize(), which spins its
-    OWN process pool -- calling from a thread avoids nesting). `gate`: bound
-    concurrent heavy solves. 1 == one solve saturates the box; next queues."""
+    """`pool`: dispatch threads (each calls synthesize(); since FS-028 S2-2 a
+    solve runs in this process, one core -- only FS_SOLVER=trf still spins a
+    process pool, which a thread avoids nesting). `gate`: bound concurrent
+    heavy solves. 1 == one solve at a time; the next queues (threads would
+    only share the GIL)."""
     return {
         "pool": concurrent.futures.ThreadPoolExecutor(max_workers=4),
         "gate": threading.BoundedSemaphore(1),

@@ -276,11 +276,7 @@ def solve_one_combo(funcs, cap_map, c2rep, cfg, w0_t, wz_t, pole_tol, weyl_fn,
     ub3 = np.array([cfg["R_max"]]*len(res_names))
 
     best_r, best_c = None, 1e100
-    starts = [np.full(len(res_names), 0.05),
-              np.full(len(res_names), 0.02),
-              np.full(len(res_names), 0.1)] + list(weyl_fn(5, lb3, ub3))
-    for x0 in starts:
-        x0 = np.clip(np.asarray(x0, float), lb3+1e-12, ub3-1e-12)
+    for x0 in combo_starts(len(res_names), lb3, ub3, weyl_fn):
         try:
             f0 = obj(x0)
             if not np.all(np.isfinite(f0)):
@@ -294,9 +290,30 @@ def solve_one_combo(funcs, cap_map, c2rep, cfg, w0_t, wz_t, pole_tol, weyl_fn,
             best_c, best_r = cc, r
     if best_r is None:
         return None
+    return gate_combo(funcs, cap_map, c2rep, cfg, best_r.x, best_c, w0_t, wz_t,
+                      pole_tol, gain_tol=gain_tol, target_dc=target_dc)
 
+
+def combo_starts(n_res, lb3, ub3, weyl_fn):
+    """The resistor starts of one combo solve: three flat vectors + 5 Weyl
+    points, clipped strictly inside the box (shared with the batched path)."""
+    starts = [np.full(n_res, 0.05), np.full(n_res, 0.02),
+              np.full(n_res, 0.1)] + list(weyl_fn(5, lb3, ub3))
+    return [np.clip(np.asarray(x0, float), lb3+1e-12, ub3-1e-12) for x0 in starts]
+
+
+def gate_combo(funcs, cap_map, c2rep, cfg, x, best_c, w0_t, wz_t, pole_tol,
+               gain_tol=0.01, target_dc=None):
+    """Gate one solved combo (resistors `x`, squared-residual cost `best_c`) on
+    bounds/ratio, pole/notch tolerance and DC gain, and score it. Returns the
+    solution dict or None. Shared by solve_one_combo (TRF) and the batched
+    path (FS-028 S2-2)."""
+    cap_names = funcs["cap_names"]; res_names = funcs["res_names"]
+    r5_f = funcs["r5_f"]
+    a1_f = funcs["a1_f"]; a2_f = funcs["a2_f"]
+    cv = [cap_map[n] for n in cap_names]
     full = dict(cap_map)
-    for n, val in zip(res_names, best_r.x):
+    for n, val in zip(res_names, x):
         full[n] = float(val)
     if r5_f is not None:
         full["R5"] = float(r5_f(*[full[n] for n in funcs["var_names"]]))

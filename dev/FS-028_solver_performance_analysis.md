@@ -70,7 +70,9 @@ Measured over the 31-section benchmark set (Balanced, ideal op-amp) unless marke
 | F | Explicit sensitivity descent on the solution manifold (quality safeguard) | small in batch form | — | best sens **better** than baseline where it applies | low–med | **pair with D** |
 
 **Stage 2 progress:** S2-1 (B) landed 2026-09-30, BOMs bit-identical to HEAD — results and one
-correction to row B ("same math" alone is not enough for identical BOMs) in §11.
+correction to row B ("same math" alone is not enough for identical BOMs) in §11. S2-2 (D, no F)
+built 2026-10-01: 48–69× less serial CPU, 5–33× less wall on one core than S2-1 on 32 workers,
+no best-sens regression on the benchmark — §12.
 
 Recommended path (§7): **B → D + F → E → the self-adjusting orchestrator**. B removes the
 fixed overhead at no change in results. D moves the multistart off the process pool and cuts
@@ -775,6 +777,140 @@ with 32 spawn workers.
 
 ---
 
+## 12. Stage 2 — S2-2 batched LM solver core (built 2026-10-01)
+
+**What changed.** `run_synthesis` keeps its interface, the Phase-1 start list, `harvest`'s
+task list, the ZM candidates and every acceptance rule and gate. Only the solve step changes.
+- `batched_lm.py` (new): `solve()` runs N small least-squares problems as one numpy batch:
+  projected LM in u = log x, minimum-norm (Tikhonov) steps, `lb == ub` = a fixed variable (the
+  anchor cap, the snapped caps), the replaced TRF call's own `ftol`/`xtol` as termination, an
+  iteration-capped row = not converged (TRF: `max_nfev`). Columns fixed in every row leave the
+  linear algebra, and the working set is compacted as rows finish (≈ −30 % CPU, same results).
+- `cell_kernels.load_batched` / `bind_rows`: the design-parametric `res` group (verified in
+  S2-1) replayed on N rows per call. Only `array` (a lambdified Matrix) is swapped for a
+  broadcasting stand-in; it is the only non-arithmetic name in the 80 cells' `res` kernels.
+  No per-design lambdify remains on the solve path.
+- `unified_solver_v2`: `cell_kit` + `batch_phase1` / `batch_phase3` (with the R5 ladder) /
+  `batch_zm`, in-process: no pool, no worker spawn. `_assemble_solution` (Phase-3 gates and
+  sens score) moved out of `phase3_worker` and is shared by both paths; `ZM.gate_combo` likewise
+  out of `solve_one_combo`. `R8_RELAX_FACTOR` and every gate are unchanged. The ladder keeps its
+  six R5 targets, its cost / "genuinely lower" / bucket rules; the pin row R5(x)/t − 1 joins the
+  residuals with a forward-difference gradient, one batch per cell.
+- `nonideal_solver`: a topology's corrections are one batched LM (`_correct_batch`). The
+  Jacobian is forward differences in log space; responses are evaluated on a flattened
+  row × frequency grid, which the AM MNA evaluator accepts unchanged. On the same ideal
+  inputs it lands where TRF does (1e-8 … 1e-6 relative on MFB / AM / HPn3, fit cost ≤ TRF's)
+  once its budget is 500 iterations: at 100, 13 of 30 N2-VCVS rows stopped short in a flat
+  valley (fit cost up to +11 %).
+- `FS_SOLVER=trf` (environment) selects the S2-1 path. Checked: all 62 benchmark rows
+  (31 sections × ideal / TL072, every snapped BOM's sens and snap cost) bit-identical to S2-1.
+
+**Three rules the batched solver needs.** A different local solver re-samples the multistart
+(§4.3). Three effects showed on the benchmark; the fix for each is sampling, not optimisation.
+Nothing descends `sens_score`, and F stays out until `SENSITIVITY_SCORE.md` §8.1 is settled.
+1. **Phase 1 solves every start with two step metrics** (`P1_METRICS`). The minimum-norm step
+   decides which root an under-determined system reaches. Log-space steps keep a start's
+   component ratios, and the mostly top-decade Weyl starts then land on compressed,
+   high-sensitivity valleys. Steps that are minimum-norm in x (as TRF / Gauss–Newton) move the
+   small components most and build the spread of the low-sensitivity valleys. Neither sample
+   contains the other: log only gave BP2-VCVS 2.90 → 9.17 and LP2-VCVS 30 → 25 BOMs; x only
+   lost LPn3-VCVS entirely (its one lucky valley) and gave LPn3-MFB 2.02 → 2.72.
+2. **`harvest(..., merge_dup_hints=True)`.** LM roots all end near cost 1e-20, so "the
+   lowest-cost root per cap vector" became an arbitrary pick between resistor configurations
+   whose sensitivity differs severalfold. With both metrics, the log metric's compressed root
+   displaced the x metric's good one (BP2-VCVS back to 8.56). Duplicate roots of a kept valley
+   now ride along as extra hints of its combos, when distinct by harvest's own 8 % rule and
+   outside the `hints_per_combo` cap. Hint counts stay moderate (≤ 61 per task).
+3. **Phase 3 keeps the lowest-sens accepted root over all hints, each solved with both metrics**
+   (`P3_HINT_METRICS`). `phase3_worker` stops at the first hint within `accept`. The batch has
+   solved every hint anyway, and the first hint was often not the valley the sensitivity floor
+   picked. Both metrics are needed again because TRF's Phase 3 drifts along the resistor
+   manifold: on the Q = 10 section routed to MFB (`2LPn-MFB`) TRF reached 1.39, log steps only
+   1.44, both 1.379.
+
+| Benchmark (Balanced, ideal) | best sens better / same (±1 %) / worse | BOM count | no-BOM |
+|---|---|---|---|
+| log-metric LM, solver swapped only | 2 / 24 / 2 (BP2-VCVS 2.90 → 9.17, LPn3g-VCVS 3.91 → 4.08) | LP2-VCVS 30 → 25 | 3 = 3 |
+| x metric in Phase 1 | 1 / 22 / 4 (LPn3-VCVS 8 → 0 BOMs, LPn3-MFB 2.02 → 2.72) | 1 lost | 4 |
+| both metrics | 2 / 25 / 1 (BP2-VCVS 8.56) | equal | 3 = 3 |
+| + merged duplicate hints, best-sens hint, both metrics in Phase 3 (final) | **3 / 25 / 0** | **equal** | **3 = 3** |
+
+**Result quality (§6 rule).** Reference: the committed S2-1 state (bit-identical to pre-S2-1
+HEAD), re-run on this machine (`results/base_s21.json`), Balanced, 31 sections; full tables in
+A.12.
+- **Best sens:** ideal and TL072 both 3 better / 25 same / 0 worse. Better: BP2-VCVS
+  2.902 → 2.483, LPn2-MFB 1.306 → 1.243, LPn3-MFB 2.024 → 1.994. List quality improves where
+  it moved: median-10 sens BP2-VCVS 5.16 → 3.02, LPn2-MFB 2.94 → 1.25.
+- **BOM count** equal in all 31 sections. **No-BOM sections** unchanged: LPn2-VCVS, HPn3-MFB,
+  HPn2-MFB (as §2.5: no root exists in the envelope, an orchestrator case).
+- **Deviation — best snap cost higher** (> 1 %) in 6 sections ideal (LPn3-AM 0.44 → 0.61,
+  LP3-MFB 0.029 → 0.039, HPn3-AM 0.70 → 1.84, BP2-VCVS 0.135 → 0.221, BP2-MFB 0.070 → 0.113,
+  N2-VCVS 0.43 → 0.49) and 7 TL072 (LPn3-AM, LPn3g-MFB, LP2-MFB, HPn3-VCVS, HPn3-AM,
+  BP2-VCVS, N2-VCVS). The lists are ranked by sens, and the new lists are tighter in sens:
+  BOMs that ranked low but happened to snap well dropped out of the top-k. Baseline's
+  lowest-cost BOM was the 12th of 12 by sens in HPn3-AM / LPn3-AM. In N2-VCVS it was 23rd of
+  30, with sens 1.407, above the whole new list (≤ 1.393). In aggregate the snap cost is
+  neutral: best 7 better / 15 same / 6 worse (ideal), 4 / 17 / 7 (TL072); median-10 snap cost
+  geo-mean ratio 0.976 / 1.007. **For the maintainer to accept.**
+- The baseline's best BOM itself is still in the new top-5 in 18 of 28 sections. That is the
+  reseed of §11, not a quality loss, per the item's note 3.
+- Same picture in the app's environment (`build_venv`: Python 3.13, numpy 2.3.5;
+  a local run, not committed): 3 / 25 / 0, counts equal, the same 3 no-BOM sections.
+- **Q = 10 section** (the maintainer's, from S2-1: 2nd-order LPn, f0 = 999.4 Hz, Q = 10.01,
+  fz = 1254 Hz). Routed to VCVS at gain 1.1 (`2LPn-gained` + `+R7`, E24+E48, A_ol = 1e5,
+  GBWP = 1 MHz, Ro = 1.2 kΩ): best sens 5.111 = S2-1, best snap cost 0.52 → 0.17, 30 BOMs.
+  At unity gain, VCVS (`2LPn-unity`) gives 2 BOMs in both paths, same sens 1.514 / 1.545;
+  MFB (`2LPn-MFB`) 1.39 → 1.379.
+
+**Time.**
+- Serial CPU, instrumented, 31 sections: ideal 1165 → 17.0 s (**69×**), TL072 1130 → 23.5 s
+  (**48×**). A section on one core: 0.07–3.3 s, median 0.31 s (ideal) / 0.50 s (TL072); the
+  tail is LPn3g-VCVS (`3LPn-gained` + its R7 twin). Summed (ideal / TL072): Phase 1 5.2 / 5.2 s,
+  Phase 3 + ladder 6.1 / 5.7 s, NI — / 7.2 s, snapper 4.7 / 4.4 s, harvest 0.7 s.
+- Real wall on the maintainer's box (i9-14900HX), TL072, "first" = first solve of a design in a
+  warm process / re-solve; medians of 2 alternating rounds. S2-1 = 32 spawn workers, S2-2 = one
+  core, no pool:
+
+| Section | S2-1 first / re-solve | S2-2 first / re-solve | Factor |
+|---|---|---|---|
+| HPn3-VCVS | 10.2 / 8.9 s | 1.33 / 1.21 s | 7.5× |
+| LPn3-MFB | 6.7 / 6.6 s | 1.20 / 1.22 s | 5.5× |
+| LPn3g-VCVS | 26.6 / 22.6 s | 3.11 / 3.11 s | 7–9× |
+| N2-MFB | 4.5 / 4.7 s | 0.39 / 0.39 s | 12× |
+| LP2-VCVS | 3.7 / 3.6 s | 0.11 / 0.11 s | 33× |
+| HPn3-AM | 25.9 / 25.8 s | 0.89 / 0.92 s | 28× |
+| Q = 10 (`2LPn-gained`, ZM path) | 23.9 / 23.0 s | 2.45 / 2.43 s | 9.5× |
+
+- The fixed costs S2-1 left are gone. There is no worker spawn (the 1.8 s floor; LP2-VCVS is
+  now 0.11 s). There is no per-design lambdify: "first" = re-solve, LPn3g-VCVS included. The
+  non-ideal correction is batched: N2-VCVS TL072 1.6 → 0.7 s on the same inputs (its slowest).
+- **ZM path (named target):** the Q = 10 section's 2 176 combo solves (20 640 batched rows, 8
+  starts per combo) take 1.55 s against 138 CPU-s of TRF tasks (89×). The whole section is 2.45 s.
+  The rows that run to the iteration cap are non-zero-residual fits held to TRF's 1e-11; a
+  looser tolerance would cut that further, but it changes values and was not needed here.
+
+**What is left** (for S2-3 / S2-4): the snapper, `score_solution` and the NI correction are now
+the larger share of a TL072 solve (LPn3-MFB: the snapper is about half); Phase 1 of the x metric
+hits the iteration cap on many starts of `2LPn-*` (rejected, as TRF's `max_nfev` ones);
+`solvability_probe` still derives per call; F waits for §8.1. One section now takes one core,
+so batch mode can solve sections in parallel processes (S2-4); the Topology tab still solves
+one section at a time (its gate), which is right for threads (GIL).
+
+**Reproduce** (repo root, Python 3.11/3.12):
+
+```bash
+python dev/fs028/check_kernels.py                       # 80 cells: S2-1 exact groups + batched replay
+python dev/fs028/bench_sections.py --preset Balanced --opamp ideal tl072 --warm --jobs 12 --tag s22_final
+FS_SOLVER=trf python dev/fs028/bench_sections.py --preset Balanced --opamp ideal tl072 --warm --jobs 12 --tag s22_trfpath
+python dev/fs028/compare_s22.py results/base_s21.json results/s22_final.json
+```
+
+`base_s21.json` came from a `git archive` of the S2-1 commit on the same machine;
+the `FS_SOLVER=trf` run reproduces it bit for bit (a local check, not committed). The committed
+result files are one row per line.
+
+---
+
 ## Appendix A — generated tables
 
 `python dev/fs028/make_tables.py` prints these from `dev/fs028/results/`.
@@ -1113,3 +1249,95 @@ Phase 1 total 572 s -> 6.3 s (x91); Phase 3 total 803 s -> 4.3 s (x187).
 | B compile once (est.) | 31 | 0.948 (0.708-1.00) | 0.475 | 0.445 (0.087-0.94) | 47.51 | 2.10 |
 | D  B + batched LM, 1 core (est.) | 31 | 0.025 (0.006-0.10) | 0.013 | 0.265 (0.048-1.16) | 1.25 | 1.25 |
 | E  D + learned seeds (est.) | 31 | 0.023 (0.002-0.10) | 0.011 | 0.243 (0.017-1.13) | 1.15 | 1.15 |
+
+`python dev/fs028/compare_s22.py results/base_s21.json results/s22_final.json --md …` — b = S2-1, n = S2-2; "§6 flags": count = fewer BOMs, sens = best sens > +1 %, snap_cost = best snap cost > +1 %.
+
+### A.12 S2-2 vs S2-1, Balanced, op-amp ideal (serial CPU-seconds, maintainer's box)
+
+| case | BOMs b/n | best sens b/n | best snap cost b/n | median-10 sens b/n | best kept | CPU s b/n | §6 flags |
+|---|---|---|---|---|---|---|---|
+| LPn3-VCVS | 8/8 | 1.959/1.959 | 0.0224/0.0224 | 1.980/1.980 | yes | 26.5/0.31 | ok |
+| LPn3-MFB | 30/30 | 2.024/1.994 | 0.0819/0.0476 | 2.055/2.027 | no | 32.0/1.28 | ok |
+| LPn3-AM | 12/12 | 2.348/2.347 | 0.438/0.609 | 2.378/2.362 | yes | 43.8/0.76 | snap_cost |
+| LPn2-VCVS | 0/0 | —/— | —/— | —/— | — | 11.6/0.10 | ok |
+| LPn2-MFB | 30/30 | 1.306/1.243 | 0.34/0.272 | 2.935/1.253 | no | 8.6/0.48 | ok |
+| LPn2-AM | 12/12 | 1.400/1.400 | 0.409/0.409 | 1.400/1.400 | no | 23.4/0.31 | ok |
+| LPn3g-VCVS | 30/30 | 3.908/3.908 | 0.0273/0.0273 | 4.063/4.024 | yes | 258.0/3.32 | ok |
+| LPn3g-MFB | 30/30 | 2.146/2.162 | 0.116/0.031 | 2.209/2.199 | no | 26.2/1.39 | ok |
+| LPn3g-AM | 12/12 | 2.357/2.357 | 0.95/0.893 | 2.372/2.367 | yes | 26.8/0.65 | ok |
+| LP2-VCVS | 30/30 | 1.213/1.213 | 0.0218/0.0218 | 1.275/1.275 | yes | 3.6/0.08 | ok |
+| LP2-MFB | 30/30 | 1.144/1.144 | 0.0151/0.00868 | 1.172/1.148 | yes | 16.4/0.34 | ok |
+| LP2-AM | 4/4 | 1.400/1.400 | 0.0287/0.0287 | 1.400/1.400 | yes | 5.1/0.21 | ok |
+| LP3-VCVS | 30/30 | 1.912/1.912 | 0.031/0.031 | 1.914/1.914 | yes | 7.5/0.23 | ok |
+| LP3-MFB | 30/30 | 1.839/1.839 | 0.029/0.0394 | 1.839/1.839 | yes | 27.2/0.53 | snap_cost |
+| LP3-AM | 30/30 | 2.136/2.136 | 0.162/0.162 | 2.159/2.159 | yes | 30.6/0.79 | ok |
+| HPn3-VCVS | 30/30 | 1.868/1.870 | 0.121/0.115 | 1.873/1.872 | no | 92.6/1.26 | ok |
+| HPn3-MFB | 0/0 | —/— | —/— | —/— | — | 12.5/0.16 | ok |
+| HPn3-AM | 12/12 | 2.078/2.078 | 0.702/1.84 | 2.078/2.078 | yes | 250.4/1.11 | snap_cost |
+| HPn2-VCVS | 30/30 | 1.213/1.213 | 0.159/0.157 | 1.213/1.213 | no | 5.0/0.21 | ok |
+| HPn2-MFB | 0/0 | —/— | —/— | —/— | — | 43.6/0.24 | ok |
+| HPn2-AM | 14/14 | 1.400/1.400 | 0.396/0.396 | 1.400/1.400 | yes | 7.5/0.22 | ok |
+| HP2-VCVS | 30/30 | 1.213/1.213 | 0.0772/0.0772 | 1.215/1.215 | yes | 3.2/0.08 | ok |
+| HP2-MFB | 30/30 | 1.341/1.341 | 0.0783/0.0783 | 1.342/1.342 | yes | 29.6/0.34 | ok |
+| HP2-AM | 14/14 | 1.400/1.400 | 0.65/0.65 | 1.400/1.400 | no | 9.9/0.24 | ok |
+| BP2-VCVS | 30/30 | 2.902/2.483 | 0.135/0.221 | 5.161/3.015 | no | 19.7/0.28 | snap_cost |
+| BP2-MFB | 30/30 | 1.213/1.213 | 0.0704/0.113 | 1.215/1.215 | yes | 33.1/0.29 | snap_cost |
+| BP2-AM | 2/2 | 1.400/1.400 | 0.908/0.908 | 1.400/1.400 | yes | 2.6/0.07 | ok |
+| N2-VCVS | 30/30 | 1.371/1.370 | 0.434/0.491 | 1.375/1.373 | no | 30.8/0.46 | snap_cost |
+| N2-MFB | 30/30 | 1.213/1.213 | 0.798/0.798 | 1.213/1.219 | yes | 13.8/0.44 | ok |
+| N2-AM | 14/14 | 1.400/1.400 | 0.488/0.488 | 1.400/1.400 | no | 9.7/0.27 | ok |
+| BP1LP-MFB | 30/30 | 2.072/2.059 | 0.372/0.372 | 2.080/2.077 | yes | 53.6/0.56 | ok |
+
+- cases: 31
+- best sens better / same (±1 %) / worse: (3, 25, 0)
+- best snap_cost better / same (±1 %) / worse: (7, 15, 6)
+- median-10 snap_cost better / same / worse; geo-mean ratio n/b: (12, 9, 7, 0.976)
+- best BOM kept: 18
+- no-BOM sections b/n: (3, 3)
+- flagged: ['LPn3-AM', 'LP3-MFB', 'HPn3-AM', 'BP2-VCVS', 'BP2-MFB', 'N2-VCVS']
+- serial CPU b/n: (1164.9, 16.99, 'x69')
+
+### A.13 S2-2 vs S2-1, Balanced, op-amp tl072 (serial CPU-seconds, maintainer's box)
+
+| case | BOMs b/n | best sens b/n | best snap cost b/n | median-10 sens b/n | best kept | CPU s b/n | §6 flags |
+|---|---|---|---|---|---|---|---|
+| LPn3-VCVS | 8/8 | 1.959/1.959 | 0.0292/0.0292 | 1.980/1.980 | yes | 33.6/0.42 | ok |
+| LPn3-MFB | 30/30 | 2.024/1.994 | 0.101/0.0524 | 2.055/2.027 | no | 41.9/1.70 | ok |
+| LPn3-AM | 12/12 | 2.348/2.347 | 0.427/0.583 | 2.378/2.362 | yes | 50.9/1.08 | snap_cost |
+| LPn2-VCVS | 0/0 | —/— | —/— | —/— | — | 15.1/0.12 | ok |
+| LPn2-MFB | 30/30 | 1.306/1.243 | 0.183/0.174 | 2.935/1.253 | no | 12.3/0.78 | ok |
+| LPn2-AM | 12/12 | 1.400/1.400 | 0.429/0.429 | 1.400/1.400 | no | 29.7/0.50 | ok |
+| LPn3g-VCVS | 30/30 | 3.908/3.908 | 0.0341/0.0341 | 4.063/4.024 | yes | 222.3/3.28 | ok |
+| LPn3g-MFB | 30/30 | 2.146/2.162 | 0.0704/0.101 | 2.209/2.199 | no | 34.0/1.67 | snap_cost |
+| LPn3g-AM | 12/12 | 2.357/2.357 | 0.999/0.86 | 2.372/2.367 | yes | 34.0/0.93 | ok |
+| LP2-VCVS | 30/30 | 1.213/1.213 | 0.0204/0.0204 | 1.275/1.275 | yes | 4.7/0.15 | ok |
+| LP2-MFB | 30/30 | 1.144/1.144 | 0.00433/0.0102 | 1.172/1.148 | yes | 21.9/0.41 | snap_cost |
+| LP2-AM | 4/4 | 1.400/1.400 | 0.00166/0.00166 | 1.400/1.400 | yes | 6.5/0.26 | ok |
+| LP3-VCVS | 30/30 | 1.912/1.912 | 0.0306/0.0306 | 1.914/1.914 | yes | 10.5/0.35 | ok |
+| LP3-MFB | 30/30 | 1.839/1.839 | 0.0215/0.0215 | 1.839/1.839 | yes | 34.0/0.71 | ok |
+| LP3-AM | 30/30 | 2.136/2.136 | 0.14/0.14 | 2.159/2.159 | yes | 36.5/1.60 | ok |
+| HPn3-VCVS | 30/30 | 1.868/1.870 | 0.136/0.154 | 1.873/1.872 | no | 74.1/1.55 | snap_cost |
+| HPn3-MFB | 0/0 | —/— | —/— | —/— | — | 15.7/0.14 | ok |
+| HPn3-AM | 12/12 | 2.078/2.078 | 0.736/1.92 | 2.078/2.078 | yes | 211.4/1.40 | snap_cost |
+| HPn2-VCVS | 30/30 | 1.213/1.213 | 0.164/0.132 | 1.213/1.213 | no | 7.1/0.40 | ok |
+| HPn2-MFB | 0/0 | —/— | —/— | —/— | — | 41.9/0.28 | ok |
+| HPn2-AM | 14/14 | 1.400/1.400 | 0.323/0.323 | 1.400/1.400 | yes | 9.6/0.49 | ok |
+| HP2-VCVS | 30/30 | 1.213/1.213 | 0.0687/0.0687 | 1.215/1.215 | yes | 3.9/0.14 | ok |
+| HP2-MFB | 30/30 | 1.341/1.341 | 0.0931/0.0931 | 1.342/1.342 | yes | 28.7/0.37 | ok |
+| HP2-AM | 14/14 | 1.400/1.400 | 0.637/0.637 | 1.400/1.400 | no | 10.4/0.38 | ok |
+| BP2-VCVS | 30/30 | 2.902/2.483 | 0.118/0.16 | 5.161/3.015 | no | 19.6/0.48 | snap_cost |
+| BP2-MFB | 30/30 | 1.213/1.213 | 0.0481/0.0481 | 1.215/1.215 | yes | 29.3/0.54 | ok |
+| BP2-AM | 2/2 | 1.400/1.400 | 0.815/0.815 | 1.400/1.400 | yes | 2.8/0.14 | ok |
+| N2-VCVS | 30/30 | 1.371/1.370 | 0.391/0.546 | 1.375/1.373 | no | 27.9/1.53 | snap_cost |
+| N2-MFB | 30/30 | 1.213/1.213 | 0.728/0.728 | 1.213/1.219 | yes | 13.5/0.61 | ok |
+| N2-AM | 14/14 | 1.400/1.400 | 0.467/0.467 | 1.400/1.400 | no | 9.2/0.52 | ok |
+| BP1LP-MFB | 30/30 | 2.072/2.059 | 0.0805/0.0805 | 2.080/2.077 | yes | 36.8/0.56 | ok |
+
+- cases: 31
+- best sens better / same (±1 %) / worse: (3, 25, 0)
+- best snap_cost better / same (±1 %) / worse: (4, 17, 7)
+- median-10 snap_cost better / same / worse; geo-mean ratio n/b: (11, 9, 8, 1.007)
+- best BOM kept: 18
+- no-BOM sections b/n: (3, 3)
+- flagged: ['LPn3-AM', 'LPn3g-MFB', 'LP2-MFB', 'HPn3-VCVS', 'HPn3-AM', 'BP2-VCVS', 'N2-VCVS']
+- serial CPU b/n: (1129.8, 23.49, 'x48')

@@ -13,8 +13,10 @@ EXACT groups -- the generated SOURCE must equal the old lambdify source, so the
 solver's numbers are bit-identical:
   design (res, jac, r5 for this design)   gain (a1, a2, h0, hinf)
   sens (a1, a2 over tf_var_list)          zm (den_i, num_i)
-PARAMETRIC group "res" (targets as arguments; for S2-2/S2-3, not on the TRF
-path) must agree to REL_TOL at random component points: rounding only.
+PARAMETRIC group "res" (targets as arguments; the batched solver of S2-2)
+must agree to REL_TOL at random component points: rounding only. Its BATCHED
+replay (cell_kernels.load_batched / bind_rows: N rows in one call) must equal
+the scalar replay row by row to BATCH_TOL (array vs scalar arithmetic only).
 
 Then, in a fresh process, every disk-cached group is replayed from the kernel
 cache file and must equal a live regeneration (same source, same numbers).
@@ -40,6 +42,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 REL_TOL = 1e-9
+BATCH_TOL = 1e-12
 N_DESIGNS = 3
 N_POINTS = 4
 
@@ -108,6 +111,7 @@ def check_cell(args):
     exact_bad = []                           # (variant, group, fname)
     n_exact = 0
     worst = 0.0                              # parametric group, max rel diff
+    worst_b = 0.0                            # batched vs scalar replay
     t0 = time.time()
     for _d in range(N_DESIGNS):
         design = _design(rng)
@@ -150,7 +154,20 @@ def check_cell(args):
                     if fn is None:
                         continue
                     worst = max(worst, _rel(o[fname](*x), CK.bind(fn, T)(*x)))
-    return name, n_exact, exact_bad, worst, time.time() - t0
+            # batched replay (S2-2): the same sources over N_POINTS rows at once
+            kb = CK.load_batched(CK.sources(new, "res"))
+            X = np.exp(rng.uniform(np.log(1e-3), 0.0, (N_POINTS, n)))
+            for fname, fn in pairs:
+                if fn is None:
+                    continue
+                got_b = CK.bind_rows(kb[fname], T)(X)
+                if got_b.shape[0] != N_POINTS:
+                    worst_b = np.inf
+                    continue
+                for row in range(N_POINTS):
+                    one = np.asarray(CK.bind(fn, T)(*X[row]), dtype=float)
+                    worst_b = max(worst_b, _rel(one, got_b[row]))
+    return name, n_exact, exact_bad, worst, worst_b, time.time() - t0
 
 
 def replay_check(names, work):
@@ -210,17 +227,20 @@ def main():
             results = list(ex.map(check_cell, todo))
     else:
         results = [check_cell(t) for t in todo]
-    fails, n_ex, worst_all = [], 0, 0.0
-    for name, n_exact, bad, worst, dt in results:
+    fails, n_ex, worst_all, worst_ball = [], 0, 0.0, 0.0
+    for name, n_exact, bad, worst, worst_b, dt in results:
         n_ex += n_exact
         worst_all = max(worst_all, worst)
-        ok = not bad and worst <= REL_TOL
+        worst_ball = max(worst_ball, worst_b)
+        ok = not bad and worst <= REL_TOL and worst_b <= BATCH_TOL
         if not ok:
             fails.append(name)
         print(f"{'OK ' if ok else 'BAD'} {name:18s} exact {n_exact - len(bad)}/{n_exact}"
-              f"  parametric max rel {worst:.1e}  {dt:5.1f}s" + (f"  {bad[:4]}" if bad else ""))
+              f"  parametric max rel {worst:.1e}  batched {worst_b:.1e}  {dt:5.1f}s"
+              + (f"  {bad[:4]}" if bad else ""))
     print(f"\n{len(results)} cells: {n_ex} exact-group kernels, source-identical unless listed; "
-          f"parametric max rel {worst_all:.1e} (tol {REL_TOL:.0e}); failing: {fails}")
+          f"parametric max rel {worst_all:.1e} (tol {REL_TOL:.0e}); batched vs scalar replay "
+          f"max rel {worst_ball:.1e} (tol {BATCH_TOL:.0e}); failing: {fails}")
     if not a.no_replay:
         by_dir = {}
         for n, d, _s in todo:

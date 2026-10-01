@@ -42,6 +42,11 @@
 #  any free cell symbol the code references to the equal tf_symbols Symbol that
 #  lambdify bound. The generator checks both, so a replayed kernel behaves like
 #  the live one; anything it cannot replay raises at generation time.
+#  BATCHED REPLAY (S2-2): `load_batched` exec's the SAME sources with `array`
+#  swapped for a broadcasting stand-in, so one call evaluates N rows (the
+#  batched LM solver); `bind_rows` gives uniform (N, ...) shapes. `array` is the
+#  only non-arithmetic name the "res" group uses (checked over all 80 cells,
+#  dev/fs028/check_kernels.py compares batched vs scalar replay).
 #
 #  CACHE: <tf cache stem>_kernels_k<KERNEL_REV>.json next to the TF cache (same
 #  CWD rule, same tf_cache*.json gitignore). Keys carry the template key (cell
@@ -57,6 +62,8 @@ import inspect
 import os
 import threading
 from collections import OrderedDict
+
+import numpy as np
 
 import tf_derivation_v2 as TF
 import tf_symbols as _SYM
@@ -263,4 +270,69 @@ def bind(fn, targets):
 
     def f(*x):
         return fn(*x, *T)
+    return f
+
+
+# =====================================================================
+# Batched replay (FS-028 S2-2): the same sources, evaluated on N rows at once
+# =====================================================================
+def _batch_array(rows, *_a, **_k):
+    """Stand-in for numpy.array in a batched kernel: a lambdified Matrix is
+    `array([[e11, e12, ...], ...])` whose entries are (N,) arrays or plain
+    constants (a Jacobian's structural zeros), which numpy.array rejects as
+    ragged. Broadcast them into ONE batch-first (..., m, n) array instead."""
+    rows = [r if isinstance(r, (list, tuple)) else [r] for r in rows]
+    ents = [[np.asarray(e, dtype=float) for e in r] for r in rows]
+    shape = np.broadcast_shapes(*(e.shape for r in ents for e in r))
+    out = np.empty(shape + (len(ents), len(ents[0])))
+    for i, r in enumerate(ents):
+        for j, e in enumerate(r):
+            out[..., i, j] = e
+    return out
+
+
+def load_batched(srcs):
+    """`load`, but every function evaluates a whole batch: call it with (N,)
+    arrays (one per argument; scalars broadcast). The sources are unchanged --
+    only `array` is replaced by `_batch_array` in the replay namespace, so a
+    Jacobian comes back batch-first (N, m, n) instead of failing on its
+    constant entries. Use `bind_rows` for uniform output shapes."""
+    key = ("batched",) + tuple(sorted((k, v["src"]) for k, v in srcs.items()))
+    with _LOCK:
+        hit = _FNS.get(key)
+        if hit is not None:
+            return hit
+        out = {}
+        for fname, item in srcs.items():
+            ns = dict(_base_namespace())
+            ns["array"] = _batch_array
+            for nm in item.get("syms", ()):
+                ns[nm] = getattr(_SYM, nm)
+            exec(compile(item["src"], f"<cell_kernel {fname} batched>", "exec"), ns)
+            out[fname] = ns[fname]
+        _FNS[key] = out
+        return out
+
+
+def bind_rows(fn, targets):
+    """For a `load_batched` "res"-group function: X (N, n_components) ->
+    res (N, m) | jac (N, m, n) | r5 (N,), with the design targets appended
+    (scalars, or (N,) arrays for per-row targets). None stays None."""
+    if fn is None:
+        return None
+    T = tuple(t if np.ndim(t) else float(t) for t in targets)
+
+    def f(X):
+        X = np.asarray(X, dtype=float)
+        N = X.shape[0]
+        out = fn(*np.ascontiguousarray(X.T), *T)
+        if isinstance(out, list):                       # residual vector
+            R = np.empty((N, len(out)))
+            for k, v in enumerate(out):
+                R[:, k] = v
+            return R
+        out = np.asarray(out, dtype=float)
+        if out.ndim >= 2:                               # Jacobian (batch-first)
+            return np.broadcast_to(out, (N,) + out.shape[-2:])
+        return np.broadcast_to(out, (N,))               # scalar kernel (r5)
     return f
