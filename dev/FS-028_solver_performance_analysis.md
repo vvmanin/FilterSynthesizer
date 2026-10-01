@@ -911,6 +911,92 @@ result files are one row per line.
 
 ---
 
+## 13. Stage 2 — S2-2b batched snapper (built 2026-10-01)
+
+**Why before S2-3.** After S2-2, Phase 1 is 31 % (ideal) / 22 % (TL072) of the serial CPU,
+so learned seeds would save ≈ 0.1 s per section (≤ 0.5 s on LPn3g-VCVS). A cProfile of the
+production path (`probe_profile.py`, one process, TL072, maintainer's box) showed where the
+heaviest sections spend their time now:
+
+| Section | Wall | Snapper | NI LM | `score_solution` | Phase 1/3 + ZM |
+|---|---:|---:|---:|---:|---:|
+| LPn3-MFB | 1.36 s | 53 % (7 424 combos) | 17 % | 11 % | 19 % |
+| LPn3g-MFB | 1.43 s | 49 % | 16 % | 8 % | 26 % |
+| LP3-AM | 1.19 s | 41 % | 21 % | 21 % | 16 % |
+| HPn3-VCVS | 1.29 s | 23 % | 17 % | 9 % | 51 % |
+| N2-VCVS | 1.12 s | 8 % | 65 % | 4 % | 23 % |
+| Q = 10 (`2LPn-gained`) | 2.38 s | 2 % | 4 % | 2 % | 92 % (ZM path) |
+
+The snapper tried the 2ⁿ floor/ceil combos of a solution's n resistors one Python call at a
+time, each a 3–4-point response: per-call overhead, not arithmetic.
+
+**Change.** `discrete_snapper._combo_responses` evaluates every combo of a solution in one
+call (combos flattened onto the frequency axis, as `nonideal_solver._flat_response`; an
+evaluator that cannot broadcast falls back to the per-combo loop), and the cost terms run as
+arrays. The first minimum wins, as the loop's strict `<`; a non-finite cost never wins. The
+search space is unchanged (still the two nearest values per resistor).
+
+**Exactness.** Two rounding sources had to be matched or accepted:
+- The passband gain was `abs()` of a complex numpy scalar, which rounds differently from
+  `np.abs` on an array (1 ulp, ≈ 40 % of values). The shape terms |Hn − Tn| nearly cancel and
+  amplify that to ≈ 1e-14 in `snap_cost`. The batched code keeps the builtin `abs` per combo.
+- Scalar `x**-1` / `x**2` (resistor-only terms, computed once per combo in the loop) round
+  differently from numpy's array fast path in ≈ 0.05 % of values. The AM MNA matrices are
+  full of `1/R` entries, so AM responses differ at 1 ulp. The lambdified TFs of the other
+  cells came out bit-identical on the whole benchmark (empirical, not guaranteed for every
+  future cell). Kept: making AM exact means keeping the per-combo loop for AM.
+
+**Validation.**
+- Snapper-only A/B on identical inputs (31 sections × 2 op-amps, 1 288 snapped rows, every
+  field): all non-AM rows bit-identical; 4 AM sections differ, 6 rows, `snap_cost` at
+  ≈ 1e-15 relative; one row (LPn3g-AM, ideal) picks a different R7/R8 pair whose cost ties the
+  old pick to 6e-15. **Accepted by the maintainer 2026-10-01.**
+- Full pipeline (`bench_sections.py`, `s23_pre` = HEAD vs `s23_snap`): every snapped list
+  (topology, sens, snap_cost to 6 digits) and every top-5 BOM identical in all 62 runs; §6
+  flags none.
+
+**Time** (serial CPU, 31 sections, maintainer's box):
+
+| | Snapper | Total |
+|---|---:|---:|
+| ideal | 5.15 → 0.37 s | 18.3 → 13.2 s (−28 %) |
+| TL072 | 4.73 → 0.23 s | 25.1 → 20.2 s (−20 %) |
+
+Per section: LPn3-MFB 1.48 → 0.38 s (ideal) / 1.73 → 0.82 s (TL072), LPn3g-MFB 1.47 → 0.45 /
+1.69 → 0.86 s, LP3-AM 0.93 → 0.31 / 1.89 → 1.24 s.
+
+**What is left.**
+- NI correction on `2N` (N2-VCVS): the batched LM runs 433 iterations (other sections
+  30–80), all rows ending on ftol before the 500 cap — a few slow rows hold the loop. Any fix
+  changes values (tolerance, start); its own item.
+- `score_solution`: 2.2 s of the 20.2 s TL072 total (31 sections) = 1.2 s for the two
+  8 000-point responses per row + 1.0 s notch refinement (`minimize_scalar`), peaks and setup.
+  **Batching the responses across rows was measured and rejected:** it is 1.4–6× *slower*
+  (LPn3-MFB 0.08 → 0.38 s, LP3-AM 0.19 → 0.29 s). A 8 000-point call is arithmetic-bound, not
+  call-overhead-bound, and batching turns every resistor-only scalar term into a rows × 8 000
+  array; it would also reintroduce the scalar-vs-array rounding above. What remains exact is
+  a lockstep vectorised replica of scipy's bounded Brent for the notch refinement, ≤ ≈ 0.7 s
+  over 31 sections (≈ 3 %) — not worth its fragility. Not pursued.
+- The ZM (named-target) path dominates sections like the Q = 10 one. **Maintainer decision
+  2026-10-01: its iteration cap and 1e-11 tolerance stay** — no speed from loosening them.
+- Widening the snapper beyond the two nearest values (cells with a resistor manifold of
+  dimension ≥ 1 may have better grid points away from the solved point) changes results; its
+  own item, validated per §6.
+
+**Reproduce** (repo root):
+
+```bash
+python dev/fs028/probe_profile.py LPn3-MFB LPn3g-MFB LP3-AM N2-VCVS HPn3-VCVS --q10 --opamp tl072
+python dev/fs028/bench_sections.py --preset Balanced --opamp ideal tl072 --warm --jobs 12 --tag s23_snap
+python dev/fs028/compare_s22.py dev/fs028/results/s23_pre.json dev/fs028/results/s23_snap.json
+```
+
+`s23_pre.json` was run at HEAD 69c34b0 just before the change (same command, `--tag s23_pre`)
+and is not committed: its snapped lists and top-5 BOMs equal `s23_snap.json`'s. `s23_snap.json`
+is the reference for the next change's §6 check.
+
+---
+
 ## Appendix A — generated tables
 
 `python dev/fs028/make_tables.py` prints these from `dev/fs028/results/`.

@@ -35,6 +35,40 @@ def get_two_nearest(val, grid):
     if idx < len(grid): cands.append(grid[idx])
     return list(dict.fromkeys(cands)) or [grid[np.abs(grid - val).argmin()]]
 
+def _combo_responses(H, base_comp, r_names, combos, w_evals):
+    """H at `w_evals` for every resistor combo -> (n_combo, n_w). The combos are
+    flattened onto the frequency axis (each point carries its combo's resistor
+    values); the lambdified TFs broadcast that elementwise and the AM MNA
+    evaluator solves one nodal system per point, as in nonideal_solver.
+    _flat_response. An evaluator that cannot falls back to one call per combo."""
+    nw = len(w_evals)
+    A = np.array(combos, dtype=float).reshape(len(combos), len(r_names))
+    comp = dict(base_comp)
+    for j, nm in enumerate(r_names):
+        comp[nm] = np.repeat(A[:, j], nw)
+    # AM matched pair: R8 == R7 (R8 is not a separately-snapped resistor).
+    # The non-ideal TF carries R8, so mirror it from the snapped R7. (MFB
+    # HP +R8 twins already carry R8 in r_names -> this is a no-op there,
+    # and cells whose TF ignores R8 just get a harmless extra key.)
+    if "R8" not in comp and "R7" in comp:
+        comp["R8"] = comp["R7"]
+    try:
+        with np.errstate(all="ignore"):
+            out = np.asarray(H(comp, np.tile(w_evals, len(combos))))
+        if out.shape == (len(combos) * nw,):
+            return out.reshape(len(combos), nw)
+    except Exception:            # noqa: BLE001 -- fall back to the per-combo path
+        pass
+    rows = []
+    for combo in combos:
+        comp_dict = dict(base_comp)
+        for idx, nm in enumerate(r_names):
+            comp_dict[nm] = combo[idx]
+        if "R8" not in comp_dict and "R7" in comp_dict:
+            comp_dict["R8"] = comp_dict["R7"]
+        rows.append(H(comp_dict, w_evals))
+    return np.array(rows).reshape(len(combos), nw)
+
 def get_T_target(w_array, cfg, order=3, notch=True, family="LP", absorb=None):
     s = 1j * w_array
     p1 = 2 * np.pi * cfg['f1']
@@ -180,45 +214,49 @@ def snap_to_hardware(solutions, cfg, opamp, cases, target_dc=None):
         base_comp = {c: sol[c] for c in cap_names}
         base_comp.update(opamp)
 
-        best_cost = float('inf'); best_combo = None
-        for combo in product(*r_cands):
-            comp_dict = dict(base_comp)
-            for idx, nm in enumerate(r_names):
-                comp_dict[nm] = combo[idx]
-            # AM matched pair: R8 == R7 (R8 is not a separately-snapped resistor).
-            # The non-ideal TF carries R8, so mirror it from the snapped R7. (MFB
-            # HP +R8 twins already carry R8 in r_names -> this is a no-op there,
-            # and cells whose TF ignores R8 just get a harmless extra key.)
-            if "R8" not in comp_dict and "R7" in comp_dict:
-                comp_dict["R8"] = comp_dict["R7"]
-            H_real = Hni_funcs[topo](comp_dict, w_evals)
+        # Every resistor combo in ONE response call (FS-028 step 2), the cost
+        # terms as arrays over the combos: the same values as the per-combo loop
+        # this replaced (bit-identical for the lambdified TFs, to the last ulp for
+        # the AM MNA evaluator). The first minimum wins, as with a strict `<`, and
+        # a non-finite cost never wins.
+        combos = list(product(*r_cands))
+        H_real = _combo_responses(Hni_funcs[topo], base_comp, r_names, combos, w_evals)
 
-            H_dc = abs(H_real[0])           # gain at w_ref (DC for LP, HF for HP)
-            Hn = np.abs(H_real) / H_dc if H_dc > 0 else np.abs(H_real)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            # gain at w_ref (DC for LP, HF for HP). Builtin abs per combo, as the
+            # loop had: it rounds differently from np.abs on a complex array (1 ulp,
+            # ~40 % of values), which the near-cancelling shape terms below amplify
+            # enough to flip near-tied combos.
+            H_dc = np.array([abs(v) for v in H_real[:, 0]], dtype=float)
+            Hn = np.where((H_dc > 0)[:, None], np.abs(H_real) / H_dc[:, None],
+                          np.abs(H_real))
 
             # =====================================================================
             # DIMENSIONLESS FRACTIONAL ERROR SCORING (K-Dimension Invariant)
             # =====================================================================
-            cost = 0.0
+            cost = np.zeros(len(combos))
             for i, tag in enumerate(tags):
                 if tag == 'gain':
                     # passband gain tracking error vs the TRUE target gain
-                    cost += (abs(H_dc - tgt_dc) / max(tgt_dc, 1e-30)) * 10
+                    cost += (np.abs(H_dc - tgt_dc) / max(tgt_dc, 1e-30)) * 10
 
                 elif tag == 'pole':
                     # Pure percentage shape deviation relative to localized pole coordinate
-                    cost += (abs(Hn[i] - Tn[i]) / max(Tn[i], 1e-6)) * 10
+                    cost += (np.abs(Hn[:, i] - Tn[i]) / max(Tn[i], 1e-6)) * 10
 
                 elif tag == 'Q':
                     # Pure percentage shape deviation relative to localized resonance coordinate
-                    cost += (abs(Hn[i] - Tn[i]) / max(Tn[i], 1e-6)) * 40
+                    cost += (np.abs(Hn[:, i] - Tn[i]) / max(Tn[i], 1e-6)) * 40
 
                 elif tag == 'notch':
                     # Transmitted leakage at the zero point relative to passband voltage envelope
-                    cost += Hn[i] * 20          
+                    cost += Hn[:, i] * 20
 
-            if cost < best_cost:
-                best_cost = cost; best_combo = combo
+        best_cost = float('inf'); best_combo = None
+        finite = cost < np.inf
+        if finite.any():
+            j = int(np.argmin(np.where(finite, cost, np.inf)))
+            best_cost = cost[j]; best_combo = combos[j]
 
         # Attenuator (HP): the HF gain is set by a CAPACITIVE divider (C1/C2/C4)
         # that the resistor snap cannot change, so it is a per-solution penalty
