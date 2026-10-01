@@ -29,7 +29,7 @@ import schematic_svg as schematic
 import tf_derivation_v2 as TF
 import cells_first_order as FO
 from filter_synthesis import IDEAL_OPAMP
-from topology_tab import (section_kind, section_dc_gain, opamp_label,
+from topology_tab import (section_kind, section_dc_gain, opamp_label, settings_tag,
                           _ensure_state, _PICKS)
 import opamp_library as oplib
 import report_ui
@@ -133,7 +133,9 @@ def _loggrad(topo_name):
 
 
 def _eval_opamp(n):
-    """Reconstruct the section's op-amp params from its picker state."""
+    """Reconstruct the section's op-amp params from its picker state (the
+    shared Batch-mode picker when that mode is on)."""
+    n = settings_tag(n)
     choice = st.session_state.get(f"hw_opamp_choice_{n}")
     spec = oplib.resolve(choice)
     if spec == "CUSTOM":

@@ -7,13 +7,17 @@
 #
 #  Consumes the per-section summary the pairing tab publishes into
 #  st.session_state.hw_sections, classifies each section, and dispatches
-#  the General LP solver (filter_synthesis.synthesize) on a *gated*
-#  background fabric:
-#    - a ~1-min 32-core solve never blocks the Streamlit script thread
-#    - simultaneous users never oversubscribe the box (BoundedSemaphore)
-#    - the solver's own ProcessPoolExecutor is never nested (called from a
-#      thread, never submitted into a process pool)
-#    - stale results discarded via a generation token (hw_gen)
+#  the General LP solver (filter_synthesis.synthesize) on a background
+#  fabric:
+#    - a solve never blocks the Streamlit script thread
+#    - since FS-028 S2-4 each solve (one core) runs in a shared process pool
+#      of SOLVE_WORKERS = cores - 1, so sections solve in parallel and
+#      simultaneous users never oversubscribe the box; more sections than
+#      workers simply queue (_solve_pool / _proc_submit)
+#    - the legacy FS_SOLVER=trf path starts its own ProcessPoolExecutor, so
+#      it stays on a thread behind a BoundedSemaphore(1), never nested
+#    - stale results discarded via a generation token (hw_gen); queued
+#      solves of a stale generation are cancelled
 #    - per-section results cached, so reruns / tab switches never resolve
 #
 #  v2 changes:
@@ -36,12 +40,15 @@ import os
 import threading
 import time
 import concurrent.futures
+from concurrent.futures.process import BrokenProcessPool
 
 import numpy as np
 import pandas as pd
 import streamlit as st
 
 from filter_synthesis import synthesize, IDEAL_OPAMP
+import batched_lm as BLM                           # legacy_trf(): FS_SOLVER=trf path
+import pool_utils                                  # _source_stamp (stale-worker check)
 from tf_derivation_v2 import make_response_func
 from tf_derivation_v2 import cell_struct_sig as TF_struct_sig
 from discrete_snapper import _fmt_cap, _fmt_res   # uF for caps, MOhm for R
@@ -55,6 +62,7 @@ import first_order_solver as fos                   # closed-form 1st-order reali
 import solvability_probe as solvprobe              # failure-path global feasibility probe
 import opamp_library as oplib                      # op-amp parts (JSON-backed)
 from ui_components import design_control           # FS-001 styled input boxes
+from ui_components import _mem_widget              # value survives the widget being hidden
 
 # Module-level durable pick store: stage_num -> chosen BOM row. Survives even a
 # full st.session_state reset / clear (single-user web demo). Mirrored into
@@ -75,10 +83,22 @@ def _eng(v):
     return f"{m}e{'+' if e >= 0 else '-'}{abs(e)}"
 
 
+SHARED_TAG = "all"      # key suffix of the batch-mode shared envelope / op-amp
+
+
+def settings_tag(n):
+    """Key suffix of section n's envelope / op-amp widgets: the shared set
+    (SHARED_TAG) while Batch mode is on, else the section's own (n). Every
+    reader of those keys (schematic label, Response tab op-amp, SPICE export,
+    report) goes through this."""
+    return SHARED_TAG if st.session_state.get("hw_batch") else n
+
+
 def opamp_label(n):
     """String shown under U{n} in the schematic: the part number, or — when
     'Custom…' is selected — the op-amp parameter string
     'A_ol = 1e+5; GBWP = 9.5e+4 Hz; Ro = 1200 Ω'. None if no op-amp chosen."""
+    n = settings_tag(n)
     choice = st.session_state.get(f"hw_opamp_choice_{n}")
     if not choice:
         return None
@@ -145,15 +165,59 @@ def _gain_label_for(topo_name):
 # =====================================================================
 @st.cache_resource
 def _job_runner():
-    """`pool`: dispatch threads (each calls synthesize(); since FS-028 S2-2 a
-    solve runs in this process, one core -- only FS_SOLVER=trf still spins a
-    process pool, which a thread avoids nesting). `gate`: bound concurrent
-    heavy solves. 1 == one solve at a time; the next queues (threads would
-    only share the GIL)."""
+    """Legacy FS_SOLVER=trf path only. `pool`: dispatch threads (that path's
+    synthesize() spins its own process pool, which a thread avoids nesting).
+    `gate`: 1 == one such solve at a time; the next queues."""
     return {
         "pool": concurrent.futures.ThreadPoolExecutor(max_workers=4),
         "gate": threading.BoundedSemaphore(1),
     }
+
+
+# FS-028 S2-4: since S2-2 a section's solve runs on one core, so sections
+# solve in parallel in a process pool. One core is left for the UI / main
+# process. Workers spawn on demand (Python >= 3.9, spawn start method), so a
+# 3-section filter starts 3 workers, not cores - 1. More queued sections than
+# workers wait in the pool's FIFO queue -- that IS the bound, across sessions
+# too (cache_resource), replacing the gate for this path. BLAS is pinned to
+# one thread per process by app.py's environment, which workers inherit.
+# FILTERSYNTHESIZER_SOLVE_WORKERS=<n> overrides the count (testing, or a box
+# shared with other work).
+def _solve_workers():
+    try:
+        n = int(os.environ.get("FILTERSYNTHESIZER_SOLVE_WORKERS", ""))
+    except ValueError:
+        n = (os.cpu_count() or 2) - 1
+    return max(1, n)
+
+
+SOLVE_WORKERS = _solve_workers()
+
+
+@st.cache_resource(show_spinner=False)
+def _solve_pool():
+    return concurrent.futures.ProcessPoolExecutor(max_workers=SOLVE_WORKERS)
+
+
+def _proc_submit(fn, *args, **kwargs):
+    """Submit to the solve pool. Rebuilt when a source file changed since it
+    was built (dev servers: workers keep the code they imported) or when it
+    broke (a worker died); either way already-submitted work finishes or
+    fails on its own futures. Same rules as pool_utils.run_in_pool."""
+    stamp = pool_utils._source_stamp()
+    pool = _solve_pool()
+    if getattr(pool, "_source_stamp", stamp) != stamp:
+        pool.shutdown(wait=False)            # queued work still finishes on the old workers
+        _solve_pool.clear()
+        pool = _solve_pool()
+    pool._source_stamp = stamp
+    try:
+        return pool.submit(fn, *args, **kwargs)
+    except (BrokenProcessPool, RuntimeError):  # broken, or shut down under us
+        _solve_pool.clear()
+        pool = _solve_pool()
+        pool._source_stamp = stamp
+        return pool.submit(fn, *args, **kwargs)
 
 
 def _ensure_state():
@@ -292,26 +356,42 @@ def _job_sig(sec, topo, env, conv, opamp, dc_override):
 #  SUBMIT / DRAIN
 # =====================================================================
 def _submit(sig, cfg, opamp, topos, conv, dc_override, gen):
-    R = _job_runner()
     topos = [topos] if isinstance(topos, str) else list(topos)
+    kw = dict(
+        opamp=opamp, topologies=topos,
+        dc_gain=dc_override,                 # None -> solver uses cfg["K"]
+        n_cores=N_CORES,                     # frozen for the demo (TRF path only)
+        ratio_starts=conv["ratio_starts"],
+        anchored_starts=conv["anchored_starts"],
+        max_valleys=conv["max_valleys"],
+        hints_per_combo=conv["hints_per_combo"],
+        pole_tol=conv["pole_tol"],
+        gain_tol=conv["gain_tol"],
+        top_k=conv["top_k"],                 # prune before the costly non-ideal + snap
+        verbose=False,
+    )
+    if BLM.legacy_trf():
+        R = _job_runner()
 
-    def task():
-        with R["gate"]:                      # bound concurrency across users
-            return synthesize(
-                cfg, opamp=opamp, topologies=topos,
-                dc_gain=dc_override,         # None -> solver uses cfg["K"]
-                n_cores=N_CORES,             # frozen for the demo
-                ratio_starts=conv["ratio_starts"],
-                anchored_starts=conv["anchored_starts"],
-                max_valleys=conv["max_valleys"],
-                hints_per_combo=conv["hints_per_combo"],
-                pole_tol=conv["pole_tol"],
-                gain_tol=conv["gain_tol"],
-                top_k=conv["top_k"],         # prune before the costly non-ideal + snap
-                verbose=False,
-            )
+        def task():
+            with R["gate"]:                  # bound concurrency across users
+                return synthesize(cfg, **kw)
 
-    st.session_state.hw_jobs[sig] = {"future": R["pool"].submit(task), "gen": gen}
+        fut = R["pool"].submit(task)
+    else:
+        fut = _proc_submit(synthesize, cfg, **kw)   # one core per section, in parallel
+    st.session_state.hw_jobs[sig] = {"future": fut, "gen": gen}
+
+
+def _job_state(sig):
+    """'solving' / 'queued' for a submitted section, None if not submitted.
+    A process-pool future turns running when a worker takes it (plus at most
+    one call pre-fetched), so 'queued' means waiting for a free core."""
+    job = st.session_state.hw_jobs.get(sig)
+    if job is None:
+        return None
+    fut = job["future"]
+    return "solving" if (fut.running() or fut.done()) else "queued"
 
 
 def _drain_finished():
@@ -323,6 +403,11 @@ def _drain_finished():
     for sig, job in list(st.session_state.hw_jobs.items()):
         fut = job["future"]
         if not fut.done():
+            # The cascade changed: a solve of the old generation that has not
+            # started yet would only hold a core. Cancel it (a running one
+            # finishes and is discarded below).
+            if job["gen"] != cur and fut.cancel():
+                st.session_state.hw_jobs.pop(sig, None)
             continue
         try:
             result = fut.result()
@@ -780,12 +865,20 @@ def _convergence_inputs():
 #     rerun, so they may legally set the section's selectbox value) ---------
 def _oplib_msg(n, kind, text):
     """Result note under the picker. Kept in state (not popped): the tab is a
-    run_every fragment, so a one-shot note would vanish within 2 s. Shown for
-    _OPLIB_MSG_S seconds."""
+    fragment that auto-reruns while solves are pending, so a one-shot note
+    would vanish within 2 s. Shown for _OPLIB_MSG_S seconds."""
     st.session_state[f"hw_oplib_msg_{n}"] = (kind, text, time.monotonic())
 
 
 _OPLIB_MSG_S = 10.0
+
+
+def _set_opamp_choice(n, name):
+    """Switch section n's picker from a callback. The picker is a _mem_widget,
+    so the choice goes to its mirror and the widget key is dropped: it is then
+    re-created at the new value (no "default + Session State API" clash)."""
+    st.session_state[f"_mem_hw_opamp_choice_{n}"] = name
+    st.session_state.pop(f"hw_opamp_choice_{n}", None)
 
 
 def _oplib_save_custom(n):
@@ -801,7 +894,7 @@ def _oplib_save_custom(n):
     except (OSError, ValueError) as ex:
         _oplib_msg(n, "error", f"Could not save: {ex}")
         return
-    st.session_state[f"hw_opamp_choice_{n}"] = name
+    _set_opamp_choice(n, name)
     st.session_state[f"hw_opnew_name_{n}"] = ""
     _oplib_msg(n, "success", f"Saved '{name}' to {oplib.user_path()}")
 
@@ -834,7 +927,7 @@ def _oplib_save_edit(n, name, tag):
     except (OSError, ValueError) as ex:
         _oplib_msg(n, "error", f"Could not save: {ex}")
         return
-    st.session_state[f"hw_opamp_choice_{n}"] = target
+    _set_opamp_choice(n, target)
     _oplib_msg(n, "success", f"Saved '{target}' to {oplib.user_path()}")
 
 
@@ -848,7 +941,7 @@ def _oplib_remove(n, name, revert):
     if revert:
         _oplib_msg(n, "success", f"'{name}' reverted to the shipped values.")
     else:
-        st.session_state[f"hw_opamp_choice_{n}"] = oplib.IDEAL_LABEL
+        _set_opamp_choice(n, oplib.IDEAL_LABEL)
         _oplib_msg(n, "success", f"Deleted '{name}'.")
 
 
@@ -894,9 +987,12 @@ def _opamp_picker(n):
         st.warning(msg, icon="⚠️")
     options = oplib.choices()
     key = f"hw_opamp_choice_{n}"
-    if key in st.session_state and st.session_state[key] not in options:
-        st.session_state[key] = oplib.IDEAL_LABEL      # part renamed/deleted on disk
-    choice = st.selectbox("Op-amp", options, key=key, label_visibility="collapsed")
+    # _mem_widget: Batch mode hides the per-section pickers (and the shared one
+    # in manual mode); a re-shown widget must come back with its own value.
+    if st.session_state.get(key, oplib.IDEAL_LABEL) not in options:
+        st.session_state.pop(key, None)                # part renamed/deleted on disk
+    choice = _mem_widget(st.selectbox, "Op-amp", key, oplib.IDEAL_LABEL,
+                         options=options, label_visibility="collapsed")
     note = st.session_state.get(f"hw_oplib_msg_{n}")
     if note and time.monotonic() - note[2] < _OPLIB_MSG_S:
         (st.error if note[0] == "error" else st.success)(note[1])
@@ -904,11 +1000,14 @@ def _opamp_picker(n):
         d = oplib.CUSTOM_DEFAULT
         o = st.columns(3)
         with o[0]:
-            a_ol = st.number_input("A_ol (V/V)", value=d["A_ol"], format="%.2e", key=f"hw_aol_{n}")
+            a_ol = _mem_widget(st.number_input, "A_ol (V/V)", f"hw_aol_{n}", d["A_ol"],
+                               format="%.2e")
         with o[1]:
-            gbwp = st.number_input("GBWP (Hz)", value=d["GBWP_hz"], format="%.3e", key=f"hw_gbwp_{n}")
+            gbwp = _mem_widget(st.number_input, "GBWP (Hz)", f"hw_gbwp_{n}", d["GBWP_hz"],
+                               format="%.3e")
         with o[2]:
-            ro_ohm = st.number_input("Ro (Ω)", value=d["Ro_ohm"], step=10.0, key=f"hw_ro_{n}")
+            ro_ohm = _mem_widget(st.number_input, "Ro (Ω)", f"hw_ro_{n}", d["Ro_ohm"],
+                                 step=10.0)
         s = st.columns([3, 1], vertical_alignment="bottom")
         with s[0]:
             st.text_input("Save as part", key=f"hw_opnew_name_{n}",
@@ -926,9 +1025,79 @@ def _opamp_picker(n):
     return oplib.solver_params(e)
 
 
-def _section_settings(sec):
+# Envelope widget defaults (hw_<field>_{tag}). The widgets are _mem_widgets:
+# Batch mode hides the per-section set (and the shared one in manual mode), and
+# a re-shown widget must come back with its own value, not the widget default.
+_ENV_DEFAULTS = {"cmin": 6.8e-5, "cmax": 1e-2, "rmin": 0.3, "rmax": 2000.0,
+                 "ratio": 500.0, "cser": "E12"}
+
+
+def _rser_inputs(tag):
+    """Resistor E-series checkboxes (keys hw_rser_{tag}_<series>); E48 if none."""
+    st.markdown("**Resistor E-series** (multiple)")
+    rcols = st.columns(len(R_SERIES_OPTIONS))
+    r_selected = []
+    for i, name in enumerate(R_SERIES_OPTIONS):
+        with rcols[i]:
+            if _mem_widget(st.checkbox, name, f"hw_rser_{tag}_{name}", name == "E48"):
+                r_selected.append(name)
+    if not r_selected:
+        st.warning("No R series selected — defaulting to E48.")
+        r_selected = ["E48"]
+    return r_selected
+
+
+def _envelope_inputs(tag):
+    """Component envelope + C / R E-series widgets, keys hw_<field>_{tag}
+    (tag = stage number, or SHARED_TAG for the batch-mode shared set).
+    Returns the env core dict in solver units (R in MΩ)."""
+    D = _ENV_DEFAULTS
+    st.markdown("**Component envelope**")
+    e = st.columns(3)
+    with e[0]:
+        c_min = _mem_widget(st.number_input, "C_min (µF)", f"hw_cmin_{tag}", D["cmin"],
+                            format="%.2e")
+        c_max = _mem_widget(st.number_input, "C_max (µF)", f"hw_cmax_{tag}", D["cmax"],
+                            format="%.2e")
+    with e[1]:
+        r_min_k = _mem_widget(st.number_input, "R_min (kΩ)", f"hw_rmin_{tag}", D["rmin"],
+                              format="%.4f")
+        r_max_k = _mem_widget(st.number_input, "R_max (kΩ)", f"hw_rmax_{tag}", D["rmax"],
+                              format="%.1f")
+    with e[2]:
+        max_ratio = _mem_widget(st.number_input, "Max R ratio", f"hw_ratio_{tag}", D["ratio"],
+                                step=1.0,
+                                help="Phase 3 rejects any solution whose resistor spread "
+                                     "exceeds this — lower = far fewer solutions. The old "
+                                     "default of 60 was below what most sections need and "
+                                     "had to be raised by hand almost every run: an MFB "
+                                     "band-pass alone spends ~4·Q² of spread on its core, "
+                                     "so 60 caps it at Q ≈ 3.9 and returns nothing above "
+                                     "that. 500 clears Q ≈ 11 and leaves the guard doing "
+                                     "its real job — rejecting genuinely unbuildable "
+                                     "spreads — rather than gating ordinary designs.")
+
+    st.markdown("**Capacitor E-series** (single)")
+    c_series = _mem_widget(st.radio, "C series", f"hw_cser_{tag}", D["cser"],
+                           options=C_SERIES_OPTIONS, horizontal=True,
+                           label_visibility="collapsed")
+    if c_series == "E3":
+        st.caption("⚠ E3 must be added to `unified_solver_v2._E_SERIES`, "
+                   "else the cap grid is empty.")
+
+    r_selected = _rser_inputs(tag)
+
+    return dict(C_min=c_min, C_max=c_max,
+                R_min=r_min_k * 1e-3, R_max=r_max_k * 1e-3,   # kΩ -> MΩ (internal units)
+                MAX_R_RATIO=max_ratio, C_series=c_series, R_series=", ".join(r_selected))
+
+
+def _section_settings(sec, shared=None):
+    """`shared`: None (manual mode, per-section envelope + op-amp) or the
+    batch-mode (env core, opamp) pair from _shared_settings."""
     n = sec["stage_num"]
-    with st.expander(f"⚙ Section {n} — topology & component settings", expanded=False):
+    title = "topology settings" if shared is not None else "topology & component settings"
+    with st.expander(f"⚙ Section {n} — {title}", expanded=False):
         family = st.radio("Topology family", TOPOLOGY_FAMILIES, index=0,
                           horizontal=True, key=f"hw_fam_{n}")
         if family.startswith("MFB"):
@@ -959,47 +1128,14 @@ def _section_settings(sec):
             st.info("Only VCVS (Sallen-Key), MFB (Friend) and AM (Ackerberg–"
                     "Mossberg) synthesis are wired today. Other families are coming.")
 
-        # Op-amp is per-section: high-Q / high-gain stages can be more BW-demanding.
-        opamp = _opamp_picker(n)
-
-        st.markdown("**Component envelope**")
-        e = st.columns(3)
-        with e[0]:
-            c_min = st.number_input("C_min (µF)", value=6.8e-5, format="%.2e", key=f"hw_cmin_{n}")
-            c_max = st.number_input("C_max (µF)", value=1e-2, format="%.2e", key=f"hw_cmax_{n}")
-        with e[1]:
-            r_min_k = st.number_input("R_min (kΩ)", value=0.3, format="%.4f", key=f"hw_rmin_{n}")
-            r_max_k = st.number_input("R_max (kΩ)", value=2000.0, format="%.1f", key=f"hw_rmax_{n}")
-        with e[2]:
-            max_ratio = st.number_input("Max R ratio", value=500.0, step=1.0, key=f"hw_ratio_{n}",
-                                        help="Phase 3 rejects any solution whose resistor spread "
-                                             "exceeds this — lower = far fewer solutions. The old "
-                                             "default of 60 was below what most sections need and "
-                                             "had to be raised by hand almost every run: an MFB "
-                                             "band-pass alone spends ~4·Q² of spread on its core, "
-                                             "so 60 caps it at Q ≈ 3.9 and returns nothing above "
-                                             "that. 500 clears Q ≈ 11 and leaves the guard doing "
-                                             "its real job — rejecting genuinely unbuildable "
-                                             "spreads — rather than gating ordinary designs.")
-
-        st.markdown("**Capacitor E-series** (single)")
-        c_series = st.radio("C series", C_SERIES_OPTIONS,
-                            index=C_SERIES_OPTIONS.index("E12"), horizontal=True,
-                            key=f"hw_cser_{n}", label_visibility="collapsed")
-        if c_series == "E3":
-            st.caption("⚠ E3 must be added to `unified_solver_v2._E_SERIES`, "
-                       "else the cap grid is empty.")
-
-        st.markdown("**Resistor E-series** (multiple)")
-        rcols = st.columns(len(R_SERIES_OPTIONS))
-        r_selected = []
-        for i, name in enumerate(R_SERIES_OPTIONS):
-            with rcols[i]:
-                if st.checkbox(name, value=(name == "E48"), key=f"hw_rser_{n}_{name}"):
-                    r_selected.append(name)
-        if not r_selected:
-            st.warning("No R series selected — defaulting to E48.")
-            r_selected = ["E48"]
+        if shared is None:
+            # Op-amp is per-section: high-Q / high-gain stages can be more BW-demanding.
+            opamp = _opamp_picker(n)
+            env = _envelope_inputs(n)
+        else:
+            env, opamp = dict(shared[0]), shared[1]
+            st.caption("Op-amp and component envelope: shared settings at the top "
+                       "of the tab (Batch mode).")
 
         # AM-only handbook constraint toggle (Issue 4). Default ON.
         equalize_rc = None
@@ -1062,9 +1198,6 @@ def _section_settings(sec):
             elif not mfb_ls:
                 elim_r1 = False
 
-    env = dict(C_min=c_min, C_max=c_max,
-               R_min=r_min_k * 1e-3, R_max=r_max_k * 1e-3,   # kΩ -> MΩ (internal units)
-               MAX_R_RATIO=max_ratio, C_series=c_series, R_series=", ".join(r_selected))
     if equalize_rc is not None:
         env["equalize_rc"] = bool(equalize_rc)   # threads into cfg via _build_cfg
     # mfb_ls / elim_r1 / mfb_gained are deliberately NOT threaded into `env`: they
@@ -1313,8 +1446,8 @@ def _render_results(res, n, opamp, cfg=None, topos=None, dc_gain=None):
                                value=0, step=1, key=f"hw_pick_{n}")
         picked = [int(idx)]
 
-    # Resolve the active pick. The BOM table is inside a run_every fragment and
-    # is re-sorted each tick, so st.dataframe's selection reads empty on auto-
+    # Resolve the active pick. The BOM table is inside a fragment that auto-
+    # reruns while solves are pending and is re-sorted each tick, so st.dataframe's selection reads empty on auto-
     # reruns / tab switches. Treat the pick as STICKY: a fresh selection updates
     # it; an empty read keeps the last pick (cleared only when the cascade
     # changes, in render_topology_tab). This keeps hw_picked durable for the
@@ -1331,8 +1464,8 @@ def _render_results(res, n, opamp, cfg=None, topos=None, dc_gain=None):
         store[n] = _PICKS[n] = s_row              # durable copies
         cstore[n] = c_row                         # ideal (continuous) twin
 
-        # Flag a genuinely NEW pick. The comparison matters: run_every fires
-        # every 2 s and the sticky-pick logic re-writes the same row each tick,
+        # Flag a genuinely NEW pick. The comparison matters: while solves are
+        # pending the fragment reruns every 2 s and the sticky-pick logic re-writes the same row each tick,
         # so an unguarded flag would rerun the app forever.
         _sig = (pick_idx, str(s_row.get("topology")),
                 round(float(s_row.get("sens_score") or 0.0), 6),
@@ -1396,48 +1529,50 @@ def _render_results(res, n, opamp, cfg=None, topos=None, dc_gain=None):
 _FO_R_LO_MOHM, _FO_R_HI_MOHM = 1e-4, 10.0          # 100 Ω .. 10 MΩ
 
 
-def _first_order_settings(sec):
+def _first_order_settings(sec, shared=None):
     """Settings UI for a 1st-order section: op-amp + C_max + cap/resistor series.
     No topology-family radio (meaningless at order 1) and no R/C-min envelope —
-    the solver realizes the pole at the 3 nearest E-series caps at/below C_max."""
+    the solver realizes the pole at the 3 nearest E-series caps at/below C_max.
+    `shared` (Batch mode): the (env core, opamp) pair; only its C_max and E-series
+    are used — the R range stays the fixed 1st-order one."""
     n = sec["stage_num"]
+    if shared is not None:
+        senv, opamp = shared
+        st.caption("Op-amp, C_max and E-series: shared settings at the top of the tab "
+                   "(Batch mode).")
+        env = dict(C_max=senv["C_max"], C_series=senv["C_series"], R_series=senv["R_series"],
+                   R_min=_FO_R_LO_MOHM, R_max=_FO_R_HI_MOHM, cap_mode="nearest_lower", n_caps=3)
+        return env, opamp
     with st.expander(f"⚙ Section {n} — component settings", expanded=False):
         opamp = _opamp_picker(n)
 
         st.markdown("**Component envelope**")
-        c_max = st.number_input("C_max (µF)", value=1e-2, format="%.2e", key=f"hw_cmax_{n}",
-                                help="Upper capacitor bound. The solver realizes the pole "
-                                     "at the 3 nearest E-series cap values at or below this.")
+        c_max = _mem_widget(st.number_input, "C_max (µF)", f"hw_cmax_{n}",
+                            _ENV_DEFAULTS["cmax"], format="%.2e",
+                            help="Upper capacitor bound. The solver realizes the pole "
+                                 "at the 3 nearest E-series cap values at or below this.")
 
         st.markdown("**Capacitor E-series** (single)")
-        c_series = st.radio("C series", C_SERIES_OPTIONS,
-                            index=C_SERIES_OPTIONS.index("E12"), horizontal=True,
-                            key=f"hw_cser_{n}", label_visibility="collapsed")
+        c_series = _mem_widget(st.radio, "C series", f"hw_cser_{n}", _ENV_DEFAULTS["cser"],
+                               options=C_SERIES_OPTIONS, horizontal=True,
+                               label_visibility="collapsed")
 
-        st.markdown("**Resistor E-series** (multiple)")
-        rcols = st.columns(len(R_SERIES_OPTIONS))
-        r_selected = []
-        for i, name in enumerate(R_SERIES_OPTIONS):
-            with rcols[i]:
-                if st.checkbox(name, value=(name == "E48"), key=f"hw_rser_{n}_{name}"):
-                    r_selected.append(name)
-        if not r_selected:
-            st.warning("No R series selected — defaulting to E48.")
-            r_selected = ["E48"]
+        r_selected = _rser_inputs(n)
 
     env = dict(C_max=c_max, C_series=c_series, R_series=", ".join(r_selected),
                R_min=_FO_R_LO_MOHM, R_max=_FO_R_HI_MOHM, cap_mode="nearest_lower", n_caps=3)
     return env, opamp
 
 
-def _render_first_order(sec, n):
+def _render_first_order(sec, n, shared=None):
     """Closed-form 1st-order section: pick realization (sign) + passband gain,
     name the cell, solve via first_order_solver (bypasses unified_solver_v2),
-    and hand the LP-shaped result to the shared _render_results."""
+    and hand the LP-shaped result to the shared _render_results.
+    Returns a short status string for the batch-mode summary."""
     fam = pairing_utils.family_from_section(sec)            # 'LP' or 'HP'
     box = design_control(f"sec_{n}")                        # FS-001 styled input box
     with box:
-        env, opamp = _first_order_settings(sec)
+        env, opamp = _first_order_settings(sec, shared)
     g_default = abs(float(section_dc_gain(sec)))            # Pairing Remaining-Gain-Distribution
     glabel = "HF gain" if fam == "HP" else "DC gain"
 
@@ -1475,15 +1610,21 @@ def _render_first_order(sec, n):
     res = fos.synthesize_first_order(cfg, opamp=opamp, topology=topo, dc_gain=G)
     if res.get("__error__"):
         st.error(f"1st-order solver: {res['__error__']}")
-        return
+        return "error"
     if not res.get("snapped"):
         st.warning("No realization fits the constraints — raise C_max, add a resistor "
                    "E-series, or (ni-gained) relax the gain so R3+R4 lands in 5k–50k.")
-        return
+        return "no BOM"
     _render_results(res, n, opamp)
+    nb = len(res["snapped"])
+    return f"{nb} BOM{'s' if nb != 1 else ''} (closed form)"
 
 
-def _render_section(sec, conv, gen):
+def _render_section(sec, conv, gen, shared=None, solve_all=False):
+    """One section's settings, solve control and results. Batch mode passes
+    `shared` (the (env core, opamp) pair) and, on a "Solve all sections" click,
+    `solve_all` -- the section then queues itself exactly as its own Solve
+    button would. Returns a short status string for the batch summary."""
     n = sec["stage_num"]
     head = f"**Section {n}** · order {sec['order']}"
     if sec["order"] == 1:
@@ -1498,11 +1639,11 @@ def _render_section(sec, conv, gen):
 
     kind, reason = section_kind(sec)
     if kind == "first_order":
-        _render_first_order(sec, n)
-        st.divider(); return
+        status = _render_first_order(sec, n, shared)
+        st.divider(); return status
     if kind == "pending":
         st.caption(f"⏳ {reason}")
-        st.divider(); return
+        st.divider(); return "pending"
 
     is_hp = (kind == "hp")          # 'lp' and 'hp' share this rendering path
     unsupported = None              # set by a branch when no cell can realize it
@@ -1512,7 +1653,7 @@ def _render_section(sec, conv, gen):
     # FS-001: settings expander + gain/Ki/Solve row share one design-control box.
     box = design_control(f"sec_{n}")
     with box:
-        family, env, opamp, mfb_ls, elim_r1, mfb_gained = _section_settings(sec)
+        family, env, opamp, mfb_ls, elim_r1, mfb_gained = _section_settings(sec, shared)
     vcvs = family.startswith("VCVS")
     mfb = family.startswith("MFB")           # Multiple-Feedback (LP/LPn, HP/HPn, BP, pure-notch)
     am = family.startswith("AM")             # Ackerberg–Mossberg 3-op-amp state-variable biquad
@@ -1993,17 +2134,35 @@ def _render_section(sec, conv, gen):
     elif atten_blocked:
         st.caption(f"This section needs DC gain < 1 (H(0) = {eff_dc:.3g}) → an attenuator "
                    f"cell `{topo}`, not yet wired in the solver. Coming soon.")
-    elif clicked and not running:
+    elif (clicked or (solve_all and not have)) and not running:
+        # Batch "Solve all" queues only sections without a result for their
+        # current settings; a solved one keeps it (its own Re-solve still works).
         _submit(sig, _build_cfg(sec, env, conv, cfg_k_override), opamp, topos, conv, dc_target, gen)
         running = True
 
     if running:
-        st.caption("⚙️ Solving… (other sections and tabs stay responsive)")
+        if _job_state(sig) == "queued":
+            st.caption("⏳ Queued — waiting for a free core (other sections and tabs "
+                       "stay responsive)")
+        else:
+            st.caption("⚙️ Solving… (other sections and tabs stay responsive)")
     elif have:
         _render_results(st.session_state.hw_results[sig], n, opamp,
                         cfg=_build_cfg(sec, env, conv, cfg_k_override),
                         topos=topos, dc_gain=dc_target)
     st.divider()
+
+    if not solvable:
+        return "not solvable"
+    if running:
+        return _job_state(sig) or "solving"
+    if not have:
+        return "not solved"
+    res = st.session_state.hw_results[sig]
+    if res.get("__error__"):
+        return "error"
+    nb = len(res.get("snapped") or [])
+    return f"{nb} BOM{'s' if nb != 1 else ''}" if nb else "no BOM"
 
 
 def _render_overall(sections):
@@ -2143,10 +2302,90 @@ def _render_overall(sections):
 
 
 # =====================================================================
+#  BATCH MODE  (FS-028 S2-4 step 1: shared envelope + op-amp, Solve all)
+# =====================================================================
+# Widget keys that Batch mode shares: hw_<field>_{tag}, tag = stage number or
+# SHARED_TAG. Read through settings_tag() by the downstream tabs. All are
+# _mem_widgets, so the hidden set (per-section while Batch mode is on, shared
+# while it is off) keeps its values in the `_mem_` mirrors.
+_SHAREABLE = (["opamp_choice", "aol", "gbwp", "ro"] + list(_ENV_DEFAULTS)
+              + [f"rser_{{t}}_{s}" for s in R_SERIES_OPTIONS])
+
+
+def _shared_keys(tag):
+    return [f"hw_{f}".format(t=tag) if "{t}" in f else f"hw_{f}_{tag}" for f in _SHAREABLE]
+
+
+def _seed_shared(stages):
+    """First switch to Batch mode: start each shared value from the first
+    section that has it, not from the defaults. Writes the `_mem_` mirror only
+    (the shared widget is created from it); never overwrites a shared value."""
+    ss = st.session_state
+    for k_all, *k_secs in zip(_shared_keys(SHARED_TAG), *(_shared_keys(n) for n in stages)):
+        if "_mem_" + k_all not in ss:
+            src = next((k for k in k_secs if "_mem_" + k in ss), None)
+            if src is not None:
+                ss["_mem_" + k_all] = ss["_mem_" + src]
+
+
+def _shared_settings():
+    """The batch-mode shared box above all sections. Returns (env core, opamp)."""
+    with design_control("hw_shared"):
+        with st.expander("⚙ Shared settings — all sections (Batch mode)", expanded=True):
+            opamp = _opamp_picker(SHARED_TAG)
+            env = _envelope_inputs(SHARED_TAG)
+    return env, opamp
+
+
+def _batch_status(box, status, solve_all):
+    """Batch summary, filled after the section loop. The text is kept in
+    session state and shown again at the start of the next run (see
+    _topology_body), so the polling fragment does not blank it each tick."""
+    def icon(s):
+        if s == "solving":
+            return "⚙️"
+        if s[:1].isdigit():                       # "<n> BOM(s)[ (closed form)]"
+            return "✅"
+        if s in ("pending", "queued"):
+            return "⏳"
+        return "○" if s == "not solved" else "⚠️"
+    status = {n: (s or "—") for n, s in status.items()}
+    with_bom = sum(icon(s) == "✅" for s in status.values())
+    solving = sum(s == "solving" for s in status.values())
+    queued = sum(s == "queued" for s in status.values())
+    head = f"**{with_bom} / {len(status)}** sections with a BOM"
+    if solving or queued:
+        head += f" · {solving} solving" + (f", {queued} queued" if queued else "")
+        if not BLM.legacy_trf():
+            head += f" · {SOLVE_WORKERS} parallel worker{'s' if SOLVE_WORKERS != 1 else ''}"
+    elif solve_all:
+        head += " · nothing to queue: every solvable section has a result"
+    text = head + "  \n" + " · ".join(f"{icon(s)} S{n}: {s}" for n, s in status.items())
+    st.session_state["_hw_batch_status"] = text
+    box.markdown(text)
+
+
+# =====================================================================
 #  PUBLIC ENTRY  (call inside `with tab_topology:`)
 # =====================================================================
-@st.fragment(run_every=2.0)
+_POLL_S = 2.0      # tab refresh period while solves are pending
+
+
 def render_topology_tab():
+    """Tab entry (app.py, inside the Topology tab, on every full run). The body
+    is a fragment that auto-reruns (to collect finished solves) ONLY while
+    solves are pending: with many solved sections a permanent 2 s refresh
+    re-rendered every BOM table and schematic forever (FS-028 S2-4: a 13-
+    section design kept the app busy while idle). run_every is fixed when the
+    fragment is registered, i.e. per full run; the body asks for a full run
+    whenever pending-ness changes (see the end of _topology_body)."""
+    _ensure_state()
+    polling = bool(st.session_state.hw_jobs)
+    st.session_state["_hw_polling"] = polling
+    st.fragment(_topology_body, run_every=_POLL_S if polling else None)()
+
+
+def _topology_body():
     _ensure_state()
     st.markdown("#### Topology & Hardware Synthesis")
 
@@ -2174,23 +2413,63 @@ def render_topology_tab():
     if _drain_finished():
         st.session_state["_picks_dirty"] = True
 
+    # FS-028 S2-4 step 1: Batch mode = one shared envelope + op-amp for every
+    # section and a "Solve all sections" button. Off (manual, per-section
+    # settings) is the default and renders exactly as before.
+    batch = st.toggle("Batch mode — shared envelope & op-amp", key="hw_batch",
+                      help="On: one op-amp and one component envelope (C/R range, max R "
+                           "ratio, E-series) for every section, set once below, and a "
+                           "Solve all sections button. Each section keeps its own topology "
+                           "family, gain and family options, and you still pick a row in "
+                           "each section. Off: per-section settings, as before; each "
+                           "section's own values are kept while Batch mode is on.")
+    stages = [s["stage_num"] for s in sections]
+    shared, solve_all, status_box = None, False, None
+    if batch:
+        _seed_shared(stages)
+        shared = _shared_settings()
+
     conv = _convergence_inputs()
-    # Op-amp is now per-section (in each section's settings expander).
+    # Op-amp is per-section (in each section's settings expander), or shared in Batch mode.
     # Cores are frozen at N_CORES (=32) for the web demo — no UI control on purpose.
+    if batch:
+        b = st.columns([1, 3], vertical_alignment="center")
+        with b[0]:
+            solve_all = st.button("Solve all sections", key="hw_solve_all", type="primary",
+                                  use_container_width=True,
+                                  help="Queues every section that has no result for its "
+                                       "current settings. They solve in parallel, one "
+                                       "core each (sections beyond the free cores wait "
+                                       "their turn); a section that already has a result "
+                                       "keeps it (use its own Re-solve).")
+        status_box = b[1].empty()
+        prev = st.session_state.get("_hw_batch_status")
+        if prev:                    # last tick's text until this run refills it: no blink
+            status_box.markdown(prev)
     st.markdown("---")
 
     pending = len(st.session_state.hw_jobs)
-    if pending:
+    if pending and not batch:
         st.caption(f"⚙️ {pending} section(s) solving in the background…")
 
+    status = {}
     for sec in sections:
-        _render_section(sec, conv, gen)
+        status[sec["stage_num"]] = _render_section(sec, conv, gen, shared, solve_all)
+
+    if status_box is not None:
+        _batch_status(status_box, status, solve_all)
 
     _render_overall(sections)
+
+    # Polling is registered per full run (render_topology_tab): a submit made
+    # in this fragment run starts it, the last drained solve stops it -- both
+    # need one full run.
+    if bool(st.session_state.hw_jobs) != st.session_state.get("_hw_polling", False):
+        st.session_state["_picks_dirty"] = True
 
     # A row click reruns this fragment only, so the Response tab (rendered
     # outside it, in app.py) would keep its stale placeholder until the user
     # pressed R. Ask for one app-wide rerun; the flag is popped first, so this
-    # cannot loop against run_every.
+    # cannot loop against the polling.
     if st.session_state.pop("_picks_dirty", False):
         st.rerun(scope="app")

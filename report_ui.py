@@ -24,7 +24,7 @@ import hashlib
 import streamlit as st
 
 import schematic_svg as schematic
-from topology_tab import opamp_label, _gain_label_for
+from topology_tab import opamp_label, settings_tag, _gain_label_for
 from _version import __version__, APP_NAME
 
 # ---------------------------------------------------------------------
@@ -82,15 +82,18 @@ _R_SERIES = ("E12", "E24", "E48", "E96")
 
 
 # ---------------------------------------------------------------------
-def _section_env(n):
+def _section_env(n, first_order=False):
     """Solver environment for section `n`, read straight from the Topology
-    tab's widget keys (no extra plumbing needed in topology_tab.py). The
-    1st-order settings block omits C_min / R_min / R_max, hence the .get()s."""
+    tab's widget keys (no extra plumbing needed in topology_tab.py); the shared
+    Batch-mode keys when that mode is on. The 1st-order settings block omits
+    C_min / R_min / R_max, hence the .get()s -- and a 1st-order section in
+    Batch mode uses only the shared C_max and E-series, hence `first_order`."""
+    n = settings_tag(n)
     r_sel = [s for s in _R_SERIES if st.session_state.get(f"hw_rser_{n}_{s}")]
-    rmin_k = st.session_state.get(f"hw_rmin_{n}")
-    rmax_k = st.session_state.get(f"hw_rmax_{n}")
+    rmin_k = None if first_order else st.session_state.get(f"hw_rmin_{n}")
+    rmax_k = None if first_order else st.session_state.get(f"hw_rmax_{n}")
     return dict(
-        C_min=st.session_state.get(f"hw_cmin_{n}"),
+        C_min=None if first_order else st.session_state.get(f"hw_cmin_{n}"),
         C_max=st.session_state.get(f"hw_cmax_{n}"),
         R_min=(rmin_k * 1e-3) if rmin_k else None,       # kΩ -> MΩ
         R_max=(rmax_k * 1e-3) if rmax_k else None,
@@ -155,7 +158,7 @@ def _build_ctx(sections_data, picked, f, ideal, realized, mc, mc_params,
             opamp_name=opamp_label(n) or "Ideal (no op-amp limits)",
             opamp_params=(d.get("eval_opamp") if isinstance(d.get("eval_opamp"), dict)
                           and d["eval_opamp"].get("GBWP_hz") else None),
-            env=_section_env(n),
+            env=_section_env(n, first_order=(int((d.get("sec") or {}).get("order", 2)) == 1)),
             metrics=dict(sens=row.get("sens_score"), snap_cost=row.get("snap_cost"),
                          dc=dc, dc_label=_gain_label_for(topo),
                          dc_design=dc_design, spec_gain=spec_gain or None,

@@ -200,3 +200,14 @@ Custom H(s) entered with a negative K is used as |K|, with a warning.
   metrics too and keeps the lowest-sens root within `accept` (not the first
   hint's). `FS_SOLVER=trf` restores the
   S2-1 path bit for bit (scipy TRF, Phase-1/3 pool, per-row non-ideal TRF).
+- Section-parallel solves (FS-028 S2-4): the Topology tab submits each
+  section's `synthesize()` to one shared, persistent process pool
+  (`topology_tab._solve_pool`, cores − 1 workers, spawned on demand, override
+  `FILTERSYNTHESIZER_SOLVE_WORKERS`); more sections than workers queue in it.
+  So everything `synthesize()` takes and returns must stay picklable (plain
+  dicts / floats / sympy; no lambdas, no open handles), the solve must not
+  start its own pool on the default path (the `FS_SOLVER=trf` fallback does,
+  so it stays on a thread behind a one-at-a-time gate), and on-disk caches
+  must tolerate concurrent writers (`tf_derivation_v2._save_blob`: per-process
+  temp + `os.replace`, retried then skipped when Windows reports the target
+  open; a lost concurrent update only costs a later re-generation).

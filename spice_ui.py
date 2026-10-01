@@ -30,7 +30,7 @@ import streamlit as st
 import opamp_library as oplib
 import spice_export as SX
 import spice_opamps as SO
-from topology_tab import DEBUG_UI, opamp_label
+from topology_tab import DEBUG_UI, opamp_label, settings_tag
 
 _AUTO = "Auto"
 _FS = "FS generic"
@@ -70,7 +70,7 @@ def _part_model(n):
     """The section's op-amp part -> its `spice_model` dummy stem, or None
     (FS generic). Ideal and Custom always use FS generic: their parameters
     are the tool's own model."""
-    choice = st.session_state.get(f"hw_opamp_choice_{n}") or ""
+    choice = st.session_state.get(f"hw_opamp_choice_{settings_tag(n)}") or ""
     if choice in (oplib.IDEAL_LABEL, oplib.CUSTOM_LABEL):
         return None
     e = oplib.get(choice)

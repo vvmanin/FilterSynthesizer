@@ -418,7 +418,16 @@ def _save_blob(blob, path):
     try:
         with open(tmp, "w") as f:
             json.dump(blob, f)
-        os.replace(tmp, path)               # atomic; consumes tmp on success
+        # atomic; consumes tmp on success. Windows refuses to replace a file
+        # another process has open (FS-028 S2-4: parallel section solves read
+        # the cache while one writes it) -- retry briefly, then skip this
+        # write: the cache is an optimization, the entry is rebuilt next time.
+        for attempt in range(5):
+            try:
+                os.replace(tmp, path)
+                break
+            except PermissionError:
+                time.sleep(0.05 * (attempt + 1))
     finally:
         if os.path.exists(tmp):
             try:

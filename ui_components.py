@@ -91,9 +91,9 @@ def sync_gain():
 
 
 def _mem_widget(widget, label, key, default, **kw):
-    """A keyed radio / number_input / checkbox whose value survives being hidden: it is
-    mirrored into session_state['_mem_<key>'] by an on_change callback (the same `_mem_*`
-    pattern as the callbacks above). Returns the widget's current value."""
+    """A keyed radio / selectbox / number_input / checkbox whose value survives being
+    hidden: it is mirrored into session_state['_mem_<key>'] by an on_change callback (the
+    same `_mem_*` pattern as the callbacks above). Returns the widget's current value."""
     mem = "_mem_" + key
     if mem not in st.session_state:
         st.session_state[mem] = default
@@ -101,7 +101,7 @@ def _mem_widget(widget, label, key, default, **kw):
     def _sync():
         st.session_state[mem] = st.session_state[key]
 
-    if widget is st.radio:
+    if widget is st.radio or widget is st.selectbox:
         opts = kw["options"]
         if st.session_state[mem] not in opts:
             st.session_state[mem] = default
