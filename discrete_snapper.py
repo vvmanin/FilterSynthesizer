@@ -165,6 +165,10 @@ def snap_to_hardware(solutions, cfg, opamp, cases, target_dc=None):
         # ~0.707*passband and still Q-sensitive. The notch DEPTH and centering are
         # covered separately by the 'notch' point at fz. (LPn/HPn keep f0 — there
         # the zero is off f0, so the target at f0 is non-zero and well-posed.)
+        # FS-033: kept on the 5 % window on purpose. A near-notch LPn/HPn (now
+        # dual-solved with 2N, same cfg) thus keeps the skirt point it had as a
+        # 'notch'; moving it to f0 changed no solution, only inflated snap cost
+        # by ~35-50 % and broke comparability with earlier runs.
         pure_notch = notch and abs(cfg['fz'] / cfg['f0'] - 1.0) < 0.05
         # Band-pass: both target and realized are normalized to their peak at f0,
         # so the Q metric AT f0 is degenerate (~1 either way). Move the Q point to

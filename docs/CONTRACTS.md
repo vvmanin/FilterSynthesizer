@@ -56,7 +56,7 @@ For the tier model and file map see `docs/ARCHITECTURE.md`.
 
 Section family is a **math** property, derived from order + zero structure +
 the pole↔zero frequency ratio, independent of filter type.
-`pairing_utils.classify_section(stage, p_bricks, z_bricks, wz_tol=0.05)` is
+`pairing_utils.classify_section(stage, p_bricks, z_bricks, notch_eps=NOTCH_EPS)` is
 authoritative; `pairing_utils.family_from_section(sec)` is its Section-dict
 wrapper (prefers a producer-stored `sec['family']`, then `sec['n_origin_zeros']`,
 then reconstruction).
@@ -69,8 +69,17 @@ Returns `{order, family, w0, Q, wz, n_origin_zeros}`. Rules:
 - Origin zeros, order 3: 1 → `BP1LP` (num ~ s), 2 → `BP1HP` (num ~ s²),
   3 → `HP`.
 - Real pole + 1 origin zero → `HP` (order 1).
-- Complex-pair zero: `wz > w0` → `LPn`; `wz < w0` → `HPn`;
-  `|wz/w0 − 1| < wz_tol` → `notch`.
+- Complex-pair zero: `notch` only when forcing the zero onto w0 (what the 2N
+  cells realize) is negligible: `notch_forcing_error(wz, w0, Q) < NOTCH_EPS =
+  1e-3`. ε = |r − 1|·Q/√(1 − 1/(4Q²)) (Q > 1/√2, else |r − 1|), r = (wz/w0)²,
+  is the worst-case |H_true − H_forced| over ω in units of the section gain K.
+  Otherwise `wz > w0` → `LPn`, `wz < w0` → `HPn`. Exact transform notches
+  (ε ~ 1e-8) stay `notch`; a near-notch (FS-033: fz/f0 = 1.037 at Q = 9.8,
+  ε ≈ 0.74) is LPn/HPn, and at order 3 a near-notch is 3LPn/3HPn (an order-3
+  `notch` stays `pending`). A 2nd-order near-notch is also solved on the 2N
+  cells (§3 exception). The snapper keeps its own 5 % window
+  (`|fz/f0 − 1| < 0.05` → Q point on the notch skirt) so near-notch snap costs
+  stay comparable with the pre-FS-033 ones.
 
 Producers that can count origin zeros exactly (the Pairing tab in `app.py`)
 must store `n_origin_zeros` — a boolean `has_origin_zero` cannot separate
@@ -97,6 +106,16 @@ an HP-notch/BP response "solves" and yields high-sensitivity garbage).
 The live gate is `topology_tab.section_kind(sec)`, returning one of
 `first_order | lp | hp | notch | bp | pending`. Adding a family means adding
 its branch there; everything unmatched falls to `pending`.
+
+**One sanctioned exception (FS-033): near-notch sections.** A 2nd-order
+`LPn`/`HPn` section with `pairing_utils.near_notch_section(sec)` (zero inside
+the old 5 % window `NEAR_NOTCH_TOL`, but ε ≥ `NOTCH_EPS`) is solved on its
+LPn/HPn cells **and** on the same family's 2N pure-notch cells
+(`topology_tab._notch_cells`), as two jobs. The results are merged
+(`_merge_results`) and the BOM table defaults to sorting by snap cost. This is not a
+mismatched solve: both cell sets snap against the same true target (cfg `fz`
+included), so a 2N row that cannot place the zero carries a high snap cost
+and ranks below. The UI says so in a caption on the section.
 
 ## 4. Scoring metrics by family (Tier C)
 

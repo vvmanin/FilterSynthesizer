@@ -1292,6 +1292,17 @@ def _render_no_realization(cfg, topos, dc_gain):
         st.warning(generic)
         return
 
+    # FS-033: a near-notch zero (sent to LPn/HPn, not 2N) needs a component
+    # spread of ~1/|r-1| on the VCVS / MFB cells; the AM cells set wz and w0
+    # with independent ratios and have no such limit.
+    _r1 = abs((float(cfg.get("fz") or 0) / float(cfg.get("f0") or 1)) ** 2 - 1.0)
+    if (0 < _r1 < 0.05 and any(("LPn" in t or "HPn" in t) for t in topos)
+            and not any("-AM" in t for t in topos)):
+        st.info(f"Near-notch section: the zero is {100 * abs(cfg['fz'] / cfg['f0'] - 1):.2g} % "
+                f"from f₀, and VCVS / MFB notch cells need a component spread of about "
+                f"1/|(f_z/f₀)² − 1| ≈ {1 / _r1:.0f}× to place it. The AM (Ackerberg–Mossberg) "
+                "family realizes it without that spread.")
+
     key = (tuple(topos),
            round(float(cfg.get("f0", 0)), 6), round(float(cfg.get("Q", 0)), 6),
            round(float(cfg.get("fz", 0)), 6), round(float(cfg.get("K", 0)), 9),
@@ -1358,7 +1369,29 @@ def _render_no_realization(cfg, topos, dc_gain):
         st.warning(generic)
 
 
-def _render_results(res, n, opamp, cfg=None, topos=None, dc_gain=None):
+def _merge_results(results):
+    """One synthesize() result from several jobs of the same section (FS-033
+    near-notch: the LPn/HPn cells + the 2N cells). Errored jobs are dropped
+    unless all errored; snapped rows stay index-aligned with continuous rows."""
+    if len(results) == 1:
+        return results[0]
+    ok = [r for r in results if "__error__" not in r]
+    if not ok:
+        return results[0]
+    out = {"mode": ok[0].get("mode"), "ideal_continuous": [], "continuous": [],
+           "snapped": [], "cases": {}}
+    for r in ok:
+        sn = list(r.get("snapped") or [])
+        co = list(r.get("continuous") or [])[:len(sn)]
+        co += [{}] * (len(sn) - len(co))
+        out["snapped"] += sn
+        out["continuous"] += co
+        out["ideal_continuous"] += list(r.get("ideal_continuous") or [])
+        out["cases"].update(r.get("cases") or {})
+    return out
+
+
+def _render_results(res, n, opamp, cfg=None, topos=None, dc_gain=None, sort_default=None):
     if "__error__" in res:
         st.error(f"**Solver error:** {res['__error__']}")
         with st.expander("Details (paste this into a bug report)"):
@@ -1402,7 +1435,9 @@ def _render_results(res, n, opamp, cfg=None, topos=None, dc_gain=None):
 
     with cc[0]:
         sort_field = st.selectbox(
-            "Sort by", _sort_options, index=0, key=f"hw_sortf_{n}",
+            "Sort by", _sort_options, key=f"hw_sortf_{n}",
+            index=(_sort_options.index(sort_default)
+                   if sort_default in _sort_options else 0),
             help="Sorts the table by the RAW NUMERIC value of the chosen column. "
                  "Component columns carry k/M/n suffixes for display only; this "
                  "selector orders by the underlying ohms / farads, so 8.25k comes "
@@ -1618,6 +1653,46 @@ def _render_first_order(sec, n, shared=None):
     _render_results(res, n, opamp)
     nb = len(res["snapped"])
     return f"{nb} BOM{'s' if nb != 1 else ''} (closed form)"
+
+
+def _notch_cells(am, mfb, eff_dc):
+    """(topo, topos, dc_target) of the 2N pure-notch cells for a family (AM,
+    MFB, else VCVS) and effective passband gain. Used by notch sections and, as
+    the second cell set, by near-notch LPn/HPn sections (FS-033)."""
+    if am:
+        # AM pure notch 2N-AM (inverting, wz=w0 driven). The on-axis
+        # zero is STRUCTURAL (no s^1 numerator term exists), so the null
+        # depth is matching-independent; a single gain residual pins the
+        # whole passband. Any gain (unity/gained/sub-unity) is reachable
+        # via the C1/C2 ratio. C1 also co-sets wz, so its parallel-C1 twin
+        # (2N-AM-C1s) is offered alongside to reach grid-unreachable C1.
+        return "2N-AM", ["2N-AM", "2N-AM-C1s"], eff_dc
+    if mfb:
+        # MFB pure notch (both cells NON-inverting, wz=w0). 2N-MFB
+        # (C1,C2,C3,R1,R2,R3,R4,R5) is the gained/UNITY-capable cell -- R5
+        # (m->gnd) lifts the DC gain, C3 (m->gnd) lifts the HF gain, so the
+        # passband can be set to unity or any gain (opamp+ stays on the R1/R4
+        # divider, which is what preserves the on-axis zero). 2N-MFB-atten
+        # (C1,C2,R1,R2,R3,R4) is the attenuating-only minimal cell
+        # (H(0)=H(inf)=R4/(R1+R4) < 1). For a SUB-UNITY target BOTH are offered
+        # in parallel and ranked together by sens_score (2N-MFB-atten is the
+        # fewer-part cell; 2N-MFB also covers it). For a UNITY or GAINED target
+        # ONLY 2N-MFB is offered -- 2N-MFB-atten cannot reach >= 1.
+        if eff_dc < 1.0 - GAIN_UNITY_TOL:
+            return "2N-MFB", ["2N-MFB-atten", "2N-MFB"], eff_dc
+        return "2N-MFB", ["2N-MFB"], eff_dc
+    # VCVS notch: a single inverting biquad. The R6 cell ("2N") realizes ANY
+    # |gain| -- unity (K=1), gained (>1) or mild attenuation -- so it is
+    # always the primary cell. Only a section whose passband is ALREADY well
+    # below unity can additionally drop R6 (the "2N-atten" cell): without R6
+    # the gain is no longer free, it emerges strongly sub-unity, and higher Q
+    # needs an impractical resistor spread. So the atten cell is offered as a
+    # minimal-component alternative ONLY when the section is attenuating, and
+    # the BOM ranks it beside the 2N cell.
+    topos = ["2N"]
+    if eff_dc < 1.0 - GAIN_UNITY_TOL:
+        topos.append("2N-atten")
+    return "2N", topos, eff_dc            # 2N cell tracks |gain|; atten ignores K
 
 
 def _render_section(sec, conv, gen, shared=None, solve_all=False):
@@ -1842,47 +1917,8 @@ def _render_section(sec, conv, gen, shared=None, solve_all=False):
             mode = "unity"
         else:
             mode = "gained"
-        if is_notch and am:
-            # AM pure notch 2N-AM (inverting, wz=w0 driven). The on-axis
-            # zero is STRUCTURAL (no s^1 numerator term exists), so the null
-            # depth is matching-independent; a single gain residual pins the
-            # whole passband. Any gain (unity/gained/sub-unity) is reachable
-            # via the C1/C2 ratio. C1 also co-sets wz, so its parallel-C1 twin
-            # (2N-AM-C1s) is offered alongside to reach grid-unreachable C1.
-            topo = "2N-AM"
-            topos = ["2N-AM", "2N-AM-C1s"]
-            dc_target = eff_dc
-        elif is_notch and mfb:
-            # MFB pure notch (both cells NON-inverting, wz=w0). 2N-MFB
-            # (C1,C2,C3,R1,R2,R3,R4,R5) is the gained/UNITY-capable cell -- R5
-            # (m->gnd) lifts the DC gain, C3 (m->gnd) lifts the HF gain, so the
-            # passband can be set to unity or any gain (opamp+ stays on the R1/R4
-            # divider, which is what preserves the on-axis zero). 2N-MFB-atten
-            # (C1,C2,R1,R2,R3,R4) is the attenuating-only minimal cell
-            # (H(0)=H(inf)=R4/(R1+R4) < 1). For a SUB-UNITY target BOTH are offered
-            # in parallel and ranked together by sens_score (2N-MFB-atten is the
-            # fewer-part cell; 2N-MFB also covers it). For a UNITY or GAINED target
-            # ONLY 2N-MFB is offered -- 2N-MFB-atten cannot reach >= 1.
-            topo = "2N-MFB"
-            if eff_dc < 1.0 - GAIN_UNITY_TOL:
-                topos = ["2N-MFB-atten", "2N-MFB"]
-            else:
-                topos = ["2N-MFB"]
-            dc_target = eff_dc
-        elif is_notch:
-            # VCVS notch: a single inverting biquad. The R6 cell ("2N") realizes ANY
-            # |gain| -- unity (K=1), gained (>1) or mild attenuation -- so it is
-            # always the primary cell. Only a section whose passband is ALREADY well
-            # below unity can additionally drop R6 (the "2N-atten" cell): without R6
-            # the gain is no longer free, it emerges strongly sub-unity, and higher Q
-            # needs an impractical resistor spread. So the atten cell is offered as a
-            # minimal-component alternative ONLY when the section is attenuating, and
-            # the BOM ranks it beside the 2N cell.
-            topo = "2N"
-            topos = ["2N"]
-            if eff_dc < 1.0 - GAIN_UNITY_TOL:
-                topos.append("2N-atten")
-            dc_target = eff_dc            # 2N cell tracks |gain|; atten ignores K
+        if is_notch:
+            topo, topos, dc_target = _notch_cells(am, mfb, eff_dc)
         else:
             if is_hp:
                 prefix = "HPn" if sec["notch"] else "HP"
@@ -2094,8 +2130,24 @@ def _render_section(sec, conv, gen, shared=None, solve_all=False):
         sig_dc = dc_target
 
     sig = _job_sig(sec, topo, env, conv, opamp, sig_dc)
-    running = sig in st.session_state.hw_jobs
-    have = sig in st.session_state.hw_results
+    # FS-033: a near-notch LPn/HPn section (zero inside the old 5 % notch window,
+    # not an exact notch) is ALSO solved on the family's 2N pure-notch cells.
+    # Both snap against the same true target (fz included), so the merged BOMs
+    # are ranked by snap cost and the better-fitting realization wins.
+    alt = None
+    if kind in ("lp", "hp") and pairing_utils.near_notch_section(sec):
+        a_topo, a_topos, a_dc = _notch_cells(am, mfb, eff_dc)
+        alt = (_job_sig(sec, a_topo, env, conv, opamp, a_dc), a_topos, a_dc)
+        _eps = pairing_utils.notch_forcing_error(sec["fz_hz"], sec["f0_hz"], sec["Q"])
+        _eps_txt = f"{_eps:.3g}× the section gain" if _eps >= 1 else f"{100 * _eps:.2g} % of the section gain"
+        st.caption(f"ℹ Near-notch section: f_z is {100 * abs(sec['fz_hz'] / sec['f0_hz'] - 1):.2g} % "
+                   f"from f₀ (forcing it onto f₀ changes the response by up to "
+                   f"{_eps_txt}). Solved on both "
+                   f"`{'`, `'.join(topos)}` and the pure-notch `{'`, `'.join(a_topos)}`; "
+                   "the BOMs are ranked together by snap cost.")
+    sigs = [sig] + ([alt[0]] if alt else [])
+    running = any(x in st.session_state.hw_jobs for x in sigs)
+    have = all(x in st.session_state.hw_results for x in sigs)
 
     if DEBUG_UI:
         with st.expander(f"🔧 Section {n} — exact solver call", expanded=False):
@@ -2137,28 +2189,40 @@ def _render_section(sec, conv, gen, shared=None, solve_all=False):
     elif (clicked or (solve_all and not have)) and not running:
         # Batch "Solve all" queues only sections without a result for their
         # current settings; a solved one keeps it (its own Re-solve still works).
-        _submit(sig, _build_cfg(sec, env, conv, cfg_k_override), opamp, topos, conv, dc_target, gen)
+        _cfg = _build_cfg(sec, env, conv, cfg_k_override)
+        _submit(sig, _cfg, opamp, topos, conv, dc_target, gen)
+        if alt:
+            _submit(alt[0], _cfg, opamp, alt[1], conv, alt[2], gen)
         running = True
 
+    _states = [_job_state(x) for x in sigs]
+    jstate = ("solving" if "solving" in _states
+              else "queued" if "queued" in _states else None)
     if running:
-        if _job_state(sig) == "queued":
+        if jstate == "queued":
             st.caption("⏳ Queued — waiting for a free core (other sections and tabs "
                        "stay responsive)")
         else:
             st.caption("⚙️ Solving… (other sections and tabs stay responsive)")
     elif have:
-        _render_results(st.session_state.hw_results[sig], n, opamp,
+        _res_all = [st.session_state.hw_results[x] for x in sigs]
+        if alt and any("__error__" in r for r in _res_all) and                 not all("__error__" in r for r in _res_all):
+            _bad = topos if "__error__" in _res_all[0] else alt[1]
+            st.caption(f"⚠ The `{'`, `'.join(_bad)}` solve failed: "
+                       f"{next(r['__error__'] for r in _res_all if '__error__' in r)}")
+        _render_results(_merge_results(_res_all), n, opamp,
                         cfg=_build_cfg(sec, env, conv, cfg_k_override),
-                        topos=topos, dc_gain=dc_target)
+                        topos=topos, dc_gain=dc_target,
+                        sort_default="Snap cost" if alt else None)
     st.divider()
 
     if not solvable:
         return "not solvable"
     if running:
-        return _job_state(sig) or "solving"
+        return jstate or "solving"
     if not have:
         return "not solved"
-    res = st.session_state.hw_results[sig]
+    res = _merge_results([st.session_state.hw_results[x] for x in sigs])
     if res.get("__error__"):
         return "error"
     nb = len(res.get("snapped") or [])

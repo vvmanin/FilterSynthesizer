@@ -545,14 +545,61 @@ def compute_stage_gains(stages, p_bricks, z_bricks, k_system, passband_gain_line
 #  (via family_from_section) into the dispatch gate (CONTRACTS §3). The rule CORE is factored
 #  out so the brick-level (stage+bricks) and the UI-level (Section dict) paths
 #  share one source of truth.
+#  Pure notch vs LPn/HPn is Q-aware (FS-033): a 2N cell can only put the zero
+#  AT w0, so a section is a notch only when forcing it there is negligible.
 # =====================================================================
-def _family_from_features(order, pole_type, n_origin_zeros, wz, w0, wz_tol=0.05):
+NOTCH_EPS = 1e-3        # max response change (x section gain) a 2N cell may cause: -60 dB
+
+
+def notch_forcing_error(wz, w0, Q):
+    """Worst-case |H_true - H_forced| / K over all w when a section's zero wz is
+    forced onto its pole frequency w0 (what a pure-notch 2N cell realizes).
+        H_true - H_forced = K (wz^2 - w0^2) / D(s),   D = s^2 + s w0/Q + w0^2
+    and min_w |D(jw)| = (w0^2/Q) sqrt(1 - 1/(4Q^2)) for Q > 1/sqrt(2), else w0^2
+    (at DC). So, with r = (wz/w0)^2:
+        eps = |r - 1| * Q / sqrt(1 - 1/(4Q^2))     (Q > 1/sqrt(2))
+        eps = |r - 1|                              (otherwise)
+    For a 3rd-order section this is the biquad factor's bound (the absorbed real
+    pole only scales the difference down). inf if w0 is 0."""
+    if not w0:
+        return float("inf")
+    r = (float(wz) / float(w0)) ** 2
+    Q = float(Q or 0.0)
+    g = Q / np.sqrt(1.0 - 1.0 / (4.0 * Q * Q)) if Q > 1.0 / np.sqrt(2.0) else 1.0
+    return abs(r - 1.0) * g
+
+
+NEAR_NOTCH_TOL = 0.05   # |wz/w0 - 1| window of the pre-FS-033 notch rule
+
+
+def near_notch_section(sec, notch_eps=NOTCH_EPS):
+    """True for a 2nd-order LPn/HPn Section whose zero sits inside the old 5 %
+    notch window but is not an exact notch (notch_forcing_error >= notch_eps).
+    Which realization fits such a section best is not decidable from the math
+    alone (engine round-off can leave a nominal notch 1e-4 off, a real near-notch
+    is 1-4 % off), so topology_tab solves it on BOTH the LPn/HPn cells and the 2N
+    pure-notch cells and ranks the merged BOMs by snap cost (CONTRACTS §3)."""
+    if int(sec.get("order", 2)) != 2 or not sec.get("notch") or not sec.get("fz_hz"):
+        return False
+    f0 = float(sec.get("f0_hz") or 0.0)
+    if not f0:
+        return False
+    fz = float(sec["fz_hz"])
+    return (abs(fz / f0 - 1.0) < NEAR_NOTCH_TOL
+            and notch_forcing_error(fz, f0, float(sec.get("Q") or 0.0)) >= notch_eps)
+
+
+def _family_from_features(order, pole_type, n_origin_zeros, wz, w0, Q, notch_eps=NOTCH_EPS):
     """Pure family rule. pole_type in {'Real','Complex Pair'}. wz is the finite
-    (complex-pair) zero frequency or None; w0 the pole frequency."""
+    (complex-pair) zero frequency or None; w0 the pole frequency, Q its Q.
+    A finite zero is a pure 'notch' only if forcing it onto w0 changes the
+    response by < notch_eps of the section gain (notch_forcing_error); exact
+    transform notches (wz = w0 to rounding) pass, a near-notch (e.g. fz/f0 =
+    1.037 at Q = 9.8, eps ~ 0.7) goes to LPn/HPn, whose cells place the zero."""
     if wz is not None:                                   # complex-pair zero present
-        ratio = (wz / w0) if w0 else float("inf")
-        if abs(ratio - 1.0) < wz_tol:
+        if notch_forcing_error(wz, w0, Q) < notch_eps:
             return "notch"
+        ratio = (wz / w0) if w0 else float("inf")
         return "LPn" if ratio > 1.0 else "HPn"           # zero above pole -> LPn
     if n_origin_zeros <= 0:
         return "LP"                                      # allpole
@@ -578,7 +625,7 @@ def _family_from_features(order, pole_type, n_origin_zeros, wz, w0, wz_tol=0.05)
     return "HP"                                          # real pole + origin zero -> 1st-order HP
 
 
-def classify_section(stage, p_bricks, z_bricks, wz_tol=0.05):
+def classify_section(stage, p_bricks, z_bricks, notch_eps=NOTCH_EPS):
     """Authoritative classifier (docs/CONTRACTS.md §2). Resolves the stage's pole and
     zeros against the bricks and returns:
         {'order':1|2|3,
@@ -606,12 +653,12 @@ def classify_section(stage, p_bricks, z_bricks, wz_tol=0.05):
         elif zb["type"] == "Complex Pair":
             wz = float(zb["w0"])
 
-    family = _family_from_features(order, pole_type, n_origin, wz, w0, wz_tol)
+    family = _family_from_features(order, pole_type, n_origin, wz, w0, Q, notch_eps)
     return {"order": order, "family": family, "w0": w0, "Q": Q,
             "wz": wz, "n_origin_zeros": n_origin}
 
 
-def family_from_section(sec, wz_tol=0.05):
+def family_from_section(sec, notch_eps=NOTCH_EPS):
     """UI-level family for a Section dict (topology_tab consumes Section dicts,
     not bricks). Resolution order:
       1. a producer-stored sec['family'] (the authoritative classify_section
@@ -648,4 +695,5 @@ def family_from_section(sec, wz_tol=0.05):
                     else 1)
     else:
         n_origin = 0
-    return _family_from_features(order, pole_type, n_origin, wz, w0, wz_tol)
+    return _family_from_features(order, pole_type, n_origin, wz, w0,
+                                 float(sec.get("Q") or 0.0), notch_eps)

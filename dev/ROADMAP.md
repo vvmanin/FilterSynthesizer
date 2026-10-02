@@ -155,7 +155,7 @@ first.
 | FS-030 | Topology tab: section spec resets to default when a solve finishes | P2 *(s)* | PROPOSED | plan high / build medium | — |
 | FS-031 | Group-delay equalizer: all-pass stages appended to a designed filter | P3 *(s)* | PROPOSED | plan xhigh / build high | FS-013 (hard, realization stage only), FS-006 (done) |
 | FS-032 | Magnitude correction of an existing system from measured Bode points | P3 *(s)* | PROPOSED | plan max / build xhigh (per stage) | FS-007 (done); FS-014 (hard, realization stage only); FS-031 (soft) |
-| FS-033 | Near-notch sections (f_z close to f₀) classified as pure notch | P0 *(s)* | PROPOSED | plan high / build medium | — |
+| FS-033 | Near-notch sections (f_z close to f₀) classified as pure notch | P0 *(s)* | VALIDATING (built 2026-10-01: Q-aware notch rule + dual 2N / LPn-HPn solve ranked by snap cost; note `dev/FS-033_near_notch_design_note.md`) | plan high / build medium | — |
 | FS-034 | SPICE row checker: simulate a section's top BOM rows with vendor models | P4 | PROPOSED | plan high / build high | FS-008 (done), FS-029 (done) |
 
 *(s)* = suggested priority, awaiting maintainer confirmation.
@@ -526,7 +526,7 @@ answered against FS-031's equalizer — plan FS-031 first.
 ---
 
 ### FS-033 — Near-notch sections (f_z close to f₀) classified as pure notch
-- **State:** PROPOSED
+- **State:** VALIDATING (built 2026-10-01, snapper follow-up 2026-10-02; design note `dev/FS-033_near_notch_design_note.md`, incl. recommendations; waiting on the maintainer's app check)
 - **Priority:** P0 (suggested — wrong realized response: §2 defines a wrong-results defect as P0; the maintainer may rate it lower)
 - **Effort:** plan high / build medium
 - **Tiers:** A (classification rule, `pairing_utils`), D (`topology_tab.section_kind` dispatch); C only if the LPn / HPn cells need help near f_z ≈ f₀
@@ -540,7 +540,12 @@ answered against FS-031's equalizer — plan FS-031 first.
 - **Notes:**
   - Reported 2026-10-01 (maintainer, Elliptic BP, prototype order 13, Batch mode): Section 10 (f₀ = 2 032 Hz, Q = 9.83, f_z = 2 108 Hz) was dispatched to `2N-AM` (`H(0) = H(∞)`); sections like it give solutions with very poor snap cost at higher Q.
   - Cause: `pairing_utils._family_from_features` returns `notch` whenever `|wz/w0 − 1| < wz_tol = 0.05`; here f_z / f₀ = 1.037. A pure-notch biquad has `H(0) = H(∞)`, i.e. `K·wz²/w0² = K`, so it can only put the zero at f₀. Forcing it there moves the zero by 3.7 %, about 0.7 pole bandwidths at Q = 9.83, and the fit can only end poor. The error grows with Q, which matches "terrible at higher Q".
-- **Updated:** 2026-10-01
+  - Decisions (maintainer, 2026-10-01): (1) Q-aware rule — `notch` only if forcing the zero onto f₀ changes the response by < 1e-3 of the section gain: ε = |r − 1|·Q/√(1 − 1/(4Q²)), r = (f_z/f₀)² (`pairing_utils.notch_forcing_error`, `NOTCH_EPS`); Section 10: ε = 0.75 → LPn. (2) A sweep then showed narrow Butterworth / Inverse-Chebyshev BR designs whose nominal notch pair comes out of the engine 1e-4…7e-6 off the zero (clustered-root imprecision; ε 2e-3…4e-2): as LPn/HPn they lose their VCVS BOM (spread ≈ 1/|r − 1|). Maintainer: for such uneven cases solve both and let **snap cost** decide, not sens score. So a 2nd-order near-notch (old 5 % window, ε ≥ 1e-3; `near_notch_section`) is solved on its LPn/HPn cells **and** the family's 2N cells (`topology_tab._notch_cells`), two jobs merged (`_merge_results`), BOM table default sort = Snap cost, caption on the section (CONTRACTS §3 exception). Both cell sets snap against the true target, so the 2N rows carry their misfit in the snap cost.
+  - Built 2026-10-01: `pairing_utils` (rule, `near_notch_section`), `topology_tab` (dual job, merge, sort default, a near-notch line in the no-realization hint suggesting AM), CONTRACTS §2/§3, ARCHITECTURE. No cell / TF change (caches stay valid). 3rd-order near-notches, gated `pending` before, now go to 3LPn/3HPn.
+  - Checks (`python dev/fs033/check_near_notch.py [--solve]`): ε matches the dense-grid bound within 1 %; exact notches stay `notch`. Over 23 designs (Elliptic BP n = 5…13, Elliptic / Butterworth / Chebyshev / Inverse-Chebyshev BR incl. narrow, Elliptic LP / HP n = 9, 11, a Custom H(s)) 32 sections move notch → LPn/HPn; every reclassified section is a near-notch (dual-solved). Solved (ideal op-amp, Balanced): Section-10-like case VCVS snap cost 9.81 (2N) → 0.85 (2LPn), MFB no BOM → 0.64, AM 0.96 → 0.57; MFB gets 2LPn-MFB BOMs in most reclassified LPn sections where 2N-MFB had none; where the LPn/HPn cell has no BOM (|r − 1| ≲ 0.5 %, high Q) the 2N row stays and wins. Sections with Q ≳ 150 often have no BOM in any family (unchanged). `verify.py` and `dev/fs008/check_spice_export.py` pass.
+  - Follow-up 2026-10-02 (maintainer: "results became worse", Elliptic BP Section 6 VCVS f0 1973 Hz Q 44.7 fz 2041 Hz; Section 8 AM f0 1997 Hz Q 451 fz 2004 Hz): HEAD vs build on the same inputs gave the SAME solutions (identical sens sets; AM min sens 1.40 at HEAD too); only snap cost rose (S6 TL072 14.2 → 21.6, S8 ideal 28.4 → 38.3). Cause: the build had moved the snapper's Q point for near-notches from the notch skirt to f0 (the resonance peak). Reverted — the snapper keeps its 5 % window; with it the build reproduces HEAD's snap costs exactly. Also seen: S6 `2LPn-atten` has no BOM (2N rows unchanged); for AM `2LPn-AM` and `2N-AM` give identical rows (2N-AM already drives wz to fz).
+  - Not done (separate): `scoring._response_metrics` looks for the passband peak only below 0.8·f_notch, so the non-ideal penalty misses the Q bump of LPn with f_z/f₀ < 1.25 and of every HPn.
+- **Updated:** 2026-10-02
 
 ### FS-034 — SPICE row checker: simulate a section's top BOM rows with vendor models
 - **State:** PROPOSED
@@ -601,6 +606,12 @@ described in `docs/manual/user_manual.md` / `quick_start.md`. The manuals are
 updated in batches (`docs/manual/DOC_WORKFLOW.md`: `doc_drift.py`, prose,
 screenshots, `--accept`, PDF build); a batch deletes the entries it covered.
 
+- **FS-033** (near-notch sections): a section whose zero is close to, but not
+  at, f₀ is now an LPn/HPn section (before: pure notch, 2N cells). Within the
+  old 5 % window the Topology tab solves it on both the LPn/HPn cells and the
+  2N cells, shows an ℹ caption (offset, forcing error) and sorts its BOM table
+  by snap cost by default. The no-realization message names the component
+  spread a near-notch needs on VCVS / MFB and suggests AM.
 - **FS-008 + FS-029** (LTspice export and vendor model import):
   - Resulting Response tab, block *LTspice export* before *Generate Report*:
     Supply Vs, MC runs, a per-section table (cell, op-amp, SPICE model,
