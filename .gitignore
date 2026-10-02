@@ -260,3 +260,7 @@ LTspice_Library/models/*
 dev/fs028/results/s22_trfpath.json
 dev/fs028/results/s22_final_bv.json
 dev/fs028/results/20[0-9][0-9][0-9][0-9][0-9][0-9]-*.json
+
+# --- dev/qa harness: run outputs and its private TF / kernel cache -------
+dev/qa/results/
+dev/qa/.cache/

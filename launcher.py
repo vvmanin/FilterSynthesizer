@@ -174,7 +174,8 @@ def open_browser_when_ready(port):
         # shell call doesn't hold the probe socket open.
         url = f"http://localhost:{port}"
         opened = False
-        if _has_http_handler():
+        # FILTERSYNTHESIZER_NO_BROWSER=1: no tab (dev/qa exe test); the banner still prints.
+        if _has_http_handler() and not os.environ.get("FILTERSYNTHESIZER_NO_BROWSER"):
             try:
                 opened = bool(webbrowser.open_new_tab(url))
             except Exception:

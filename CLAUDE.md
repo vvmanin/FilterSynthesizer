@@ -40,11 +40,14 @@ pip install -r requirements.txt    # runtime deps — bounds are deliberate
 python verify.py                   # symbolic self-check of first-order cells
 build.bat                          # Windows PyInstaller bundle → dist/
 diagnose.bat                       # environment diagnostics
+python dev/qa/run_qa.py --level smoke   # QA + benchmark harness (dev/qa/README.md)
 ```
 
 There is no automated test suite. Validation is: `verify.py` for symbolic cell
 work, and running the app and exercising the affected tab for everything else.
 When a change touches solver or cell math, say explicitly how it was checked.
+After a significant change, run `dev/qa/run_qa.py --level standard --compare last`
+(or `full`, which also builds the bundle) and read its `summary.md`.
 
 ## Conventions
 

@@ -157,6 +157,7 @@ first.
 | FS-032 | Magnitude correction of an existing system from measured Bode points | P3 *(s)* | PROPOSED | plan max / build xhigh (per stage) | FS-007 (done); FS-014 (hard, realization stage only); FS-031 (soft) |
 | FS-033 | Near-notch sections (f_z close to f₀) classified as pure notch | P0 *(s)* | VALIDATING (built 2026-10-01: Q-aware notch rule + dual 2N / LPn-HPn solve ranked by snap cost; note `dev/FS-033_near_notch_design_note.md`) | plan high / build medium | — |
 | FS-034 | SPICE row checker: simulate a section's top BOM rows with vendor models | P4 | PROPOSED | plan high / build high | FS-008 (done), FS-029 (done) |
+| FS-036 | QA & benchmark harness (`dev/qa/`) | P2 *(s)* | VALIDATING (built 2026-10-02) | plan high / build high | — |
 
 *(s)* = suggested priority, awaiting maintainer confirmation.
 
@@ -579,6 +580,29 @@ answered against FS-031's equalizer — plan FS-031 first.
   - Suspects to check first: (1) Streamlit drops a keyed widget's state when that widget is not rendered on some run — the `run_every` fragment's app-wide rerun after `_drain_finished` may land on a run where the section widgets are skipped (early return, another tab, a spinner/pending branch), after which `setdefault` re-seeds the defaults; (2) widget keys built from values that change on the first solves (signature, `hw_gen`, op-amp list or defaults computed after a cold start), so the widget comes back under a new key; (3) a `hw_gen` bump or a reset of the `hw_*` dicts on the first completion that also clears the spec keys. A durable, non-widget mirror of the spec (as `bom_picks` does for the BOM pick) is the likely fix shape.
   - Finding 2026-10-01 (FS-028 S2-4, reproduced in a minimal Streamlit 1.55 script): a keyed widget that is not rendered for a while and is then re-created during a **fragment-only** rerun comes back at the widget's own default (0, first option) and overwrites the value still held in session state — `st.session_state[k] = st.session_state[k]` does not prevent it. This matches suspect (1). The batch-mode envelope / op-amp widgets now use `ui_components._mem_widget` (a `_mem_` mirror passed back as `value` / `index`), which survives it. The per-section family / gain / option widgets do not yet. Also since 2026-10-01 the tab polls only while solves are pending (no permanent 2 s fragment), which removes most idle reruns.
 - **Updated:** 2026-09-30
+
+### FS-036 — QA & benchmark harness (`dev/qa/`)
+- **State:** VALIDATING (built 2026-10-02; waiting on the maintainer's runs, incl. one on a second PC)
+- **Priority:** P2 (suggested)
+- **Effort:** plan high / build high
+- **Tiers:** none (dev tooling); D only for the `launcher.py` switch `FILTERSYNTHESIZER_NO_BROWSER`
+- **Depends on:** —
+- **Contracts:** — (reads §2 / §3 / §6 behaviour, changes none)
+- **Files:** new `dev/qa/` (`reports/QA_2026-10-02.md`, `run_qa.py`, `preflight.py`, `pool.py`, `matrix.py`, `ui_map.py`, `tasks_ui.py`, `analysis.py`, `tasks_solve.py`, `tasks_export.py`, `tasks_build.py`, `checks.py`, `summarize.py`, `common.py`, `README.md`); `launcher.py` (one condition); `.gitignore`; `CLAUDE.md`, `docs/ARCHITECTURE.md`
+- **Goal:** One command that QA-checks and benchmarks the whole tool after a significant change, unattended, in minutes (smoke) to ~1–2 h (full) on a 16-core box, and stays usable as the roadmap lands.
+- **Scope:** In — preflight (interpreter, requirements bounds as warnings / compatibility evidence, missing-package prompt, cairosvg, LTspice, build prompt); the repo's check scripts (discovered); sidebar designs through the real `app.py` (Streamlit AppTest) with root-conservation / cascade / spec checks and FS-016 pairing flags; solve jobs captured from the Topology tab (patched `_proc_submit`, so the app's own routing) and solved in a kill-on-timeout worker pool over families × op-amps × envelopes × section gain override × family options; end-to-end flows (picks, Monte Carlo, the PDF report, the LTspice export run with `LTspice -b` / `-netlist`); the FS-028 benchmark; `streamlit run` health + script health; `build.bat` + the exe (private LOCALAPPDATA, `--selftest`); `summary.md`, `fs016_pairing.md`, regression diff (`--compare`), `--resume`, `--budget`. Out — manual pairing clicks and `st.data_editor` edits (AppTest cannot send them), anything in the release bundle.
+- **Validation:** (7950X3D, `build_venv` = Python 3.11.9, streamlit 1.64, numpy 2.3.5, 2026-10-02)
+  `--level smoke` 1m17s (28 designs, ~210 solves, 7 / 7 existing checks pass); `--level standard
+  --build` 9m22s (798 designs, 7 348 solves, 24 end-to-end flows: 17 PDFs valid, 17 / 17 LTspice
+  exports pass; build.bat 74 s, bundle 341 MB, exe health + script health 200, selftest without
+  [FAIL]); pool utilisation 95 %; two identical smoke runs compare with 0 changes (solves are
+  deterministic); a run killed mid-way and `--resume`d finished without duplicates (pending LTspice
+  runs re-queued); `--level full --designs 12`: 9 variants / design, presets rotated, inverting
+  1st-order cells exercised (full level estimated ~1 h + build — not run end to end yet).
+- **Notes:**
+  - S0 spike (2026-10-02) proved every AppTest capability the design relies on: run app.py, keyless widgets by label, Batch mode + job capture through `_proc_submit`, replay through `_drain_finished`, BOM pick through the `hw_df_{n}` selection state (1st-order included), Monte Carlo, report bytes from `report_pdf`, export capture; LTspice: `.cir` probes vs the export's expectations ≤ 1e-5 relative at exact frequencies (the log sweep's `FIND … AT` interpolates ~0.05 dB near a peak), `.asc` → `-netlist` equals the `.cir`; `-b` on an `.asc` opens LTspice's GUI and updater (never used).
+  - Results of the first runs: `dev/qa/reports/QA_2026-10-02.md` (issues to be triaged in a separate session).
+- **Updated:** 2026-10-02
 
 ---
 
