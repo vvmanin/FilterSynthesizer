@@ -765,7 +765,7 @@ def _render_choice(s, cont, idx):
                 cap_items.append((_c, _fmt_cap(s[_c])))
         cc = st.columns(2)
         with cc[0]:
-            st.markdown("**Capacitors** (not snapped)")
+            st.markdown("**Capacitors**")
             for d, v in cap_items:
                 st.markdown(f"`{d}` = {v}")
             if s.get("C1_parallel") and s.get("C1a") and s.get("C1b"):
@@ -784,7 +784,7 @@ def _render_choice(s, cont, idx):
     res = [(d, k) for d, k in _pairs if d[0] == "R" and s.get(k)]
     cc = st.columns(2)
     with cc[0]:
-        st.markdown("**Capacitors** (not snapped)")
+        st.markdown("**Capacitors**")
         for d, k in caps:
             st.markdown(f"`{d}` = {_fmt_cap(s.get(k))}")
         if s.get("C1_parallel") and s.get("C1a") and s.get("C1b"):

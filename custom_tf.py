@@ -72,7 +72,7 @@ def default_spec():
                 "zero_pairs": [], "real_zeros": [], "n_origin": 0, "K": 1.0},
         "ts": {"stages": [{"a": 1.847759, "b": 1.0}, {"a": 0.765367, "b": 1.0}], "A0": 1.0},
         "roots": {"poles": [[-0.382683, 0.923880], [-0.923880, 0.382683]], "zeros": [],
-                  "K": 1.0},
+                  "K": 1.0, "k_form": "K"},     # k_form "C": K holds Saal's C = 1/K
     }
 
 
@@ -523,7 +523,10 @@ def parse_spec(spec, prototype=False, k_required=True):
     # roots
     p = _expand_rows(blk.get("poles", []), "Poles")
     z = _expand_rows(blk.get("zeros", []), "Zeros")
-    K = _k_value(blk.get("K"), "K", k_required)
+    if blk.get("k_form") == "C":       # Saal: the constant of the attenuation function, K = 1/C
+        K = 1.0 / _k_value(blk.get("K"), "C", k_required)
+    else:
+        K = _k_value(blk.get("K"), "K", k_required)
     out.update(z=z, p=p, K=K, k_entered=K)
     return out
 

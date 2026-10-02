@@ -550,23 +550,23 @@ def render_response_tab():
     # =================================================================
     #  STACKED SECTION SCHEMATICS  (same diagrams as the Topology tab)
     # =================================================================
-    st.markdown("##### Section schematics")
-    for d in sections_data:
-        n = d["n"]
-        row = d["row"]
-        topo = row.get("topology")
-        st.caption(f"Section {n} · `{topo}`")
-        try:
-            svg = schematic.render_svg(topo, n, row, opamp_pn=opamp_label(n))
-            components.html(schematic.schematic_iframe_html(svg, max_width=760),
-                            height=560, scrolling=False)
-            schematic.download_buttons(st, svg, topo, n, key_prefix=f"resp_sch_{n}")
-        except FileNotFoundError:
-            st.caption(f"⚠ Schematic SVG not found — expected "
-                       f"`{schematic.svg_filename(topo, row)}` in "
-                       f"`{schematic.SVG_DIR}`.")
-        except Exception as _e:
-            st.caption(f"⚠ Schematic render error: {_e}")
+    with st.expander("Section schematics", expanded=False):
+        for d in sections_data:
+            n = d["n"]
+            row = d["row"]
+            topo = row.get("topology")
+            st.caption(f"Section {n} · `{topo}`")
+            try:
+                svg = schematic.render_svg(topo, n, row, opamp_pn=opamp_label(n))
+                components.html(schematic.schematic_iframe_html(svg, max_width=760),
+                                height=560, scrolling=False)
+                schematic.download_buttons(st, svg, topo, n, key_prefix=f"resp_sch_{n}")
+            except FileNotFoundError:
+                st.caption(f"⚠ Schematic SVG not found — expected "
+                           f"`{schematic.svg_filename(topo, row)}` in "
+                           f"`{schematic.SVG_DIR}`.")
+            except Exception as _e:
+                st.caption(f"⚠ Schematic render error: {_e}")
 
     # =================================================================
     #  LTSPICE EXPORT  (FS-008; reads the MC settings above)

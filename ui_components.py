@@ -581,6 +581,9 @@ PB_DEFS = ["Corners", "Normalized width"]
 _K_KEYS = {"f0q": ("custom_K_f0q", "K", "K (constant before the monic factors)"),
            "ts": ("custom_A0", "A0", "A₀ (DC gain)"),
            "roots": ("custom_K_roots", "K", "K (leading constant)")}
+K_FORMS = {"K": "K — gain function H(s)",
+           "C": "C — attenuation function 1/H(s) (Saal)"}
+_C_LABEL = "C (leading constant of 1/H, K = 1/C)"
 
 
 def _cspec():
@@ -800,7 +803,8 @@ def _editor(name, data, labels, add, delete, disabled=()):
     return df
 
 
-_RESET_WIDGETS = {"custom_n0": 0, "custom_K_f0q": "1", "custom_K_roots": "1", "custom_A0": "1",
+_RESET_WIDGETS = {"custom_n0": 0, "custom_K_f0q": "1", "custom_K_roots": "1", "custom_kform_roots": "K",
+                  "custom_A0": "1",
                   "custom_paste_num": "", "custom_paste_den": "", "custom_paste_poles": "",
                   "custom_paste_zeros": ""}
 
@@ -860,13 +864,16 @@ def _paste_msg():
         (st.success if msg[0] == "ok" else st.error)(msg[1])
 
 
-def _k_field(form, gain_mode, container=None):
+def _k_field(form, gain_mode, container=None, c_form=False):
     """K / A₀: editable (As entered) or a slot app.py fills with the recalculated value,
-    greyed out (Normalize). -> (slot, label) | None."""
+    greyed out (Normalize). c_form (roots): the field holds Saal's C = 1/K.
+    -> (slot, label, c_form) | None."""
     key, fld, label = _K_KEYS[form]
+    if c_form:
+        label = _C_LABEL
     with (container if container is not None else contextlib.nullcontext()):
         if gain_mode == GAIN_NORMALIZE:
-            return st.empty(), label
+            return st.empty(), label, c_form
         _bind(st.text_input, label, key, form, fld, _txt)
     return None
 
@@ -991,7 +998,15 @@ def draw_custom_editor(mode, freq_unit, gain_mode):
                                  (_rows_add, "roots", part, [None, None]),
                                  (_rows_del, "roots", part))
                     blk[part] = [[a, b] for a, b in zip(_col(df, "re"), _col(df, "im"))]
-            k_slot = _k_field("roots", gain_mode)
+            kf = _bind(st.radio, "Leading constant", "custom_kform_roots", "roots", "k_form",
+                       lambda x: x if x in K_FORMS else "K", options=list(K_FORMS),
+                       format_func=K_FORMS.get, horizontal=True,
+                       disabled=gain_mode == GAIN_NORMALIZE,
+                       help="K: H(s) = K·∏(s − zᵢ)/∏(s − pᵢ), the gain form. C: the constant of "
+                            "the attenuation function 1/H(s) = C·∏(s − pᵢ)/∏(s − zᵢ), as "
+                            "tabulated by Saal; K = 1/C.")
+            blk["k_form"] = kf
+            k_slot = _k_field("roots", gain_mode, c_form=kf == "C")
             with st.expander("Paste roots"):
                 st.caption("One root per line (−0.5+0.866j, MATLAB −0.5000 + 0.8660i, or 're im'). "
                            "Full lists with both conjugates (roots(den) output) are de-duplicated.")
@@ -1011,10 +1026,12 @@ def fill_custom_k(k_slot, res, gain_units):
     """Normalize mode: the K / A₀ that puts the peak at the sidebar Passband Gain, greyed out."""
     if not k_slot:
         return
-    slot, label = k_slot
+    slot, label, c_form = k_slot
     info = res.get("info") or {}
     kv, g = info.get("k_entered"), info.get("peak_gain")
-    txt = f"{gain_units * abs(kv) / g:.6g}" if (kv and g and not res.get("errors")) else "—"
+    ok = kv and g and not res.get("errors")
+    v = gain_units * abs(kv) / g if ok else None
+    txt = "—" if v is None else f"{(1.0 / v if c_form else v):.6g}"
     slot.text_input(label, value=txt, disabled=True,
                     help="Normalize: recalculated so the peak of H(s) equals the Passband Gain. "
                          "Switch Gain to As entered to type it.")

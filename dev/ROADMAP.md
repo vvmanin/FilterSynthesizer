@@ -596,6 +596,7 @@ FS-004 — Biquad Pairing tab: compact layout, rad/s note font — DONE 2026-09-
 FS-007 — Custom filter design (coefficients or poles/zeros) — DONE 2026-09-28 — commit "feat(custom): FS-007 Custom H(s) …" (`custom_tf.py`, Response "Custom H(s)" + editor panel; design note `dev/FS-007_custom_tf_design_note.md` incl. §14 build notes / maintainer refinements; checks `dev/fs007/check_custom_tf.py`)
 FS-008 — LTspice export with Monte Carlo presets — DONE 2026-09-30 — f7c83f6 (`spice_cells` / `spice_asc` / `spice_opamps` / `spice_export` / `spice_ui`, `LTspice_Library/` with 26 cell templates; design note `dev/FS-008_ltspice_export_design_note.md`; checks `dev/fs008/check_spice_export.py`; open items — the two-TI-model helper collision and the last round's LTspice checks — moved to FS-029; the rule for new cells lives in `CLAUDE.md`)
 FS-029 — Vendor op-amp model import (guided download, per-part wrapper) — DONE 2026-09-30 — maintainer's commit (`spice_opamps` model_candidates / install_wrapped / localize_model / repair_imports, FS_<PART>.lib wrapper isolates vendor helper subckts; per-part FS generic fallback; checks `dev/fs008/check_spice_export.py` 13, LTspice test `dev/fs029/make_wrapper_test.py`; LTspice 26: two TI parts run)
+FS-035 — UI polish batch (Saal C leading constant, BOM caption, schematics expander) — DONE 2026-10-02 — uncommitted, logged after the fact (`dev/UI_POLISH_2026-10-02.md`)
 
 ---
 
