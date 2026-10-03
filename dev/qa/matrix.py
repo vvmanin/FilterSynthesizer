@@ -83,19 +83,26 @@ TIMEOUTS = dict(design=900, solve=900, e2e=1800, ltspice=180, check=3600, bench=
 # after, as regression guards). (response, type, structure, parameters, why)
 # =============================================================================
 PINNED = [
+    # FS-016 (fixed 2026-10-03) -- regression guards. The text names the flag code
+    # (or "exception") the summary matches on, so a regression reads "still there".
     ("Butterworth", "Bandpass", dict(order=1, asym=False, mods={}),
      dict(unit="Hz", f1=50.0, f2=2500.0, gain=2.0, absorb=True, gain_dist="even"),
-     "app exception: pairing_utils.auto_pair_bandpass min() of an empty sequence (FS-016)"),
+     "guard, FS-016 fixed: app exception in auto_pair_bandpass (two real BP poles, 3rd-order on)"),
     ("Butterworth", "Bandpass", dict(order=3, asym=False, mods={}),
      dict(unit="Hz", f1=50.0, f2=2500.0, gain=1.0, absorb=False, gain_dist="even"),
-     "lost_pole: a real pole of a wide-band BP is dropped by the pairer (FS-016)"),
-    ("Inverse Chebyshev", "Highpass", dict(order=5, asym=False, mods={}),
-     dict(unit="kHz", fc=200.0, gain=10.0, **{"as": 80.0}, absorb=True, gain_dist="even"),
-     "origin_on_jw: an origin zero lands on the stage holding a jw pair (FS-016)"),
+     "guard, FS-016 fixed: lost_pole -- a second real pole of a wide-band BP dropped"),
     ("Elliptic", "Band-Reject", dict(order=3, asym=False, mods={}),
      dict(unit="Hz", f1=50.0, f2=2500.0, gain=1.0, alpha=1.0, **{"as": 40.0}, absorb=False,
           gain_dist="even"),
-     "real_pair: two real poles combined into one Q < 0.5 section (FS-016)"),
+     "guard, FS-016 fixed: br_real_f0 -- real+real section f0 taken from one pole"),
+    ("Inverse Chebyshev", "Bandpass", dict(order=None, lp=3, hp=4, asym=True, mods={}),
+     dict(unit="kHz", f1=1.0, f2=2.0, gain=1.0, as_l=40.0, as_u=40.0, absorb=True,
+          gain_dist="even"),
+     "guard, FS-016 fixed: unrealizable -- real pole absorbed into an HPn stage, no origin zero"),
+    ("Inverse Chebyshev", "Bandpass", dict(order=None, lp=2, hp=1, asym=True, mods={}),
+     dict(unit="kHz", f1=1.0, f2=2.0, gain=1.0, as_l=40.0, as_u=40.0, absorb=True,
+          gain_dist="even"),
+     "guard, FS-016 fixed: unrealizable -- real pole + origin zero dumped onto an LPn stage"),
 ]
 
 

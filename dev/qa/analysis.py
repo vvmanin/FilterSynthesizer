@@ -23,7 +23,8 @@ FLAG_TEXT = {
     "extra_zero": "stage zero not among the engine zeros",
     "real_pair": "2nd-order stage built from two real poles (Q < 0.5)",
     "q_lt_half": "stage Q < 0.5",
-    "origin_on_jw": "origin zero(s) dumped onto a stage that holds a jw zero pair",
+    "origin_on_jw": "origin zero(s) on a stage that holds a jw zero pair (valid only as 3HPn: s(s²+wz²), wz < f0)",
+    "unrealizable": "stage numerator has no cell at its order (pairing_utils.stage_realizable)",
     "floating_zeros": "zeros left unassigned: hw_sections never built",
     "pending": "section family has no solver (gated 'pending', no topology in the tool)",
     "bp3_vcvs_am": "3rd-order band-pass section: only MFB has cells (VCVS / AM 'not solvable')",
@@ -180,6 +181,12 @@ def analyse(design, snap):
         n_origin = sum(1 for z in zr if abs(z) < 1e-12)
         if has_jw and n_origin:
             flag("origin_on_jw", stage=n, n_origin=n_origin)
+        # FS-016: the stage's true numerator must be one a cell realizes at its order
+        jw = [z for z in zr if abs(z.real) < 1e-9 * max(abs(z), 1) and z.imag > 0]
+        zs = [{"type": "Origin"}] * n_origin + [{"type": "Complex Pair", "w0": abs(z)} for z in jw]
+        if pr and not PU.stage_realizable(len(pr), zs, TWO_PI * float(s.get("f0_hz") or 0.0), q):
+            flag("unrealizable", stage=n, order=len(pr), n_origin=n_origin,
+                 fz_f0=[abs(z) / (TWO_PI * float(s.get("f0_hz") or 1.0)) for z in jw])
     for sec in sections:
         n = sec.get("stage_num")
         q = float(sec.get("Q") or 0.0)

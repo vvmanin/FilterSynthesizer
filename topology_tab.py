@@ -1097,6 +1097,13 @@ def _section_settings(sec, shared=None):
     batch-mode (env core, opamp) pair from _shared_settings."""
     n = sec["stage_num"]
     title = "topology settings" if shared is not None else "topology & component settings"
+    # FS-016: a 3rd-order band-pass section (BP1LP / BP1HP) has cells only in MFB
+    # today -> MFB is its default. Applied when the section first takes that family
+    # (new design or re-pair), so a later manual choice of the user's stays.
+    _fam = pairing_utils.family_from_section(sec)
+    if _fam in ("BP1LP", "BP1HP") and st.session_state.get(f"_hw_fam_for_{n}") != _fam:
+        st.session_state[f"hw_fam_{n}"] = TOPOLOGY_FAMILIES[1]
+    st.session_state[f"_hw_fam_for_{n}"] = _fam
     with st.expander(f"⚙ Section {n} — {title}", expanded=False):
         family = st.radio("Topology family", TOPOLOGY_FAMILIES, index=0,
                           horizontal=True, key=f"hw_fam_{n}")

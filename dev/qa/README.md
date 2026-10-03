@@ -115,7 +115,7 @@ and ids stay stable when the matrix grows.
 | When … | Edit |
 |---|---|
 | a response / option / limit is added (FS-013 all-pass, FS-020, FS-025 …) | `matrix.py`: `RESPONSES`, `_structural()`, `_draw_params()`. Until then the summary lists the new UI option under *UI options the matrix does not cover* |
-| a run finds a bug worth keeping an eye on | add its design to `matrix.PINNED` (runs at every level; the summary's *Pinned findings* says whether it still reproduces) |
+| a run finds a bug worth keeping an eye on | add its design to `matrix.PINNED` (runs at every level; the summary's *Pinned findings* says whether it still reproduces — the text must contain the flag code or "exception" it is matched on). Once fixed, keep it as a regression guard ("guard, FS-NNN fixed: …") |
 | a widget key or label changes | `ui_map.py` (the run fails with `widget not found: … (update dev/qa/ui_map.py)`) |
 | a cell / family is added (FS-014, FS-013) | nothing: routing is captured from the app, coverage comes from the registry (`tf_derivation_v2.all_cells`, `cells_first_order.all_cells`) |
 | an item ships a check script | nothing, if it is `dev/fs*/check_*.py` (options: `checks.ARGS`) |

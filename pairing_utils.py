@@ -72,6 +72,57 @@ def build_stage_bricks(poles, zeros, scale_type, wc):
         
     return pole_bricks, zero_bricks
 
+def _real_pair_w0_q(wa, wb):
+    """(w0, Q) of the biquad (s + wa)(s + wb): w0 = sqrt(wa wb), Q = w0/(wa + wb) <= 0.5."""
+    w0 = np.sqrt(wa * wb)
+    return w0, w0 / (wa + wb)
+
+
+def stage_w0_q(stage, p_bricks):
+    """(w0, Q) of a stage's pole factor as the Section carries it: the complex
+    pair's, the real+real pair's (w0 = sqrt(p1 p2), Q < 0.5), or (|p|, 0) for a
+    lone real pole. (0, 0) if the pole brick is missing."""
+    pb = next((b for b in p_bricks if b['id'] == stage.get('pole_id')), None)
+    if pb is None:
+        return 0.0, 0.0
+    if pb['type'] == 'Complex Pair':
+        return float(pb['w0']), float(pb.get('q', 0.0))
+    ab = next((b for b in p_bricks if b['id'] == stage.get('absorbed_real_id', 'None')), None)
+    if ab is not None:
+        return tuple(float(x) for x in _real_pair_w0_q(pb['w0'], ab['w0']))
+    return float(pb['w0']), 0.0
+
+
+def _stage_order(s):
+    """Order of a pairer-internal stage {'pole', 'absorbed_real', ...}."""
+    return (2 if s['pole']['type'] == 'Complex Pair' else 1) + (1 if s['absorbed_real'] else 0)
+
+
+def stage_realizable(order, zeros, w0, q, extra_origin=0):
+    """FS-016: True when a section of this order with these zero bricks (plus
+    `extra_origin` more origin zeros) has a cell family in the dispatch gate
+    (topology_tab.section_kind):
+        order 1: 1, s
+        order 2: 1, s, s^2, (s^2 + wz^2)
+        order 3: 1 (LP), s (BP1LP), s^2 (BP1HP), s^3 (HP),
+                 (s^2 + wz^2) with wz > w0 (LPn), s (s^2 + wz^2) with wz < w0 (HPn)
+    A 3rd-order notch (wz ~ w0) has no cell."""
+    n_or = sum(1 for z in zeros if z['type'] == 'Origin') + extra_origin
+    pairs = [z for z in zeros if z['type'] == 'Complex Pair']
+    if len(pairs) > 1:
+        return False
+    if not pairs:
+        return n_or <= order
+    if order == 1:
+        return False
+    if order == 2:
+        return n_or == 0
+    wz = float(pairs[0]['w0'])
+    if notch_forcing_error(wz, w0, q) < NOTCH_EPS:
+        return False
+    return (n_or == 0 and wz > w0) or (n_or == 1 and wz < w0)
+
+
 def auto_pair_bandpass(p_bricks, z_bricks, absorb_1st_order=False):
     """Specialized Q-descending, zoned proximity pairing for Bandpass topologies."""
     import numpy as np
@@ -126,11 +177,26 @@ def auto_pair_bandpass(p_bricks, z_bricks, absorb_1st_order=False):
                 s['zeros'].append(best_z)
                 LZ.remove(best_z)
 
+    # FS-016: two or more real poles (wide band, or a low-alpha Chebyshev n = 1)
+    # are combined lowest+highest into real+real 2nd-order stages (Q < 0.5), as
+    # the band-reject pairer does; an odd one out stays a lone real pole. Before,
+    # only real_poles[0] was used and the others vanished from the cascade.
+    real_poles = sorted(real_poles, key=lambda p: p['w0'])
+    for s in stages_pool:
+        s['w0_eff'], s['q_eff'] = s['pole']['w0'], s['pole']['q']
+    rr_stages = []
+    while len(real_poles) >= 2:
+        p1, p2 = real_poles.pop(0), real_poles.pop(-1)
+        w0_eff, q_eff = _real_pair_w0_q(p1['w0'], p2['w0'])
+        rr_stages.append({'pole': p1, 'zeros': [], 'absorbed_real': p2,
+                          'w0_eff': w0_eff, 'q_eff': q_eff})
+    stages_pool += rr_stages
+
     # 4. Pair Origin Zeros (Rule 1)
     # The middle-frequency stages that survived UZ/LZ assignments get the DC zeros
     available_stages = [s for s in stages_pool if not s['zeros']]
-    available_stages.sort(key=lambda s: s['pole']['w0']) 
-    
+    available_stages.sort(key=lambda s: s['w0_eff'])
+
     while len(OZ) >= 2 and available_stages:
         best_s = available_stages.pop(0)
         best_s['zeros'].append(OZ.pop(0))
@@ -139,6 +205,24 @@ def auto_pair_bandpass(p_bricks, z_bricks, absorb_1st_order=False):
     # Handle Residual Origin Zero & Real Pole
     r_pole = real_poles[0] if real_poles else None
     standalone_real_stage = None
+    # Complex-pair stages a real pole may join (3rd order); real+real stages never.
+    hosts = [s for s in stages_pool if s['pole']['type'] == 'Complex Pair']
+
+    def _lowest_q_host(extra_origin):
+        """FS-016 rule: the real pole goes to the REALIZABLE host with the lowest Q
+        (extra_origin: an origin zero travels with it)."""
+        ok = [s for s in hosts if s['absorbed_real'] is None
+              and stage_realizable(3, s['zeros'], s['pole']['w0'], s['pole']['q'], extra_origin)]
+        return min(ok, key=lambda s: s['pole']['q']) if ok else None
+
+    def _place_origin(oz):
+        """An origin zero alone: lowest-frequency zero-free stage first (as before),
+        else any stage that stays realizable with one more origin zero."""
+        free = [s for s in stages_pool if not s['zeros']]
+        ok = free or [s for s in stages_pool
+                      if stage_realizable(_stage_order(s), s['zeros'], s['w0_eff'], s['q_eff'], 1)]
+        best_s = min(ok or stages_pool, key=lambda s: s['w0_eff'])
+        best_s['zeros'].append(oz)
 
     if len(OZ) == 1:
         residual_oz = OZ.pop(0)
@@ -146,39 +230,49 @@ def auto_pair_bandpass(p_bricks, z_bricks, absorb_1st_order=False):
             # Pair them together as a standalone 1st order block
             standalone_real_stage = {'pole': r_pole, 'zeros': [residual_oz], 'absorbed_real': None}
             r_pole = None
+        elif r_pole:
+            # 3rd-order sections on. Keep the origin zero on the lowest-frequency
+            # zero-free stage (as before) when the real pole still finds a
+            # realizable host; else let them travel together (s/(s+p) joins a
+            # host whose numerator stays realizable); else a 1st-order HP stage.
+            free = [s for s in stages_pool if not s['zeros']]
+            placed = False
+            if free:
+                best_s = min(free, key=lambda s: s['w0_eff'])
+                best_s['zeros'].append(residual_oz)
+                host = _lowest_q_host(0)
+                if host is not None:
+                    host['absorbed_real'] = r_pole
+                    placed = True
+                else:
+                    best_s['zeros'].remove(residual_oz)
+            if not placed:
+                host = _lowest_q_host(1)
+                if host is not None:
+                    host['zeros'].append(residual_oz)
+                    host['absorbed_real'] = r_pole
+                else:
+                    standalone_real_stage = {'pole': r_pole, 'zeros': [residual_oz],
+                                             'absorbed_real': None}
+            r_pole = None
         else:
-            # Dump into lowest freq stage, keeping r_pole free to form a 3rd order section!
-            if available_stages:
-                best_s = min(available_stages, key=lambda s: s['pole']['w0'])
-                best_s['zeros'].append(residual_oz)
-            else:
-                best_s = min(stages_pool, key=lambda s: s['pole']['w0'])
-                best_s['zeros'].append(residual_oz)
+            _place_origin(residual_oz)
 
-    # Dump any straggler OZs into the lowest frequency stage
+    # Straggler OZs: wherever they stay realizable
     while OZ:
-        oz = OZ.pop(0)
-        best_s = min(stages_pool, key=lambda s: s['pole']['w0'])
-        best_s['zeros'].append(oz)
+        _place_origin(OZ.pop(0))
 
     # 5. 3rd-Order Stage Logic
     if r_pole:
-        absorbed = False
-        if absorb_1st_order:
-            # Prioritize stages that have exactly 3 zeros (they NEED a real pole), then by lowest frequency
-            stages_pool.sort(key=lambda s: (sum(2 if z['type'] == 'Complex Pair' else 1 for z in s['zeros']) != 3, s['pole']['w0']))
-            for s in stages_pool:
-                num_z = sum(2 if z['type'] == 'Complex Pair' else 1 for z in s['zeros'])
-                # A 3rd order stage capacity is 3, allowing 3 origin zeros to merge!
-                if num_z <= 3: 
-                    s['absorbed_real'] = r_pole
-                    absorbed = True
-                    break
-    
-        if not absorbed:
+        host = _lowest_q_host(0) if absorb_1st_order else None
+        if host is not None:
+            host['absorbed_real'] = r_pole
+        else:
             standalone_real_stage = {'pole': r_pole, 'zeros': [], 'absorbed_real': None}
 
     if standalone_real_stage:
+        standalone_real_stage['w0_eff'] = standalone_real_stage['pole']['w0']
+        standalone_real_stage['q_eff'] = standalone_real_stage['pole']['q']
         stages_pool.append(standalone_real_stage)
 
     # 6. Format and Route output
@@ -187,19 +281,20 @@ def auto_pair_bandpass(p_bricks, z_bricks, absorb_1st_order=False):
         z_ids = [z['id'] for z in s['zeros']]
         cap = 2 if s['pole']['type'] == 'Complex Pair' else 1
         if s['absorbed_real']: cap += 1
-        
+
         for z in s['zeros']: cap -= (2 if z['type'] == 'Complex Pair' else 1)
 
         routing.append({
             'stage_num': 0, # Will be set during sorting
             'pole_id': s['pole']['id'],
-            'w0': s['pole']['w0'],
-            'q': s['pole']['q'],
+            'w0': s['w0_eff'],
+            'q': s['q_eff'],
             'absorbed_real_id': s['absorbed_real']['id'] if s['absorbed_real'] else 'None',
             'capacity': cap,
             'zero_ids': z_ids,
             'has_zero_pair': any(z['type'] == 'Complex Pair' for z in s['zeros']),
-            'is_3rd_order': s['absorbed_real'] is not None
+            # real+real is a 2nd-order stage physically
+            'is_3rd_order': s['absorbed_real'] is not None and s['pole']['type'] == 'Complex Pair'
         })
 
     # Sort final stages by Q for standard hardware sequencing
@@ -342,6 +437,19 @@ def auto_pair_stages(p_bricks, z_bricks, absorb_1st_order=False, filter_type="Lo
     # Track available zeros
     avail_z_pairs = [z for z in z_bricks if z['type'] == 'Complex Pair']
     avail_origin_z = [z for z in z_bricks if z['type'] == 'Origin']
+
+    # FS-016: two or more real poles (a Custom H(s); the standard LP/HP approximations
+    # have at most one) are combined lowest+highest into real+real 2nd-order stages
+    # (Q < 0.5), as the BP / BR pairers do; an odd one out stays a lone real pole.
+    real_poles.sort(key=lambda p: p['w0'])
+    while len(real_poles) >= 2:
+        p1, p2 = real_poles.pop(0), real_poles.pop(-1)
+        w0_eff, q_eff = _real_pair_w0_q(p1['w0'], p2['w0'])
+        stages.append({
+            "pole_id": p1['id'], "w0": w0_eff, "q": q_eff,
+            "absorbed_real_id": p2['id'], "capacity": 2, "zero_ids": [],
+            "has_zero_pair": False, "is_3rd_order": False   # real+real is 2nd order
+        })
 
     # --- INITIALIZE STAGES & ABSORPTION ---
     if absorb_1st_order and real_poles and complex_poles:
@@ -603,7 +711,7 @@ def _family_from_features(order, pole_type, n_origin_zeros, wz, w0, Q, notch_eps
         return "LPn" if ratio > 1.0 else "HPn"           # zero above pole -> LPn
     if n_origin_zeros <= 0:
         return "LP"                                      # allpole
-    if pole_type == "Complex Pair":
+    if pole_type == "Complex Pair" or order >= 2:        # real+real = a Q < 0.5 biquad
         # ORDER MATTERS once a real pole is absorbed into the pair. With a cubic
         # denominator the origin-zero COUNT no longer separates BP from HP the
         # way it does at 2nd order:
@@ -636,8 +744,7 @@ def classify_section(stage, p_bricks, z_bricks, notch_eps=NOTCH_EPS):
     'family' is a math property; sign (realization) is NOT decided here."""
     pole = next((b for b in p_bricks if b["id"] == stage.get("pole_id")), None)
     pole_type = pole["type"] if pole else "Complex Pair"
-    w0 = float(pole["w0"]) if pole else 0.0
-    Q = float(pole.get("q", 0.0)) if pole else 0.0
+    w0, Q = stage_w0_q(stage, p_bricks)                  # real+real: sqrt(p1 p2), Q < 0.5
 
     order = 1 if pole_type == "Real" else 2
     if stage.get("absorbed_real_id", "None") not in ("None", None):

@@ -24,7 +24,7 @@ from filter_engine import synthesize_custom
 from plot_utils import plot_main_magnitude, plot_passband_magnitude, evaluate_h_complex, plot_pole_zero_map, plot_mnemoscheme_map
 from plot_utils import plot_group_delay_detail, format_seconds
 from tf_utils import clean_roots, poly_to_latex, roots_to_biquad_latex, build_coeff_table, format_val, format_latex_val, poly_to_latex_lines, roots_to_biquad_lines, tf_latex
-from pairing_utils import build_stage_bricks, auto_pair_stages, find_clicked_brick, compute_stage_gains
+from pairing_utils import build_stage_bricks, auto_pair_stages, find_clicked_brick, compute_stage_gains, stage_w0_q
 from topology_tab import render_topology_tab
 from response_tab import render_response_tab
 from _version import __version__, APP_NAME
@@ -73,8 +73,7 @@ def _stage_rho(stage, p_bricks, z_bricks):
     over the pole frequency — and 1.0 for a stage with no finite zero. A notch
     section has H(0)/H(∞) = ρ, so ρ is exactly the DC-to-HF gain ratio. It is a
     pure ratio, hence identical in Hz and rad/s."""
-    pb = next((b for b in p_bricks if b['id'] == stage['pole_id']), None)
-    w0 = abs(pb['w0']) if pb else 0.0
+    w0 = stage_w0_q(stage, p_bricks)[0]          # FS-016: real+real -> sqrt(p1 p2)
     wz = 0.0
     for zid in stage.get('zero_ids', []):
         zb = next((b for b in z_bricks if b['id'] == zid), None)
@@ -2048,7 +2047,8 @@ with tab_pairing, st.container(key="bp_body"):   # key -> CSS 7b. (FS-004 compac
                     'has_origin_zero': any(b['type'] == 'Origin' for b in _zb),
                     'n_origin_zeros': sum(1 for b in _zb if b['type'] == 'Origin'),
                     'is_complex_pair': _is_pair,
-                    'f0_hz': (_pb['w0'] / (2 * np.pi)) if _pb else None,
+                    # FS-016: a real+real stage's f0 is sqrt(p1 p2), not p1 (its Q is the pair's)
+                    'f0_hz': (stage_w0_q(_stg, p_bricks)[0] / (2 * np.pi)) if _pb else None,
                     'Q': _stg['q'],
                     'fz_hz': (_pair_z['w0'] / (2 * np.pi)) if _pair_z is not None else None,
                     'f1_hz': _f1,

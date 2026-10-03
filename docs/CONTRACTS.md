@@ -69,6 +69,18 @@ Returns `{order, family, w0, Q, wz, n_origin_zeros}`. Rules:
 - Origin zeros, order 3: 1 → `BP1LP` (num ~ s), 2 → `BP1HP` (num ~ s²),
   3 → `HP`.
 - Real pole + 1 origin zero → `HP` (order 1).
+- Real+real stage (two real poles, order 2; FS-016): classified as a biquad
+  with w0 = √(p₁p₂), Q = w0/(p₁ + p₂) < 0.5 (`pairing_utils.stage_w0_q`) — the
+  order-2 rules above apply (1 origin zero → `BP`, not `HP`), and the Section's
+  `f0_hz` / `Q` carry that pair.
+- **Pairer rule (FS-016):** a pairer emits only stages whose numerator has a
+  cell family at their order (`pairing_utils.stage_realizable`): order 1 —
+  1, s; order 2 — 1, s, s², (s² + wz²); order 3 — 1, s, s², s³,
+  (s² + wz²) with wz > w0, s(s² + wz²) with wz < w0 (no order-3 notch). Two
+  or more real poles are combined lowest+highest into real+real stages (every
+  pairer: LP/HP, BP, BR); an odd one out stays a lone real pole. An
+  absorbed real pole goes to the realizable host with the lowest Q (BP1LP /
+  BP1HP count as hosts); with none it stays a 1st-order stage.
 - Complex-pair zero: `notch` only when forcing the zero onto w0 (what the 2N
   cells realize) is negligible: `notch_forcing_error(wz, w0, Q) < NOTCH_EPS =
   1e-3`. ε = |r − 1|·Q/√(1 − 1/(4Q²)) (Q > 1/√2, else |r − 1|), r = (wz/w0)²,

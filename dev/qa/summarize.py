@@ -180,7 +180,9 @@ def write(run_dir, compare_dir=None):
             rows.append(("App-reported limits", "WARN", f"{lim} designs: the app says a spec is not met "
                                                          "(see 'App refusals and limits')"))
         fl = collections.Counter(f["code"] for d in ds for f in (d.get("analysis") or {}).get("flags", []))
-        rows.append(("Pairing flags (FS-016)", "see report" if fl else "none",
+        bad = ("unrealizable", "lost_pole", "lost_zero", "pending")     # defects since FS-016
+        rows.append(("Pairing flags (FS-016)",
+                     "FAIL" if any(fl[c] for c in bad) else ("see report" if fl else "none"),
                      ", ".join(f"{k} {v}" for k, v in fl.most_common())))
     js = by.get("job", [])
     if js:
@@ -267,7 +269,8 @@ def write(run_dir, compare_dir=None):
     pinned = [d for d in ds if (d.get("design") or {}).get("pinned")]
     if pinned:
         add("## Pinned findings (matrix.PINNED)\n")
-        add("Known findings kept in every run until fixed. *Still there* = the run shows it.\n")
+        add("Known findings kept in every run until fixed, and fixed ones kept as regression "
+            "guards. *Still there* = the run shows it.\n")
         rows = []
         for d in pinned:
             why = d["design"]["pinned"]
@@ -416,7 +419,7 @@ def write_fs016(run_dir, by):
          "(response_type_order_frequencies_gain_…; `abs` = 3rd-order absorb on, "
          "first/last/equalize = gain distribution). Full data: results.jsonl (type=design).\n"]
     order = ["lost_pole", "lost_zero", "extra_pole", "extra_zero", "real_pair", "q_lt_half", "br_real_f0",
-             "origin_on_jw", "floating_zeros", "pending", "bp3_vcvs_am", "near_notch", "very_high_q",
+             "origin_on_jw", "floating_zeros", "pending", "unrealizable", "bp3_vcvs_am", "near_notch", "very_high_q",
              "high_q", "gain_extreme", "far_zero"]
     L.append(_md_table([(c, len(groups.get(c, [])), FLAG_TEXT.get(c, "")) for c in order if groups.get(c)],
                        ("flag", "count", "meaning")))

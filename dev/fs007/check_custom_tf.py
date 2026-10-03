@@ -285,10 +285,6 @@ cases = [
     ("improper", rs([[-1.0, 0.0]], [[0.0, 2.0]]), "Lowpass", "Improper"),
     ("jω pairs > complex pole pairs", rs([[-1.0, 0.0], [-2.0, 0.0], [-0.5, 0.9]],
                                          [[0.0, 2.0], [0.0, 3.0]]), "Lowpass", "jω zero pairs"),
-    ("BP with 2 real poles", rs([[-0.1, 1.0], [-0.1, 1.2], [-0.5, 0.0], [-2.0, 0.0]],
-                                [[0.0, 0.0], [0.0, 0.0]]), "Bandpass", "real poles"),
-    ("BR with 2 real poles", rs([[-0.1, 1.0], [-0.1, 1.2], [-0.5, 0.0], [-2.0, 0.0]],
-                                [[0.0, 1.1], [0.0, 1.1]]), "Band-Reject", "real poles"),
     ("n_p = 31", rs([[-1.0, 0.0]] * 31), "Lowpass", "limit of 30"),
     ("no -α crossing", rs(bw4, K=1.0), "Highpass", "never falls"),
 ]
@@ -300,6 +296,21 @@ e = errors_of(coeff_spec(["1", "0", "1"], ["1", "0.5", "1"]), "Bandpass", mode=c
               f1_hz=800.0, f2_hz=1250.0)
 assert "must be its passband edge" in e, e
 ok("prototype with |H(j1)| = 0 (a notch at ω = 1): 'must be its passband edge'")
+# FS-016: BP / BR with two real poles are no longer gated -- the pairers combine
+# them into one real+real section; every pole stays in the cascade, pre-flight clean.
+import pairing_utils as PU
+_rp = [complex(-0.1, 1.0), complex(-0.1, -1.0), complex(-0.1, 1.2), complex(-0.1, -1.2), -0.5, -2.0]
+for _ft, _z, _zs in (("Bandpass", [0j, 0j], [[0.0, 0.0], [0.0, 0.0]]),
+                     ("Band-Reject", [1.1j, -1.1j], [[0.0, 1.1], [0.0, 1.1]])):
+    e = errors_of(rs([[-0.1, 1.0], [-0.1, 1.2], [-0.5, 0.0], [-2.0, 0.0]], _zs), _ft)
+    assert "real poles" not in e, (_ft, e)
+    assert not ct.preflight_pairing(_rp, _z, _ft), _ft
+    _pb, _zb = PU.build_stage_bricks(np.asarray(_rp), np.asarray(_z), "Denormalized", 1.0)
+    for _ab in (False, True):
+        _st = PU.auto_pair_stages(_pb, _zb, absorb_1st_order=_ab, filter_type=_ft)
+        _used = {s["pole_id"] for s in _st} | {s["absorbed_real_id"] for s in _st}
+        assert {b["id"] for b in _pb} <= _used, (_ft, _ab, _st)
+    ok(f"{_ft} with 2 real poles: no gate error, all poles paired, pre-flight clean (FS-016)")
 
 # ---------------------------------------------------------------------
 section("9. Pairing pre-flight (§7.2)")
@@ -307,8 +318,32 @@ wz_lo, wz_hi = 0.9, 2.0
 pp = [complex(-0.05, 0.8), complex(-0.05, -0.8), complex(-0.06, 1.25), complex(-0.06, -1.25), -0.5]
 zp = [complex(0, wz_lo), complex(0, -wz_lo), complex(0, wz_hi), complex(0, -wz_hi), 0j]
 msgs = ct.preflight_pairing(pp, zp, "Bandpass")
+assert not msgs, msgs
+ok("BP: jω pairs + origin zero + real pole: paired realizably (FS-016), no message")
+_bad = lambda pb_, zb_, absorb_1st_order=False, filter_type=None: [   # the pre-FS-016 dump
+    {"stage_num": 1, "pole_id": "p_pair_0", "absorbed_real_id": "p_real_0",
+     "zero_ids": ["z_pair_0", "z_origin_0"]},                  # s(s²+wz²), wz > w0
+    {"stage_num": 2, "pole_id": "p_pair_1", "absorbed_real_id": "None",
+     "zero_ids": ["z_pair_1"]}]
+_orig, ct.auto_pair_stages = ct.auto_pair_stages, _bad
+try:
+    msgs = ct.preflight_pairing(pp, zp, "Bandpass")
+finally:
+    ct.auto_pair_stages = _orig
 assert any("jω pair" in m and "origin" in m for m in msgs), msgs
-ok("BP: jω pair + origin zero dumped into one stage is flagged")
+ok("pre-flight still flags a jω pair + origin zero dumped into one stage")
+_bad = lambda pb_, zb_, absorb_1st_order=False, filter_type=None: [   # FS-016 picture case
+    {"stage_num": 1, "pole_id": "p_pair_1", "absorbed_real_id": "p_real_0",
+     "zero_ids": ["z_pair_0"]},                                # (s²+wz²)/cubic, wz < w0
+    {"stage_num": 2, "pole_id": "p_pair_0", "absorbed_real_id": "None",
+     "zero_ids": ["z_pair_1", "z_origin_0"]}]
+_orig, ct.auto_pair_stages = ct.auto_pair_stages, _bad
+try:
+    msgs = ct.preflight_pairing(pp, zp, "Bandpass")
+finally:
+    ct.auto_pair_stages = _orig
+assert any("stage 1" in m and "no cell" in m for m in msgs), msgs
+ok("pre-flight flags a 3rd-order jω pair below f₀ without an origin zero (FS-016)")
 assert not ct.preflight_pairing(*[np.asarray(x) for x in (pb, [])], "Lowpass")
 ok("Butterworth LP 4: no pre-flight message")
 

@@ -22,7 +22,7 @@ import numpy as np
 from scipy import signal
 from scipy.optimize import brentq, minimize_scalar
 
-from pairing_utils import build_stage_bricks, auto_pair_stages
+from pairing_utils import build_stage_bricks, auto_pair_stages, stage_realizable, stage_w0_q
 
 CUSTOM = "Custom H(s)"
 FORMS = ("coeff", "f0q", "ts", "roots")
@@ -610,12 +610,10 @@ def gate_structure(z, p, filter_type, n_max):
         errs.append(f"{c['n_poles']} poles exceed the limit of {n_max}.")
     if c["n_jw_pairs"] > c["n_complex_pole_pairs"]:
         errs.append(f"{c['n_jw_pairs']} jω zero pairs but only {c['n_complex_pole_pairs']} complex "
-                    "pole pairs: a jω pair needs a second-order section (combining two real poles "
-                    "into one is FS-016's open question).")
-    if filter_type in ("Bandpass", "Band-Reject") and c["n_real_poles"] >= 2:
-        errs.append(f"{filter_type} with {c['n_real_poles']} real poles: today's "
-                    f"{filter_type.lower()} pairer mishandles more than one real pole "
-                    "(FS-016). Use a narrower band or complex poles.")
+                    "pole pairs: a jω pair needs a second-order section built on a complex pole "
+                    "pair.")
+    # FS-016: BP / BR with >= 2 real poles is no longer gated -- both pairers combine
+    # real poles into real+real (Q < 0.5) sections; preflight_pairing checks the result.
     return errs
 
 
@@ -831,6 +829,10 @@ def preflight_pairing(poles, zeros, filter_type):
             elif pair is not None and n_or > 0 and not hpn3:
                 msgs.append(f"{tag}: stage {s['stage_num']} (order {order}) gets a jω pair and "
                             f"{n_or} origin zero(s); the cells would ignore the origin zero.")
+            elif not stage_realizable(order, zs, *stage_w0_q(s, pb)):    # FS-016 cell set
+                msgs.append(f"{tag}: stage {s['stage_num']} (order {order}) has a numerator no "
+                            "cell realizes (e.g. a jω pair below f₀ without an origin zero, or "
+                            "a 3rd-order notch).")
     if msgs:
         msgs.append("Re-pair the flagged stages by hand in the Biquad Pairing tab.")
     return msgs
