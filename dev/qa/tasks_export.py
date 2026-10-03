@@ -25,7 +25,7 @@ import time
 
 EXACT_TOL = 1e-3          # relative to the largest expected |H|
 ASC_TOL = 1e-4            # .asc vs .cir, relative
-_MEAS = re.compile(r"^(\w+):\s*v\(out\)=\(\s*([-+0-9.eE]+)dB\s*,\s*([-+0-9.eE]+)\S*\)\s*at\s*([-+0-9.eE]+)",
+_MEAS = re.compile(r"^(\w+):\s*v\(out\)\s*=\s*\(\s*([-+0-9.eE]+)dB\s*,\s*([-+0-9.eE]+)\S*\)\s*at\s*([-+0-9.eE]+)",
                    re.I | re.M)
 _ERR = re.compile(r"(^|\s)(error|fatal|singular matrix|unknown subcircuit|can't find|could not open|"
                   r"timestep too small)", re.I)

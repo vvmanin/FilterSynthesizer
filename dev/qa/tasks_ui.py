@@ -23,6 +23,7 @@ import importlib
 import math
 import os
 import re
+import shutil
 import time
 import traceback
 
@@ -709,11 +710,17 @@ def e2e_task(design, vid, variant, out_dir, timeout=900):
         else:
             lt = os.path.join(out_dir, "ltspice")
             os.makedirs(lt, exist_ok=True)
-            for name, data in list(ex["files"].items()) + list((ex.get("extra_files") or {}).items()):
+            # same contract as spice_export.zip_bytes: files = {name: text},
+            # extra_files = {name: source path} (vendor models, FS-029)
+            for name, data in ex["files"].items():
                 p = os.path.join(lt, name)
                 os.makedirs(os.path.dirname(p), exist_ok=True)
                 with open(p, "wb") as f:
                     f.write(data if isinstance(data, bytes) else data.encode("utf-8"))
+            for name, src in (ex.get("extra_files") or {}).items():
+                p = os.path.join(lt, name)
+                os.makedirs(os.path.dirname(p), exist_ok=True)
+                shutil.copyfile(src, p)
             out["export"] = dict(ok=True, dir=lt, files=sorted(ex["files"]),
                                  expected=jsonable(ex["expected"]), all_generic=ex["all_generic"],
                                  asc_error=ex["asc_error"], warnings=ex["warnings"],
