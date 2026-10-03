@@ -2229,6 +2229,80 @@ def _render_section(sec, conv, gen, shared=None, solve_all=False):
     return f"{nb} BOM{'s' if nb != 1 else ''}" if nb else "no BOM"
 
 
+def _peak_refined(fn, f):
+    """(max |fn(2πf)|, f_peak) over the log grid `f`, refined by a bounded
+    search in log f between the grid neighbours of the sampled maximum (narrow
+    high-Q passbands fall between grid points)."""
+    from scipy.optimize import minimize_scalar
+    m = np.abs(fn(2 * np.pi * f))
+    i = int(np.argmax(m))
+    lo, hi = np.log(f[max(i - 1, 0)]), np.log(f[min(i + 1, f.size - 1)])
+    best = (float(m[i]), float(f[i]))
+    if hi > lo:
+        r = minimize_scalar(lambda x: -abs(fn(np.array([2 * np.pi * np.exp(x)]))[0]),
+                            bounds=(lo, hi), method="bounded",
+                            options={"xatol": 1e-7})
+        if r.success and -r.fun > best[0]:
+            best = (float(-r.fun), float(np.exp(r.x)))
+    return best
+
+
+def _bp_cascade_peaks(realizable, picked):
+    """FS-015: band-pass overall gains measured on the cascade itself -- the
+    same two curves the Resulting Response tab draws.
+      realized = max |RED|  (product of the picked BOMs' responses, op-amp incl.)
+      design   = max |BLUE| (math cascade, per-section Ki overrides incl.)
+    Both maxima are taken over the passband window only: the outermost span
+    where BLUE >= its peak - 3 dB, widened a little, so the realized max can
+    never lock onto the AM finite-Ro HF hump or the GBWP edge. Rippled
+    responses have several humps; the largest one is the passband gain.
+    Returns (realized, f_realized, design, f_design), or None if a section
+    response can't be built. Memoized on picks + op-amps + design gains."""
+    import response_tab as RT          # lazy: response_tab imports this module
+    import hw_plots as pf
+    data = []
+    for s in realizable:
+        n = s["stage_num"]
+        row = picked[n]
+        data.append((s, row, RT._eval_opamp(n), RT._design_eff_dc(s, picked)))
+    key = repr((st.session_state.get("hw_gen"),
+                [(s["stage_num"], row.get("topology"),
+                  sorted((k, v) for k, v in row.items()
+                         if not str(k).startswith("_") and isinstance(v, (int, float))),
+                  sorted(op.items()) if isinstance(op, dict) else op, ed)
+                 for s, row, op, ed in data]))
+    memo = st.session_state.get("_hw_bp_overall")
+    if memo and memo[0] == key:
+        return memo[1]
+    try:
+        Hs = [(RT._section_H(row.get("topology")), row, op) for _, row, op, _ in data]
+    except Exception:
+        return None
+    secs = [d[0] for d in data]
+
+    def red(w):
+        return pf.cascade([pf.realized_response(H, nm, row, op, w)
+                           for (H, nm), row, op in Hs])
+
+    def blue(w):
+        return RT._build_ideal(secs, picked, w)
+
+    f0s = [float(s["f0_hz"]) for s in secs if s.get("f0_hz")]
+    if not f0s:
+        return None
+    f = np.logspace(np.log10(min(f0s) / 4.0), np.log10(max(f0s) * 4.0), 6000)
+    mb = np.abs(blue(2 * np.pi * f))
+    idx = np.nonzero(mb >= mb.max() / np.sqrt(2.0))[0]
+    lo, hi = np.log(f[idx[0]]), np.log(f[idx[-1]])
+    pad = max(0.1 * (hi - lo), 0.005)
+    fw = np.exp(np.linspace(lo - pad, hi + pad, 4000))
+    g_des, f_des = _peak_refined(blue, fw)
+    g_real, f_real = _peak_refined(red, fw)
+    out = (g_real, f_real, g_des, f_des)
+    st.session_state["_hw_bp_overall"] = (key, out)
+    return out
+
+
 def _render_overall(sections):
     st.markdown("---")
     st.markdown("##### Overall filter")
@@ -2326,23 +2400,39 @@ def _render_overall(sections):
                    "for even-order Chebyshev/Elliptic the band edges sit above |DC|/|HF|.")
     else:
         # A band-pass cascade has DC in the STOP-band, so an "overall DC gain" is
-        # meaningless (~0). Show only the realized passband (center) gain.
-        is_bp = any(section_kind(s)[0] == "bp" for s in realizable)
+        # meaningless (~0). FS-015: the passband gain is MEASURED on the cascade
+        # (max of the realized / design curves), not estimated from per-section
+        # peaks -- stagger-tuned and BP1HP/BP1LP sections peak off their f₀.
+        # Keyed on the filter type too: a narrow band-pass often pairs into
+        # LP + HP sections only, which the DC/HF readout below can't measure.
+        is_bp = (st.session_state.get("hw_filter_type") == "Bandpass"
+                 or any(section_kind(s)[0] == "bp" for s in realizable))
         if is_bp:
-            if abs(g_math_dc) > 1e-12:
-                g_real_pb = (user_pb / g_math_dc) * g_real_dc
-                st.metric("Overall realized passband gain", f"{g_real_pb:.4f} V/V",
-                          help="Band-pass center-frequency gain: target PB gain × "
-                               "(∏ realized section peak |H(jω₀)|) ÷ (∏ ideal section "
-                               "peak Ki·Q/ω₀). Approximate — for stagger-tuned sections "
-                               "the per-section peaks sit at different f₀, so the exact "
-                               "cascade peak comes with the swept Bode view.")
+            pk = _bp_cascade_peaks(realizable, picked)
+            c = st.columns(2)
+            if pk is not None:
+                g_real, f_real, g_des, f_des = pk
+                d_db = 20 * np.log10(g_real / g_des) if g_des > 0 and g_real > 0 else None
+                with c[0]:
+                    st.metric("Overall realized passband gain", f"{g_real:.4f} V/V",
+                              delta=(f"{d_db:+.2f} dB vs design" if d_db is not None else None),
+                              delta_color="off",
+                              help="Largest passband hump of the realized cascade (the "
+                                   "red curve on Resulting Response: selected BOMs + "
+                                   f"op-amps), at {f_real:.5g} Hz.")
+                with c[1]:
+                    st.metric("Design passband gain", f"{g_des:.4f} V/V",
+                              help="Peak of the design cascade (the blue curve: section "
+                                   "math responses, per-section Ki overrides included), "
+                                   f"at {f_des:.5g} Hz.")
             else:
-                st.metric("Overall realized passband gain", "—")
-            st.caption(f"Target passband gain {user_pb:.4g} V/V · ideal center-gain "
-                       f"product {abs(g_math_dc):.4f} V/V · cascade sign {overall_sign:+d}. "
-                       "Band-pass has no DC/HF passband — the gain is the resonant peak "
-                       "at f₀ (DC and HF are both stop-bands).")
+                with c[0]:
+                    st.metric("Overall realized passband gain", "—")
+                with c[1]:
+                    st.metric("Design passband gain", "—")
+            st.caption(f"Target passband gain (Tab 1) {user_pb:.4g} V/V · cascade sign "
+                       f"{overall_sign:+d}. Band-pass gains are the largest hump of the "
+                       "swept cascade inside the passband (DC and HF are stop-bands).")
         else:
             c = st.columns(2)
             with c[0]:

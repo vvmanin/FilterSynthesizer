@@ -139,7 +139,7 @@ first.
 | FS-012 | AI integration (external API/MCP or built-in assistant) | P2 | PROPOSED | plan xhigh / build high | FS-011 (soft) |
 | FS-013 | All-pass (phase) responses + all-pass cells | P3 | PROPOSED | max | FS-006 (soft) |
 | FS-014 | Topology family expansion — research | P3 | PROPOSED | max | — |
-| FS-015 | Topology tab Overall filter: BP values off (validate BR) | P2 *(s)* | PROPOSED | plan high / build medium | — |
+| FS-015 | Topology tab Overall filter: BP values off (validate BR) | P2 *(s)* | VALIDATING | plan high / build medium | — |
 | FS-016 | Auto-pairing review: all types, esp. BP/BR; Q < 0.5 pairs | P2 *(s)* | PROPOSED | plan xhigh / build high | — |
 | FS-017 | Manual pairing override: unreliable clicks | P2 *(s)* | PROPOSED | medium | — |
 | FS-018 | Op-amp data: provenance field + review of shipped parts | P2 *(s)* | PROPOSED | medium | — |
@@ -280,19 +280,24 @@ answered against FS-031's equalizer — plan FS-031 first.
 - **Updated:** 2026-09-29
 
 ### FS-015 — Topology tab Overall filter: BP values off (validate BR)
-- **State:** PROPOSED
+- **State:** VALIDATING
 - **Priority:** P2 (suggested — not critical, per maintainer)
 - **Effort:** plan high / build medium
-- **Tiers:** D (possibly C if the cause is in stage-gain bookkeeping)
+- **Tiers:** D
 - **Depends on:** —
 - **Contracts:** §5 (overall sign/gain = product of sections)
 - **Files:** `topology_tab.py` (`_render_overall`, ~L1869), possibly `pairing_utils.compute_stage_gains`
 - **Goal:** The Overall filter section of the Topology tab reports the correct cascade values for band-pass filters, and is confirmed correct for band-reject.
 - **Scope:** In — find which overall values deviate for BP (gain, f0/fc, Q/bandwidth…) and why; fix the overall computation/display only. Confirm BR (and spot-check LP/HP) is correct. Out — per-section solutions and BOMs must not change.
 - **Validation:** For 2–3 BP designs (even/odd order, gained/unity) and 2 BR designs: overall values match (a) the Response Plots target and (b) the product of the realized section responses evaluated independently (scratch check); per-section BOMs identical to baseline.
-- **Open questions:** Which values differ, and by roughly how much, on a reproducing design (spec to record in Notes)?
-- **Notes:** Isolated to the Overall section — can land any time without touching other items. Hypothesis to check first: overall BP gain built from per-section peak gains, whereas the cascade peak ≠ product of individual section peaks when section centre frequencies differ.
-- **Updated:** 2026-09-26
+- **Open questions:** — (resolved 2026-10-03, see Notes)
+- **Notes:** Isolated to the Overall section — can land any time without touching other items.
+  - Plan (2026-10-03, agreed with maintainer). BR: preliminary verdict OK, LP/HP/BR left as is. BP root cause: the BP branch borrowed the LP/HP ratio estimate `target × ∏(realized section peak) ÷ ∏(ideal Ki·Q/ω₀)`. It is wrong for BP because (1) stagger-tuned sections: a realized f₀/Q shift moves each section peak off its design f₀ and the cascade peak does not scale like the product of section peaks; (2) BP1HP/BP1LP: the realized section value is the section MAX, the ideal is |H(jω₀)| — the absorbed real pole pulls the max off ω₀, so the ratio ≠ 1 even with perfect parts; (3) the anchor is the Tab-1 target, not a measurement (per-section Ki overrides change the design gain).
+  - Fix: the BP branch measures the cascade directly, the same curves the Resulting Response tab draws. Realized passband gain = largest hump of the RED curve (product of the selected BOMs' responses, `response_tab._section_H` + `hw_plots.realized_response`); design passband gain = max of the BLUE curve (`response_tab._build_ideal`, includes Ki overrides); show both + deviation in dB, cascade sign and Tab-1 target in the caption. Window = the outermost span where blue ≥ its max − 3 dB, slightly widened (keeps the AM finite-Ro HF hump and GBWP edge out); dense log grid + bounded refinement of the peak. No blue-hump equality check (maintainer: silent). Memoized on picks + op-amp + Ki. Per-section `_dc`, BOMs, report unchanged.
+  - Built 2026-10-03. Found during validation: a narrow band-pass can pair into LP + HP sections only (Chebyshev n2, 1-1.2 kHz), which never reached the BP branch and was read by the LP/HP DC path (1.007 V/V shown, cascade peak 1.18) -- the BP branch now also keys on `hw_filter_type == "Bandpass"`.
+  - Validation (scratch AppTest script driving the real app, snap-cost-best BOM per section; independent check = 400k-point sweep of the same red curve over f0min/4..4*f0max). Realized readout = independent max to >= 5 digits in every case: Cheb BP n2 narrow MFB ideal 1.1407 (old estimate 1.0104); Ell BP n3 g2 MFB ideal 2.2752 (old 2.0122); same with row 0 of the default sort 6.6893 (old 3.3562); Ell BP n3 AM typical op-amp 1.8224 (old 1.9749; HF hump kept out of the window); Cheb BP n4 g10 AM typical 11.5963 (old 9.8578); BW BP asym 2/3 + absorb (2BP1HP-MFB) MFB ideal 1.0263 (old 1.0407); Ki override x1.5 on Ell n3 S1: design 2.0 -> 3.0, realized 3.5147 = sweep. Design (blue) max = 1.0000 / 2.0000 / 10.0000 = Tab-1 target without overrides. BR (unchanged): Cheb BR n2 g2 VCVS: LF 1.9156 = swept 1.91562 exact; HF 1.9112 vs swept plateau 1.9040 (+0.4 %: the median window starts at 3*fz, not fully settled) -- noted, left as is. Per-section BOMs untouched by construction (only `_render_overall` + two new read-only helpers). QA smoke: design / LTspice FAIL rows are the pinned FS-016 findings and a harness bug writing vendor-model paths as `.lib` text (separate task), not this change.
+  - Out of scope, noted: the report's per-section gain error (`report_ui.py` ~L146) compares a BP1HP/BP1LP section max against |H(jω₀)| — same mismatch, per-section.
+- **Updated:** 2026-10-03
 
 ### FS-016 — Auto-pairing review: all types, esp. BP/BR; Q < 0.5 pairs
 - **State:** PROPOSED
