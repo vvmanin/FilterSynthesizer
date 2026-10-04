@@ -16,8 +16,8 @@ chapter-breaks: no
 
 FilterSynthesizer turns an active-filter specification into buildable
 sections: component values on standard E-series parts, a schematic for each
-section, and a PDF report. It assumes you know your filter approximations; it
-takes care of the rest.
+section, an LTspice simulation of the whole cascade, and a PDF report. It
+assumes you know your filter approximations; it takes care of the rest.
 
 **Start it** one of two ways:
 
@@ -31,14 +31,17 @@ takes care of the rest.
 **What you will build.** This guide follows one filter from start to finish —
 a 5th-order Butterworth low-pass with a 2 kHz corner and a passband gain of
 1.5 V/V — and every number and picture in it comes from that run. At the end
-you will have a bill of materials and a schematic for each section, and a PDF
-report.
+you will have a bill of materials and a schematic for each section, an LTspice
+zip and a PDF report.
 
-![The app on first launch: the specification on the left, five tabs across the top.](img/01-first-run.png)
+![The app on first launch: the specification on the left, four tabs across the top.](img/01-first-run.png)
 
-> [!note] The five tabs are a pipeline, not a menu: each works on what the
+> [!note] The four tabs are a pipeline, not a menu: each works on what the
 > previous one produced, so go left to right. Change the specification in the
-> first three tabs, where it costs nothing — not after solving hardware.
+> first two tabs, where it costs nothing — not after solving hardware.
+
+Boxes with a blue border hold the controls that change the design; the amber
+box in the Topology tab is where you pick a result.
 
 # 1. Specify the filter
 
@@ -59,7 +62,7 @@ Leave the other two boxes as they are:
 
 ![The worked example's specification, in two halves of the sidebar.](img/02a-sidebar-type.png) ![](img/02b-sidebar-freq.png)
 
-**You should now see** the title *Filter Synthesizer v1.0.3 - Butterworth
+**You should now see** the title *Filter Synthesizer v1.1.0 - Butterworth
 Lowpass*, and the plots on the first tab redrawn a moment after each edit.
 
 # 2. Check the approximation before you build it
@@ -69,13 +72,13 @@ The **Response Plots** tab shows the filter you specified. The passband sits at
 at the 2 kHz corner. Under the plots, the app reports the calculated stopband
 edge for the 40 dB target: 5.0122 kHz.
 
-![Tab 1: flat at +3.52 dB, and down to the red −α_max line at the 2 kHz corner.](img/03-magnitude.png)
+![Response Plots: flat at +3.52 dB, and down to the red −α_max line at the 2 kHz corner.](img/03-magnitude.png)
 
-The **Roots & Transfer Function** tab lists the poles. Normalized to the
-corner, a Butterworth's poles lie on the unit circle: here one real pole at −1
-and two complex pairs.
+At the end of the same tab, the grey **Roots & Transfer Function** frame lists
+the poles: open **Root Locations**. Normalized to the corner, a Butterworth's
+poles lie on the unit circle: here one real pole at −1 and two complex pairs.
 
-![Tab 2: five poles, one real and two complex pairs. The real pole is what the next chapter deals with.](img/04b-roots.png)
+![Root Locations: five poles, one real and two complex pairs. The real pole is what the next chapter deals with.](img/04b-roots.png)
 
 This is the moment to iterate. A different order or corner costs nothing now;
 after the next chapters, every change means solving the hardware again.
@@ -115,16 +118,18 @@ for section 1, a 3rd-order low-pass with gain; `2LP-unity` for section 2.
 
 ![The Topology tab before solving. Section 1: order 3, fp = f₀ = 2 kHz, Q = 0.618. Section 2: order 2, Q = 1.618.](img/07-topology-top.png)
 
-For this run, change nothing. The settings expander holds the circuit family
-(VCVS, i.e. Sallen-Key), the op-amp model (Ideal), the component limits
-(68 pF–10 nF, 300 Ω–2 MΩ) and the E-series (E12 capacitors, E48 resistors) —
-the User Manual, §3.5, covers each one. **Convergence Settings** at the top of
-the tab matters only when a solve comes back empty.
+For this run, change nothing. Leave **Batch mode** off: it shares one op-amp
+and one set of component limits between all sections, which you do not need
+here. The settings expander holds the circuit family (VCVS, i.e. Sallen-Key),
+the op-amp model (Ideal), the component limits (68 pF–10 nF, 300 Ω–2 MΩ) and
+the E-series (E12 capacitors, E48 resistors) — the User Manual, §3.4, covers
+each one. **Convergence Settings** at the top of the tab matters only when a
+solve comes back empty.
 
 Press **Solve section** in section 1. The solve runs in the background: the
 button greys out, a caption says *Solving…*, and the other sections and tabs
 stay usable. It takes from a few seconds to about a minute, depending on the
-machine.
+machine. Sections solve in parallel, so you could start section 2 right away.
 
 ![A solve in progress. Other sections and every other tab stay usable meanwhile.](img/10-solving.png)
 
@@ -143,9 +148,9 @@ produces candidates; only a pick chooses one.
 
 The pick lists the parts and draws the schematic, every part labelled with its
 value. Here it is an RC pole (1R1, 1C1) in front of a Sallen-Key stage whose
-gain, 1 + R5/R6 = 1 + 27.4k/56.2k = 1.4875, is the 1.488 V/V in the table.
+gain, 1 + R5/R6 = 1 + 27.4k/53.6k = 1.511, is the 1.511 V/V in the table.
 
-![Section 1's schematic. In the app, ⬇ SVG under it saves the drawing.](img/13-schematic.png)
+![Section 1's schematic. ⬇ SVG and ⬇ PNG under it save the drawing.](img/13-schematic.png)
 
 > [!warning] A solved section is not a chosen section. Until every section has
 > a picked row, the cascade view and the report stay blocked.
@@ -154,37 +159,54 @@ gain, 1 + R5/R6 = 1 + 27.4k/56.2k = 1.4875, is the 1.488 V/V in the table.
 
 The same three moves: **Solve section** in section 2, wait, tick **row 0**.
 Section 2 is a unity-gain Sallen-Key, `2LP-unity` — two resistors and two
-capacitors. In this run: R2 = R3 = 30.1 kΩ, C3 = 820 pF, C4 = 8.2 nF.
+capacitors.
 
 At the foot of the tab, **Overall filter** now shows the gain of the whole
-cascade: about 1.49 V/V against the 1.5 specified. The 0.8 % difference is
-resistor snapping in section 1. A yellow box there would mean the output is
-inverted; two non-inverting Sallen-Key sections leave none.
+cascade: about 1.51 V/V against the 1.5 specified. The 0.7 % difference is
+resistor snapping in section 1, whose gain came out at 1.511 instead of 1.5. A
+yellow box there would mean the output is inverted; two non-inverting
+Sallen-Key sections leave none.
 
 # 6. Check what you actually built
 
 The **Resulting Response & Schematic** tab rebuilds the whole cascade from the
 parts you picked. Blue is the design, red is what the snapped parts do, and
 wherever the two separate you see the price of E-series values. Here they
-overlap: the realized passband is +3.45 dB against +3.52 dB designed.
+overlap: the realized passband is +3.58 dB against +3.52 dB designed.
 
 ![The realized cascade (red) on top of the design (blue).](img/14-cascade-bode.png)
 
 Then tolerances. **Monte-Carlo tolerances** rebuilds the cascade 2000 times
 with every resistor and capacitor varied at random. For this run choose a
-pessimistic spread: resistor **tol %** 5, **Capacitor tol (%)** 10,
-**Distribution** Uniform (±tol), **Envelope** min–max — then press **Run
-Monte-Carlo**. The grey band covers every run, and the caption gives the
-DC-gain spread: 3.14 … 3.75 dB. The seed is a control too, so the same inputs
-always give the same band.
+plain spread: resistor **tol %** 2, **Capacitor tol (%)** 5, **Distribution**
+Uniform (±tol), **Envelope** min–max — then press **Run Monte-Carlo**. The grey
+band covers every run, and the caption gives the DC-gain spread: 3.45 …
+3.71 dB around the nominal 3.58 dB. The seed is a control too, so the same
+inputs always give the same band.
 
-![2000 runs with 5 % resistors and 10 % capacitors: DC gain between 3.14 and 3.75 dB.](img/15-monte-carlo.png)
+![2000 runs with 2 % resistors and 5 % capacitors: DC gain between 3.45 and 3.71 dB.](img/15-monte-carlo.png)
+
+On a decibel axis the band is hard to see. Tick **Linear Mag.** above the plot:
+the spread opens up where it matters, around the corner, where tolerances move
+the response from about 1.25 to 1.6 V/V.
+
+![The same band on a linear axis: the tolerances matter most just below the corner.](img/15b-monte-carlo-linear-scale.png)
 
 # 7. Take the design with you
 
-At the foot of the same tab, **Generate Report** builds an A4 PDF: the
-specification, the transfer function, the pole–zero map with the section
-pairing, a page per section with its schematic and BOM, and the
+**LTspice.** Just above the report, the **LTspice export** block lists each
+section with the SPICE model its op-amp will use — the app's own generic model
+for an Ideal op-amp — and **⬇ Download LTspice files (.zip)** saves the whole
+cascade as LTspice schematics and netlists, nominal and Monte-Carlo, with a
+README of the values LTspice should show. With Ideal op-amps the exported
+cascade matches the app's curve exactly. The User Manual, §9, covers real
+op-amp models.
+
+![The LTspice export: one row per section, and the zip.](img/60-ltspice-export.png)
+
+**The report.** At the foot of the same tab, **Generate Report** builds an A4
+PDF: the specification, the transfer function, the pole–zero map with the
+section pairing, a page per section with its schematic and BOM, and the
 design-versus-realized Bode plot with the Monte-Carlo band. Everything is
 ticked by default. Press **📄 Generate Report**, then **⬇ Download PDF**.
 
@@ -192,15 +214,18 @@ ticked by default. Press **📄 Generate Report**, then **⬇ Download PDF**.
 
 Change anything afterwards and a caption says the PDF is out of date — press
 **Generate Report** again. Each schematic can also be saved on its own with
-**⬇ SVG**, in the Topology tab and at the foot of this one.
+**⬇ SVG**, in the Topology tab and in **Section schematics** on this one.
 
 # Where to go next
 
 The User Manual picks up where this guide stops:
 
-- **§3** — every control, tab by tab, with its default.
+- **§3** — every control, tab by tab, with its default — including the
+  delay-optimized responses (Bessel, Equiripple Delay) and entering your own
+  transfer function (Custom H(s)).
 - **§4** — choosing between VCVS, MFB and AM for a section.
 - **§5** — real op-amps, and what they change.
 - **§6** — every message the app shows, and what to do about it. Start there
   when a solve comes back empty.
 - **§8** — what each page of the report contains.
+- **§9** — the LTspice export, and importing a vendor's op-amp model.

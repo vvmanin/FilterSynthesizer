@@ -269,6 +269,7 @@ def main():
         "--server.headless=true",
         "--server.port", str(port),
         "--browser.gatherUsageStats=false",
+        "--client.toolbarMode=viewer",      # no Deploy button (as .streamlit/config.toml)
     ]
     from streamlit.web import cli
     sys.exit(cli.main())

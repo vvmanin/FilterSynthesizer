@@ -29,6 +29,8 @@ h1,h2,h3,h4{ line-height:1.22; break-after:avoid; }
 main>h1{ font-size:20pt; margin:0 0 .7em; padding-bottom:.28em;
          border-bottom:2px solid var(--accent); break-before:page; }
 main>h1:first-child{ break-before:avoid; }
+body.flow main>h1{ break-before:auto; margin-top:1.4em; }   /* chapter-breaks: no */
+body.flow main>h1:first-child{ margin-top:0; }
 h2{ font-size:14pt; margin:1.7em 0 .5em; }
 h3{ font-size:11.5pt; margin:1.25em 0 .35em; color:#2b3138; }
 h4{ font-size:10.5pt; margin:1em 0 .3em; color:var(--muted);

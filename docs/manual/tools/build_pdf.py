@@ -195,10 +195,12 @@ def render(md_path: Path, root: Path, version: str) -> tuple[str, dict]:
     </section>
     """ if meta.get("cover", "yes").lower() not in ("no", "false") else ""
 
+    # front matter `chapter-breaks: no` -> chapters flow on (style.css body.flow)
+    flow = meta.get("chapter-breaks", "yes").lower() in ("no", "false")
     doc = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>{title}</title>
 <style>{style}</style></head>
-<body>{cover}<main>{html}</main></body></html>"""
+<body{' class="flow"' if flow else ''}>{cover}<main>{html}</main></body></html>"""
     meta.setdefault("title", title)
     return doc, meta
 

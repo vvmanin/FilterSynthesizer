@@ -43,7 +43,7 @@ SHOTS = "docs/manual/SCREENSHOTS.md"
 # Fields whose change means a human must re-read the prose around the control.
 WATCH = ("label", "default", "min", "max", "options", "help", "panel", "widget")
 
-BACKTICKED = re.compile(r"`([A-Za-z_][A-Za-z0-9_*]*)`")
+BACKTICKED = re.compile(r"`([A-Za-z_*][A-Za-z0-9_*]*)`")   # *_svg_* too
 
 
 def _ident(rec):
@@ -126,7 +126,10 @@ def report(root: Path, accept=False):
         if diffs:
             changed[k] = diffs
 
-    undocumented = [k for k in live if k not in documented and live[k].get("key")]
+    # "a | b": one widget whose key is one of two (ui_inventory resolves a local
+    # `key = "a" if c else "b"`) -- documented when both are.
+    _doc = lambda k: k in documented or (" | " in k and all(x in documented for x in k.split(" | ")))
+    undocumented = [k for k in live if not _doc(k) and live[k].get("key")]
     ghost = [k for k in documented if k in snap and k not in live]
     touched = set(removed) | set(changed) | set(added)
     stale_figs = {fid: [c for c in ctl if c in touched]
@@ -245,6 +248,8 @@ def main(argv=None):
     ap.add_argument("--accept", action="store_true",
                     help="adopt the live UI as the new snapshot (do this WITH the doc edits)")
     a = ap.parse_args(argv)
+    if hasattr(sys.stdout, "reconfigure"):     # Windows console (cp1252) chokes on Ω, µ, —
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     root = Path(a.root).resolve() if a.root else INV.find_root()
     return report(root, accept=a.accept)
 

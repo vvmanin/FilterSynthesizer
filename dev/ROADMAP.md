@@ -139,8 +139,6 @@ first.
 | FS-012 | AI integration (external API/MCP or built-in assistant) | P2 | PROPOSED | plan xhigh / build high | FS-011 (soft) |
 | FS-013 | All-pass (phase) responses + all-pass cells | P3 | PROPOSED | max | FS-006 (soft) |
 | FS-014 | Topology family expansion — research | P3 | PROPOSED | max | — |
-| FS-015 | Topology tab Overall filter: BP values off (validate BR) | P2 *(s)* | VALIDATING | plan high / build medium | — |
-| FS-016 | Auto-pairing review: all types, esp. BP/BR; Q < 0.5 pairs | P2 *(s)* | VALIDATING (built 2026-10-03: unrealizable-pairing fixes only; optimality criteria deferred) | plan xhigh / build high | — |
 | FS-017 | Manual pairing override: unreliable clicks | P2 *(s)* | PROPOSED | medium | — |
 | FS-018 | Op-amp data: provenance field + review of shipped parts | P2 *(s)* | PROPOSED | medium | — |
 | FS-019 | Wider op-amp library: first batch + standing process | P3 *(s)* | PROPOSED | low | FS-018 (hard) |
@@ -151,13 +149,10 @@ first.
 | FS-025 | Gaussian and other non-overshooting responses | P3 *(s)* | PROPOSED | plan xhigh / build high | FS-006 (hard), FS-024 (soft) |
 | FS-026 | LTspice transient export (step; impulse from the step) | P2 *(s)* | PROPOSED | high | FS-008 (hard, done), FS-024 (hard) |
 | FS-027 | Realized response with inter-stage loading (feasibility first) | P3 *(s)* | PROPOSED | plan high / build high | FS-008 (hard, done) |
-| FS-028 | Topology solver performance — analysis first | P2 *(s)* | VALIDATING (S2-1, S2-2, S2-2b, S2-4 step 1 + parallel sections built; S2-3, S2-4 steps 2–3 open) | analysis xhigh / build per finding | — |
 | FS-030 | Topology tab: section spec resets to default when a solve finishes | P2 *(s)* | PROPOSED | plan high / build medium | — |
 | FS-031 | Group-delay equalizer: all-pass stages appended to a designed filter | P3 *(s)* | PROPOSED | plan xhigh / build high | FS-013 (hard, realization stage only), FS-006 (done) |
 | FS-032 | Magnitude correction of an existing system from measured Bode points | P3 *(s)* | PROPOSED | plan max / build xhigh (per stage) | FS-007 (done); FS-014 (hard, realization stage only); FS-031 (soft) |
-| FS-033 | Near-notch sections (f_z close to f₀) classified as pure notch | P0 *(s)* | VALIDATING (built 2026-10-01: Q-aware notch rule + dual 2N / LPn-HPn solve ranked by snap cost; note `dev/FS-033_near_notch_design_note.md`) | plan high / build medium | — |
 | FS-034 | SPICE row checker: simulate a section's top BOM rows with vendor models | P4 | PROPOSED | plan high / build high | FS-008 (done), FS-029 (done) |
-| FS-036 | QA & benchmark harness (`dev/qa/`) | P2 *(s)* | VALIDATING (built 2026-10-02) | plan high / build high | — |
 
 *(s)* = suggested priority, awaiting maintainer confirmation.
 
@@ -170,10 +165,8 @@ optional report plot, reuses FS-006's detail plot) → FS-024 (new time-domain
 computation for ideal and realized, UI + report) → FS-025 (new approximation
 families; research first).
 
-Defect items FS-015/016/017/030 have no hard dependencies and block nothing; slot
-them between feature items. File-overlap notes (to avoid rework, not
-blockers): FS-016 before taking BOM baselines for other items' validation (it can change
-stage assignments); FS-007 gates today's pairer gaps (FS-016 may relax its gate rows).
+Defect items FS-017/030 have no hard dependencies and block nothing; slot
+them between feature items.
 
 Op-amp data items: FS-018 before FS-009 (it defines how the noise fields are
 sourced) and before FS-019 (additions follow its curation rule).
@@ -278,53 +271,6 @@ answered against FS-031's equalizer — plan FS-031 first.
 - **Validation:** Survey reviewed and accepted by the maintainer.
 - **Notes:** Each topology this survey leads to must pass FS-008's rule for new cells (LTspice IR entry, then a template in `LTspice_Library/cells/` or flagged as auto-layout until one ships).
 - **Updated:** 2026-09-29
-
-### FS-015 — Topology tab Overall filter: BP values off (validate BR)
-- **State:** VALIDATING
-- **Priority:** P2 (suggested — not critical, per maintainer)
-- **Effort:** plan high / build medium
-- **Tiers:** D
-- **Depends on:** —
-- **Contracts:** §5 (overall sign/gain = product of sections)
-- **Files:** `topology_tab.py` (`_render_overall`, ~L1869), possibly `pairing_utils.compute_stage_gains`
-- **Goal:** The Overall filter section of the Topology tab reports the correct cascade values for band-pass filters, and is confirmed correct for band-reject.
-- **Scope:** In — find which overall values deviate for BP (gain, f0/fc, Q/bandwidth…) and why; fix the overall computation/display only. Confirm BR (and spot-check LP/HP) is correct. Out — per-section solutions and BOMs must not change.
-- **Validation:** For 2–3 BP designs (even/odd order, gained/unity) and 2 BR designs: overall values match (a) the Response Plots target and (b) the product of the realized section responses evaluated independently (scratch check); per-section BOMs identical to baseline.
-- **Open questions:** — (resolved 2026-10-03, see Notes)
-- **Notes:** Isolated to the Overall section — can land any time without touching other items.
-  - Plan (2026-10-03, agreed with maintainer). BR: preliminary verdict OK, LP/HP/BR left as is. BP root cause: the BP branch borrowed the LP/HP ratio estimate `target × ∏(realized section peak) ÷ ∏(ideal Ki·Q/ω₀)`. It is wrong for BP because (1) stagger-tuned sections: a realized f₀/Q shift moves each section peak off its design f₀ and the cascade peak does not scale like the product of section peaks; (2) BP1HP/BP1LP: the realized section value is the section MAX, the ideal is |H(jω₀)| — the absorbed real pole pulls the max off ω₀, so the ratio ≠ 1 even with perfect parts; (3) the anchor is the Tab-1 target, not a measurement (per-section Ki overrides change the design gain).
-  - Fix: the BP branch measures the cascade directly, the same curves the Resulting Response tab draws. Realized passband gain = largest hump of the RED curve (product of the selected BOMs' responses, `response_tab._section_H` + `hw_plots.realized_response`); design passband gain = max of the BLUE curve (`response_tab._build_ideal`, includes Ki overrides); show both + deviation in dB, cascade sign and Tab-1 target in the caption. Window = the outermost span where blue ≥ its max − 3 dB, slightly widened (keeps the AM finite-Ro HF hump and GBWP edge out); dense log grid + bounded refinement of the peak. No blue-hump equality check (maintainer: silent). Memoized on picks + op-amp + Ki. Per-section `_dc`, BOMs, report unchanged.
-  - Built 2026-10-03. Found during validation: a narrow band-pass can pair into LP + HP sections only (Chebyshev n2, 1-1.2 kHz), which never reached the BP branch and was read by the LP/HP DC path (1.007 V/V shown, cascade peak 1.18) -- the BP branch now also keys on `hw_filter_type == "Bandpass"`.
-  - Validation (scratch AppTest script driving the real app, snap-cost-best BOM per section; independent check = 400k-point sweep of the same red curve over f0min/4..4*f0max). Realized readout = independent max to >= 5 digits in every case: Cheb BP n2 narrow MFB ideal 1.1407 (old estimate 1.0104); Ell BP n3 g2 MFB ideal 2.2752 (old 2.0122); same with row 0 of the default sort 6.6893 (old 3.3562); Ell BP n3 AM typical op-amp 1.8224 (old 1.9749; HF hump kept out of the window); Cheb BP n4 g10 AM typical 11.5963 (old 9.8578); BW BP asym 2/3 + absorb (2BP1HP-MFB) MFB ideal 1.0263 (old 1.0407); Ki override x1.5 on Ell n3 S1: design 2.0 -> 3.0, realized 3.5147 = sweep. Design (blue) max = 1.0000 / 2.0000 / 10.0000 = Tab-1 target without overrides. BR (unchanged): Cheb BR n2 g2 VCVS: LF 1.9156 = swept 1.91562 exact; HF 1.9112 vs swept plateau 1.9040 (+0.4 %: the median window starts at 3*fz, not fully settled) -- noted, left as is. Per-section BOMs untouched by construction (only `_render_overall` + two new read-only helpers). QA smoke: design / LTspice FAIL rows are the pinned FS-016 findings and a harness bug writing vendor-model paths as `.lib` text (separate task), not this change.
-  - Out of scope, noted: the report's per-section gain error (`report_ui.py` ~L146) compares a BP1HP/BP1LP section max against |H(jω₀)| — same mismatch, per-section.
-- **Updated:** 2026-10-03
-
-### FS-016 — Auto-pairing review: all types, esp. BP/BR; Q < 0.5 pairs
-- **State:** VALIDATING (built 2026-10-03 — scope limited by the maintainer to pairings that are not realizable; "optimal" distribution criteria not addressed)
-- **Priority:** P2 (suggested — not critical; manual re-pair is the workaround)
-- **Effort:** plan xhigh / build high
-- **Tiers:** A (pairing, classifier); D (`app.py` Section f0, `topology_tab` MFB default for BP1LP/BP1HP)
-- **Depends on:** —
-- **Contracts:** §2 (stages feed classification), §6 (Stage schema — keep unchanged)
-- **Files:** `pairing_utils.py` (`auto_pair_bandpass` L75, `auto_pair_bandreject` L212, `auto_pair_stages` L327, real-pole absorption), `filter_solvers.py`/`filter_engine.py` only if Q < 0.5 pairs originate in the prototype
-- **Goal:** Auto-pairing produces a sound section distribution for every filter type — correct pole-zero proximity pairing, sensible section ordering, valid real-pole absorption — and never emits a "2nd-order pair" made of two real poles (Q < 0.5) unless deliberately.
-- **Scope:** Phase 1 (investigation, no code): a test matrix over types × responses × orders; record every non-optimal distribution, invalid absorption and Q < 0.5 pair with its spec in `Notes`; determine whether Q < 0.5 pairs come from pairing or from the approximation stage. Phase 2 (fix): targeted changes per finding. In — LP/HP/BP/BR auto-pairing. Out — manual override UI (FS-017); Stage dict schema changes.
-- **Validation:** Re-run the Phase-1 matrix: every recorded case now correct; for designs that were already correct, stage assignments unchanged (scratch diff over the matrix); pairing results feed Topology without new `pending` sections.
-- **Open questions:** ~~Criteria for "optimal" per type?~~ Deferred (maintainer, 2026-10-03: fix only unrealizable pairings). ~~Two real poles: one 2nd-order section or split?~~ Combined into one Q < 0.5 2nd-order section (maintainer: works). Real-pole absorption rule (maintainer): the real pole goes to the **realizable** section with the **lowest Q**; BP1LP / BP1HP count as hosts (MFB-only today; other families to follow).
-- **Notes:** Can be split into two sessions per phase. Changes stage assignments → retake BOM baselines afterwards.
-  - **Phase 1 findings (2026-10-03)** — scratch sweep engine → `auto_pair_stages` → app Section build → `section_kind`, each stage's true roots vs what the dispatched cell realizes; 4 092 designs (BW/CH/IC/EL × LP/HP/BP/BR, sym orders 1–10 / 1–8, asym 1–6 × 1–6, bands 1–1.2 kHz / 1–2 kHz / 50–2500 Hz, stopband-rolloff / pb_even mods, absorb on/off) + 276 Bessel / Equiripple-Delay runs. LP / HP: all realizable. Five defects, all BP/BR:
-    1. BP, absorb on: real pole joined an HPn stage with no origin zero → (s²+wz²)/cubic, gated to 3HPn (realizes s(s²+wz²)) — silently mis-solved. IC/EL asym BP, odd total order (e.g. IC BP LP3/HP4 1–2 kHz As 40/40). Cause: host = lowest-w0 stage.
-    2. BP, absorb on: leftover origin zero + real pole dumped onto an LPn stage → s(s²+wz²)/cubic with wz > w0, gated to 3LPn (drops the s). IC/EL asym BP with HP order 1 (e.g. IC BP LP2/HP1 1–2 kHz).
-    3. BP with ≥ 2 real poles: only `real_poles[0]` used, the rest lost (wide band odd n; asym odd/odd; CH n1 low α; delay classic mapping). E.g. BW BP n3 50–2500 Hz, CH BP n1 1–2 kHz α 0.1.
-    4. Same with absorb on and no complex stage: pairer crash `min() iterable argument is empty` (BP n1, both poles real).
-    5. BR real+real stage: Section `f0` = |p₁| while `Q` = the pair's q_eff → realized poles wrong (BW BR n1 50–2500 Hz: true 52 / 2398 Hz, realized ~7.6 / 353 Hz).
-  - **Fix (2026-10-03)** — `pairing_utils`: `stage_realizable` (the gate's numerator set per order), `stage_w0_q`, `_real_pair_w0_q`; `auto_pair_bandpass` combines real poles lowest+highest into real+real stages, places origin zeros only where the stage stays realizable, and absorbs a lone real pole into the lowest-Q realizable complex host (an unplaced residual origin zero travels with it; no host → 1st-order stage); `classify_section` / `_family_from_features` treat a real+real stage as a biquad (w0 = √(p₁p₂), 1 origin zero → BP). `app.py`: Section `f0_hz` and `_stage_rho` from `stage_w0_q`. `topology_tab._section_settings`: BP1LP / BP1HP sections default the family radio to MFB (set when the section first takes that family; a later user choice stays). `dev/fs007/check_custom_tf.py` §9 updated (the pinned BP case now pairs cleanly; the pre-flight's own flag is checked on an injected bad pairing).
-  - **Validation (2026-10-03)** — sweep re-run: 0 findings (left: Elliptic n1 BP/BR engine error, unreachable — sidebar min order 2; delay "band too wide" refusals). Assignment diff vs HEAD over the 3 312 previously clean designs: 196 changed, all BP with absorb on, every one now on a strictly lower-Q host (the rule); LP / HP / BR unchanged. AppTest: the four repro designs pass roots / cascade / spec checks; BP1LP section opens on MFB, a switch to VCVS persists. `check_custom_tf.py` pass; QA smoke pass (spec / cascade all pass, was lost_pole).
-  - **Follow-up (2026-10-03)** — Custom H(s): the gate "Bandpass / Band-Reject with ≥ 2 real poles" removed (`custom_tf.gate_structure`); `preflight_pairing` also flags any stage `stage_realizable` rejects (the safety net for arbitrary roots); `check_custom_tf.py` §8 / §9 updated (2-real-pole BP / BR pass with every pole paired; injected HPn3-without-origin flagged). QA harness: new pairing flag `unrealizable` (`analysis.py`, from the stage's true roots); the *Pairing flags* verdict row is FAIL on `unrealizable` / `lost_pole` / `lost_zero` / `pending`; `matrix.PINNED` = five FS-016 regression guards (the BP n1 exception, the BP n3 lost pole, the BR `br_real_f0`, and the two misroutes IC BP a34 / a21 1–2 kHz abs) — the IC HP n5 `origin_on_jw` pin dropped (a valid 3HPn, not a defect). Checked: the guards reproduce with the HEAD pairer (exception / `lost_pole` / `unrealizable`) and read "not reproduced" now; QA smoke 0 worse vs the previous run.
-  - **Follow-up 2 (2026-10-03, maintainer report)** — Custom H(s) LP/HP with two real poles still got two 1st-order sections: the generic pairer (`auto_pair_stages`) never combined real poles. It now combines them lowest+highest into real+real stages like the BP / BR pairers (standard LP/HP approximations have ≤ 1 real pole, so their assignments are unchanged — sweep re-run 0 findings, assignment diff vs HEAD identical to before). Checked: AppTest Custom roots LP (poles −1.25, −0.93, −0.59 ± 0.24j, −0.23 ± 0.58j) → one LP section f0 = 1078 Hz Q = 0.495 + two complex sections, roots / cascade pass, absorb on and off; `check_custom_tf.py` pass; QA smoke 0 worse.
-  - Seen, not fixed: the picture design's new 3LPn host hits the known `KeyError: '3LPn-atten'` (QA 2026-10-02 §4.1) with VCVS at a sub-unity section gain. The generic LP/HP pairer (`auto_pair_stages`) still absorbs into the lowest-Q pole without a realizability test (no failing case found).
-  - Inputs from FS-007 planning (code reading, 2026-09-27; confirm in Phase 1 — details in `dev/FS-007_custom_tf_design_note.md` §13): `auto_pair_bandpass` uses only `real_poles[0]` (`pairing_utils.py` L140), so further real poles vanish from the cascade — a wideband odd-order BP gives two real poles per real prototype pole when |r|·B > 2ω₀; it also dumps leftover origin zeros into the lowest stage even if that stage holds a jω pair (L151-162), which `classify_section` then ignores; for a BR real+real stage `hw_sections.f0_hz` comes from p₁ alone while Q = q_eff (app.py L1826), and `_stage_rho` uses the same ω₀; the Tab 3 pairing signature (app.py L1488) omits `filter_type`. FS-007 gates these cases for Custom designs until fixed here.
-- **Updated:** 2026-10-03
 
 ### FS-017 — Manual pairing override: unreliable clicks
 - **State:** PROPOSED
@@ -475,30 +421,6 @@ answered against FS-031's equalizer — plan FS-031 first.
 - **Notes:** Found while planning FS-008 (design note §10, §16 with the feasibility sketch). Maintainer: open the item; build decision after the feasibility step.
 - **Updated:** 2026-09-28
 
-### FS-028 — Topology solver performance — analysis first
-- **State:** VALIDATING (Stage 1 analysis done 2026-09-28: `dev/FS-028_solver_performance_analysis.md`, accepted with the path B → D + F → E → orchestrator. Stage 2: **S2-1 compile-once cell kernels built 2026-09-30** (note §11), waiting on the maintainer's checks — bundled-exe run of one design. **S2-2 batched LM solver core built 2026-10-01** (note §12; F left out until `SENSITIVITY_SCORE.md` §8.1 is settled): waiting on the maintainer's acceptance of the §6 deviations (best snap cost higher in 6 / 7 sections, list in §12) and a bundled-exe run. **S2-2b batched snapper built 2026-10-01** (note §13; chosen over S2-3 after a post-S2-2 profile: the snapper was the largest share of the heaviest sections): all resistor combos of a solution in one response call; total CPU −28 % (ideal) / −20 % (TL072), snapper 22× less; every snapped list and top-5 BOM identical on the 62 runs; AM cells differ from HEAD at 1 ulp (one near-tied R7/R8 pick in a full-snap A/B), accepted by the maintainer 2026-10-01. Batching `score_solution`'s responses measured 1.4–6× slower — not pursued (note §13). ZM path tolerance / iteration cap stay as they are (maintainer, 2026-10-01). S2-3 learned seeds (deprioritised: ≈ 0.1 s per section). **S2-4 step 1 — Batch mode built 2026-10-01** (no self-adjustment; maintainer's split): a Topology-tab toggle (default off; manual mode unchanged and preserved) shows one shared op-amp + component envelope above all sections, each section keeps its family / gain / family options and its own row pick; *Solve all sections* queues every unsolved section; no pre-pick; switching off restores each section's own settings. **Parallel sections built 2026-10-01**: every section solve (manual or batch) runs in a shared persistent process pool of cores − 1 workers (spawned on demand; more sections than workers queue and show *queued*; queued solves of a stale cascade are cancelled; `FS_SOLVER=trf` keeps the old thread + gate); `tf_derivation_v2._save_blob` retries / skips a cache replace that Windows refuses while another process reads the file. **Idle polling removed 2026-10-01**: the Topology tab body re-ran every 2 s forever (`run_every` fragment), re-rendering every BOM table and schematic; with a 13-section design (Elliptic BP, prototype order 13) the app stayed busy while idle (server 13 % of a core). It now polls only while solves are pending (`render_topology_tab` registers the body fragment per full run with `run_every` = 2 s or None): idle 0.2 %. Waiting on the maintainer's check (incl. a bundled-exe run). Row choice and gain tuning stay manual (maintainer, 2026-10-01). S2-4 steps 2 (auto-adjustment / rescue) and 3 (SPICE-level row check) are under discussion — not opened. Tracked here until the maintainer assigns FS IDs)
-- **Priority:** P2 (suggested)
-- **Effort:** analysis xhigh / build per finding (each accepted optimization becomes its own item with its own effort)
-- **Tiers:** C (solvers, snapper, scoring), B (lambdify / TF cache), D (topology_tab job management, process pool)
-- **Depends on:** —
-- **Contracts:** §7 (performance notes — the starting point), §1 (cache keys, if derivation or caching changes)
-- **Files:** S2-4 parallel sections: `topology_tab.py` (`SOLVE_WORKERS`, `_solve_pool`, `_proc_submit`, `_submit`, `_job_state`, `_drain_finished`, batch status), `tf_derivation_v2.py` (`_save_blob` retry); `docs/CONTRACTS.md` §7, `docs/ARCHITECTURE.md`. S2-4 step 1: `topology_tab.py` (`settings_tag`, `_envelope_inputs`, `_rser_inputs`, `_set_opamp_choice`, batch helpers, `render_topology_tab`, `_render_section` / `_render_first_order` status + solve-all), `ui_components.py` (`_mem_widget` accepts `st.selectbox`), `response_tab.py` (`_eval_opamp`), `spice_ui.py` (`_part_model`), `report_ui.py` (`_section_env`); `docs/ARCHITECTURE.md`. S2-2: new `batched_lm.py`; `cell_kernels.py` (`load_batched`, `bind_rows`), `unified_solver_v2.py` (`_assemble_solution`, `cell_kit`, `batch_phase1` / `batch_phase3` / `batch_zm`, `harvest(merge_dup_hints)`, `run_synthesis` `_search` + `FS_SOLVER=trf` legacy path), `zero_manifold_solver.py` (`combo_starts`, `gate_combo`), `nonideal_solver.py` (`_correct_batch`, `_batch_worker`), `topology_tab.py` (job-runner comment only); `docs/CONTRACTS.md` §1/§7, `docs/ARCHITECTURE.md`; `dev/fs028/compare_s22.py` (new), `check_kernels.py` (batched replay), `bench_sections.py` (`snapped_q`), `fs028_common.py` (batched stages), `results/base_s21.json` (S2-1 reference, this machine), `s22_final.json` (S2-2 result; the next stage's reference); `s22_final_bv.json` / `s22_trfpath.json` are local-only cross-checks (gitignored, outcome in note §12). S2-1: new `cell_kernels.py`; `tf_derivation_v2.py` (`get_templates`, `design_cases`, `IDEAL_MODEL_REV`, `TARGETS`), `unified_solver_v2.py` (`worker_packs`, `_init_worker`, `_sens_funcs`, `apply_equalize` marks, `run_synthesis`), `zero_manifold_solver.py` (`assemble_cell_funcs`), `filter_synthesis.py` (snapper cases), `nonideal_solver.py` (in-process); `docs/CONTRACTS.md` §1/§7, `docs/ARCHITECTURE.md`; `dev/fs028/check_kernels.py` (new), `fs028_common.py` / `probe_pool.py` (follow the new API). Stage 1 writes only `dev/FS-028_solver_performance_analysis.md` and supplementary material under `dev/fs028/` (profiling/benchmark scripts, raw timings). Code read, not changed: `unified_solver_v2.py`, `zero_manifold_solver.py`, `nonideal_solver.py`, `discrete_snapper.py`, `scoring.py`, `filter_synthesis.py`, `solvability_probe.py`, `first_order_solver.py`, `tf_derivation_v2.py`, `topology_tab.py` (job management), `pool_utils.py` / `mp_fix.py`
-- **Goal:** Know where Topology-tab solve time goes and which changes would cut it, at what risk to result quality — before touching any solver code.
-- **Scope:** Stage 1 (this item, no production-code changes):
-  - a reproducible benchmark set (one design per family / section kind, VCVS / MFB / AM; cold vs warm TF cache; Fast / Balanced / Thorough presets) with baseline timings and top BOMs;
-  - a profile of where time goes per phase (probe, symbolic derivation / cache load, lambdify, Phase 1 multistart, Phase 3 / zero-manifold, non-ideal correction, snapping, scoring, process-pool startup and pickling);
-  - a ranked list of candidate optimizations, each with expected gain, effect on converged values/BOMs, risk (esp. the fragile PyInstaller multiprocessing path), effort, and how it would be validated. Candidates to assess include the open §7 lever (`nonideal_solver` tolerances), early termination / pruning of the multistart, caching or reusing work across sections and reruns, vectorization, and pool reuse.
-  Stage 2 (after maintainer review): accepted candidates are opened as separate FS items. Out — any change to synthesis results without an explicit, validated trade-off.
-- **Validation:** Stage 1 — the benchmark script runs from the repo root and reproduces the baseline within run-to-run noise; the maintainer reviews and accepts the analysis. Each Stage-2 item — same benchmark: time reduction measured, top BOMs identical to baseline (or deviations listed and accepted), `python verify.py` passes, bundled-exe run of one design. S2-2 (2026-10-01): `check_kernels.py` 80/80 (batched vs scalar replay ≤ 2.1e-14); `verify.py` passes; benchmark §6 per note §12 (best sens 3 better / 25 same / 0 worse, BOM counts equal, same 3 no-BOM sections; `FS_SOLVER=trf` bit-identical to S2-1 on all 62 rows); real wall 5–33× on one core vs 32 workers; app run from `build_venv` (Elliptic LP 5th order: the 2LPn-unity and Q = 10 sections solved in-app, no pool). S2-4 step 1 (2026-10-01): Topology tab only, no solver change; app run from `build_venv` — Butterworth LP 4th / 5th order (with a 1st-order section): Batch mode seeds the shared settings from section 1, *Solve all* gives every section its BOMs (one at a time), the SPICE export and schematic label follow the shared op-amp, switching off restores each section's own envelope / op-amp (a section whose own settings equal the shared ones reuses the cached result); `verify.py` passes. Parallel sections (2026-10-01): headless, the same sections solved serially and in a spawn pool (2 / 4 / 6 workers, incl. more sections than workers) give identical `snapped` / `continuous` results; 6 notch sections 2.16 s serial → 1.04 s parallel (≈ the slowest section, warm workers); in-app Butterworth LP 10th order, TL072H, Batch mode: 5 sections solving at once, all with BOMs in ≈ 6 s incl. cold workers; 5 workers spawned (≈ 230 MB each), not cores − 1; batch status no longer blanks between fragment ticks; `verify.py` passes. The *queued* label was not exercised in-app (it needs more sections than workers; `FILTERSYNTHESIZER_SOLVE_WORKERS=2` does it).
-- **Open questions:** none for Stage 1 (answered 2026-09-28): target = **wall time per section** (32 cores fully loaded during a solve); a change in converged values is acceptable **if ~10 ppm buys ≥ 2×**; favour **alternative approaches** over polishing the current solver, including the ML idea (learned fast analytical seed + the numerical solver for precision); the goal behind it is an **automated self-adjusting batch mode** (an orchestrator that re-tunes the initial values of any section that does not converge).
-- **Notes:** Stage 1 is analysis-only and touches no production code, so it can run alongside the `ACTIVE` FS-008 as a separate session without file conflicts (§1 analysis-only exception). FS-016 may change stage assignments — take BOM baselines after it lands, or re-take them. FS-027 has its own MC-timing concern; share the benchmark harness if useful.
-  - Stage 1 findings (note §0): 96 % of solve CPU is `scipy least_squares` (bounded TRF) in the Phase-1/3 multistarts — failing starts run to `max_nfev`, TRF stalls near bounds even 5 % from a root; about half of the 32-core wall is per-section fixed cost (symbolic re-derivation in dc_gain mode, run_synthesis + snapper + every non-ideal worker; per-worker lambdify; two fresh pools per solve). Tolerance-only loosening = 1.3×; + budgets ÷4 = 2.0× with 6 of 28 best BOMs changed. Presets barely move the 32-core wall (Fast 0.80×, Thorough 1.21× of Balanced); Thorough is not reliably better (3 better / 4 worse).
-  - Alternatives measured: log-space projected LM (4–5 evaluations from a nearby seed vs TRF's ~46); **batched (vectorized) LM in one process: Phase 1 ≈ 91× and Phase 3 ≈ 187× less CPU over the 31-section set — a section in ≈ 0.3 s median on one core vs ≈ 2 s on 32 cores today (est.)**; **learned seeds** (analytic polynomial in the log-targets + LM polish, 2–5 ms/target) reach the best valley of a full cold multistart on 3 cells; design-parametric residuals verified for all 80 cells (compile once). Quality: Phase-3 LM neutral; Phase-1 solver change alters valley sampling → pair with an explicit Phase-3 sensitivity polish (beat baseline on BP2-VCVS 2.32 vs 2.90).
-  - Proposed Stage-2 items (open on acceptance, IDs assigned then): (1) compile-once cell kernels — no per-section derivation / lambdify / pool start-up, results identical; (2) batched LM solver core + Phase-3 sensitivity polish, validated per note §6; (3) learned seeds (offline trainer, per-cell model versioned like the TF cache, online atlas); (4) self-adjusting batch orchestrator (note §8). Fallback quick win if Stage 2 waits: TRF budget trim (2.0×). Scoring interplay: settle `dev/SENSITIVITY_SCORE.md` §8.1 before any step optimises `sens_score` explicitly.
-  - Harness: `dev/fs028/` (`bench_sections.py` baseline + BOMs, `ab_lm.py` variants, `probe_*.py`, `make_tables.py`); baseline JSON `dev/fs028/results/baseline_balanced.json`. Windows spawn cost not measured here — run `probe_pool.py --workers 32` on the 32-core box.
-  - **S2-1 built 2026-09-30** (note §11): each cell derived once with symbolic targets (TF cache), kernels kept as generated source and exec'd by the Phase-1/3 workers, snapper and non-ideal correction derive nothing, non-ideal correction in-process. **All 31 benchmark sections bit-identical to HEAD** (every row, ideal and TL072). 32-core model 0.49× (ideal) / 0.37× (TL072) summed; real 32 spawn workers, fixed cost per section e.g. HPn3-VCVS TL072 30.4 → 5.0 s, LPn3-MFB TL072 22.5 → 3.9 s. Finding: design-parametric residuals (targets as arguments) re-sample the chaotic TRF multistart (same best BOM 20 / 31) — so the TRF path uses per-design residual kernels generated from the template (source-identical to the old code); the parametric kernels are built and verified for S2-2 / S2-3. 2026-10-01: fixed a start-up stall found in the app (kernel sources in the pool initargs serialized the Windows spawn of all 32 workers, minutes of near-idle CPU on 3rd-order sections) — packs now go through a per-run file; results still bit-identical. Left for S2-2: 32-worker spawn per section (~1.8 s floor), per-design Jacobian lambdify for 3rd-order VCVS notch cells (up to ~4–8 s on first solve of a design), serial non-ideal (≤ 2.2 s).
-- **Updated:** 2026-10-01
-
 ---
 
 ### FS-031 — Group-delay equalizer: all-pass stages appended to a designed filter
@@ -542,28 +464,6 @@ answered against FS-031's equalizer — plan FS-031 first.
 
 ---
 
-### FS-033 — Near-notch sections (f_z close to f₀) classified as pure notch
-- **State:** VALIDATING (built 2026-10-01, snapper follow-up 2026-10-02; design note `dev/FS-033_near_notch_design_note.md`, incl. recommendations; waiting on the maintainer's app check)
-- **Priority:** P0 (suggested — wrong realized response: §2 defines a wrong-results defect as P0; the maintainer may rate it lower)
-- **Effort:** plan high / build medium
-- **Tiers:** A (classification rule, `pairing_utils`), D (`topology_tab.section_kind` dispatch); C only if the LPn / HPn cells need help near f_z ≈ f₀
-- **Depends on:** —
-- **Contracts:** §2 (section classification: `|wz/w0 − 1| < wz_tol` → `notch`), §3 (dispatch gate)
-- **Files:** `pairing_utils.py` (`_family_from_features`, `classify_section`, `family_from_section`: `wz_tol=0.05`), `topology_tab.py` (`section_kind`, notch / LPn / HPn branches), `docs/CONTRACTS.md` §2; possibly `app.py` / Pairing tab where the family is stored on the section
-- **Goal:** A section whose finite zero is close to, but not at, its pole frequency is realized with a cell that places the zero where the design puts it, so its snap cost and realized response are as good as for any other LP-notch / HP-notch section.
-- **Scope:** In — the classification rule (tolerance and/or a Q-aware criterion), routing near-notch sections to the LPn / HPn cells, checking those cells near f_z ≈ f₀, and the CONTRACTS §2 text. Out — the pure-notch cells themselves, solver tuning.
-- **Validation:** Before / after classification table for: Elliptic BP (prototype order 13, maintainer's case), Elliptic BP / BR of lower orders, Butterworth / Chebyshev BR (their notch sections must stay `notch`), high-order elliptic LP / HP, a Custom H(s) with a rounded notch. Every reclassified section solved in VCVS / MFB / AM: snap cost and realized-vs-ideal error against the pure-notch result. `verify.py` passes.
-- **Open questions:** Which criterion: a tight relative tolerance (exact notches from the BR transform are equal to rounding, ~1e-9), or a Q-aware one (the zero shift that forcing f_z = f₀ makes, compared with the pole bandwidth f₀/Q)? Does anything rely on the 5 % (Custom H(s) rounding, the Pairing tab's notch display, `_response_metrics`)? Are the LPn / HPn cells solvable for (f_z/f₀)² ≈ 1.0x, or is their gain window too narrow there?
-- **Notes:**
-  - Reported 2026-10-01 (maintainer, Elliptic BP, prototype order 13, Batch mode): Section 10 (f₀ = 2 032 Hz, Q = 9.83, f_z = 2 108 Hz) was dispatched to `2N-AM` (`H(0) = H(∞)`); sections like it give solutions with very poor snap cost at higher Q.
-  - Cause: `pairing_utils._family_from_features` returns `notch` whenever `|wz/w0 − 1| < wz_tol = 0.05`; here f_z / f₀ = 1.037. A pure-notch biquad has `H(0) = H(∞)`, i.e. `K·wz²/w0² = K`, so it can only put the zero at f₀. Forcing it there moves the zero by 3.7 %, about 0.7 pole bandwidths at Q = 9.83, and the fit can only end poor. The error grows with Q, which matches "terrible at higher Q".
-  - Decisions (maintainer, 2026-10-01): (1) Q-aware rule — `notch` only if forcing the zero onto f₀ changes the response by < 1e-3 of the section gain: ε = |r − 1|·Q/√(1 − 1/(4Q²)), r = (f_z/f₀)² (`pairing_utils.notch_forcing_error`, `NOTCH_EPS`); Section 10: ε = 0.75 → LPn. (2) A sweep then showed narrow Butterworth / Inverse-Chebyshev BR designs whose nominal notch pair comes out of the engine 1e-4…7e-6 off the zero (clustered-root imprecision; ε 2e-3…4e-2): as LPn/HPn they lose their VCVS BOM (spread ≈ 1/|r − 1|). Maintainer: for such uneven cases solve both and let **snap cost** decide, not sens score. So a 2nd-order near-notch (old 5 % window, ε ≥ 1e-3; `near_notch_section`) is solved on its LPn/HPn cells **and** the family's 2N cells (`topology_tab._notch_cells`), two jobs merged (`_merge_results`), BOM table default sort = Snap cost, caption on the section (CONTRACTS §3 exception). Both cell sets snap against the true target, so the 2N rows carry their misfit in the snap cost.
-  - Built 2026-10-01: `pairing_utils` (rule, `near_notch_section`), `topology_tab` (dual job, merge, sort default, a near-notch line in the no-realization hint suggesting AM), CONTRACTS §2/§3, ARCHITECTURE. No cell / TF change (caches stay valid). 3rd-order near-notches, gated `pending` before, now go to 3LPn/3HPn.
-  - Checks (`python dev/fs033/check_near_notch.py [--solve]`): ε matches the dense-grid bound within 1 %; exact notches stay `notch`. Over 23 designs (Elliptic BP n = 5…13, Elliptic / Butterworth / Chebyshev / Inverse-Chebyshev BR incl. narrow, Elliptic LP / HP n = 9, 11, a Custom H(s)) 32 sections move notch → LPn/HPn; every reclassified section is a near-notch (dual-solved). Solved (ideal op-amp, Balanced): Section-10-like case VCVS snap cost 9.81 (2N) → 0.85 (2LPn), MFB no BOM → 0.64, AM 0.96 → 0.57; MFB gets 2LPn-MFB BOMs in most reclassified LPn sections where 2N-MFB had none; where the LPn/HPn cell has no BOM (|r − 1| ≲ 0.5 %, high Q) the 2N row stays and wins. Sections with Q ≳ 150 often have no BOM in any family (unchanged). `verify.py` and `dev/fs008/check_spice_export.py` pass.
-  - Follow-up 2026-10-02 (maintainer: "results became worse", Elliptic BP Section 6 VCVS f0 1973 Hz Q 44.7 fz 2041 Hz; Section 8 AM f0 1997 Hz Q 451 fz 2004 Hz): HEAD vs build on the same inputs gave the SAME solutions (identical sens sets; AM min sens 1.40 at HEAD too); only snap cost rose (S6 TL072 14.2 → 21.6, S8 ideal 28.4 → 38.3). Cause: the build had moved the snapper's Q point for near-notches from the notch skirt to f0 (the resonance peak). Reverted — the snapper keeps its 5 % window; with it the build reproduces HEAD's snap costs exactly. Also seen: S6 `2LPn-atten` has no BOM (2N rows unchanged); for AM `2LPn-AM` and `2N-AM` give identical rows (2N-AM already drives wz to fz).
-  - Not done (separate): `scoring._response_metrics` looks for the passband peak only below 0.8·f_notch, so the non-ideal penalty misses the Q bump of LPn with f_z/f₀ < 1.25 and of every HPn.
-- **Updated:** 2026-10-02
-
 ### FS-034 — SPICE row checker: simulate a section's top BOM rows with vendor models
 - **State:** PROPOSED
 - **Priority:** P4 (maintainer, 2026-10-01)
@@ -597,29 +497,6 @@ answered against FS-031's equalizer — plan FS-031 first.
   - Finding 2026-10-01 (FS-028 S2-4, reproduced in a minimal Streamlit 1.55 script): a keyed widget that is not rendered for a while and is then re-created during a **fragment-only** rerun comes back at the widget's own default (0, first option) and overwrites the value still held in session state — `st.session_state[k] = st.session_state[k]` does not prevent it. This matches suspect (1). The batch-mode envelope / op-amp widgets now use `ui_components._mem_widget` (a `_mem_` mirror passed back as `value` / `index`), which survives it. The per-section family / gain / option widgets do not yet. Also since 2026-10-01 the tab polls only while solves are pending (no permanent 2 s fragment), which removes most idle reruns.
 - **Updated:** 2026-09-30
 
-### FS-036 — QA & benchmark harness (`dev/qa/`)
-- **State:** VALIDATING (built 2026-10-02; waiting on the maintainer's runs, incl. one on a second PC)
-- **Priority:** P2 (suggested)
-- **Effort:** plan high / build high
-- **Tiers:** none (dev tooling); D only for the `launcher.py` switch `FILTERSYNTHESIZER_NO_BROWSER`
-- **Depends on:** —
-- **Contracts:** — (reads §2 / §3 / §6 behaviour, changes none)
-- **Files:** new `dev/qa/` (`reports/QA_2026-10-02.md`, `run_qa.py`, `preflight.py`, `pool.py`, `matrix.py`, `ui_map.py`, `tasks_ui.py`, `analysis.py`, `tasks_solve.py`, `tasks_export.py`, `tasks_build.py`, `checks.py`, `summarize.py`, `common.py`, `README.md`); `launcher.py` (one condition); `.gitignore`; `CLAUDE.md`, `docs/ARCHITECTURE.md`
-- **Goal:** One command that QA-checks and benchmarks the whole tool after a significant change, unattended, in minutes (smoke) to ~1–2 h (full) on a 16-core box, and stays usable as the roadmap lands.
-- **Scope:** In — preflight (interpreter, requirements bounds as warnings / compatibility evidence, missing-package prompt, cairosvg, LTspice, build prompt); the repo's check scripts (discovered); sidebar designs through the real `app.py` (Streamlit AppTest) with root-conservation / cascade / spec checks and FS-016 pairing flags; solve jobs captured from the Topology tab (patched `_proc_submit`, so the app's own routing) and solved in a kill-on-timeout worker pool over families × op-amps × envelopes × section gain override × family options; end-to-end flows (picks, Monte Carlo, the PDF report, the LTspice export run with `LTspice -b` / `-netlist`); the FS-028 benchmark; `streamlit run` health + script health; `build.bat` + the exe (private LOCALAPPDATA, `--selftest`); `summary.md`, `fs016_pairing.md`, regression diff (`--compare`), `--resume`, `--budget`. Out — manual pairing clicks and `st.data_editor` edits (AppTest cannot send them), anything in the release bundle.
-- **Validation:** (7950X3D, `build_venv` = Python 3.11.9, streamlit 1.64, numpy 2.3.5, 2026-10-02)
-  `--level smoke` 1m17s (28 designs, ~210 solves, 7 / 7 existing checks pass); `--level standard
-  --build` 9m22s (798 designs, 7 348 solves, 24 end-to-end flows: 17 PDFs valid, 17 / 17 LTspice
-  exports pass; build.bat 74 s, bundle 341 MB, exe health + script health 200, selftest without
-  [FAIL]); pool utilisation 95 %; two identical smoke runs compare with 0 changes (solves are
-  deterministic); a run killed mid-way and `--resume`d finished without duplicates (pending LTspice
-  runs re-queued); `--level full --designs 12`: 9 variants / design, presets rotated, inverting
-  1st-order cells exercised (full level estimated ~1 h + build — not run end to end yet).
-- **Notes:**
-  - S0 spike (2026-10-02) proved every AppTest capability the design relies on: run app.py, keyless widgets by label, Batch mode + job capture through `_proc_submit`, replay through `_drain_finished`, BOM pick through the `hw_df_{n}` selection state (1st-order included), Monte Carlo, report bytes from `report_pdf`, export capture; LTspice: `.cir` probes vs the export's expectations ≤ 1e-5 relative at exact frequencies (the log sweep's `FIND … AT` interpolates ~0.05 dB near a peak), `.asc` → `-netlist` equals the `.cir`; `-b` on an `.asc` opens LTspice's GUI and updater (never used).
-  - Results of the first runs: `dev/qa/reports/QA_2026-10-02.md` (issues to be triaged in a separate session).
-- **Updated:** 2026-10-02
-
 ---
 
 ## 6. Closed log
@@ -636,8 +513,13 @@ FS-004 — Biquad Pairing tab: compact layout, rad/s note font — DONE 2026-09-
 FS-007 — Custom filter design (coefficients or poles/zeros) — DONE 2026-09-28 — commit "feat(custom): FS-007 Custom H(s) …" (`custom_tf.py`, Response "Custom H(s)" + editor panel; design note `dev/FS-007_custom_tf_design_note.md` incl. §14 build notes / maintainer refinements; checks `dev/fs007/check_custom_tf.py`)
 FS-008 — LTspice export with Monte Carlo presets — DONE 2026-09-30 — f7c83f6 (`spice_cells` / `spice_asc` / `spice_opamps` / `spice_export` / `spice_ui`, `LTspice_Library/` with 26 cell templates; design note `dev/FS-008_ltspice_export_design_note.md`; checks `dev/fs008/check_spice_export.py`; open items — the two-TI-model helper collision and the last round's LTspice checks — moved to FS-029; the rule for new cells lives in `CLAUDE.md`)
 FS-029 — Vendor op-amp model import (guided download, per-part wrapper) — DONE 2026-09-30 — maintainer's commit (`spice_opamps` model_candidates / install_wrapped / localize_model / repair_imports, FS_<PART>.lib wrapper isolates vendor helper subckts; per-part FS generic fallback; checks `dev/fs008/check_spice_export.py` 13, LTspice test `dev/fs029/make_wrapper_test.py`; LTspice 26: two TI parts run)
-FS-035 — UI polish batch (Saal C leading constant, BOM caption, schematics expander) — DONE 2026-10-02 — uncommitted, logged after the fact (`dev/UI_POLISH_2026-10-02.md`)
+FS-035 — UI polish batch (Saal C leading constant, BOM caption, schematics expander) — DONE 2026-10-02 — 71ed779 (`dev/UI_POLISH_2026-10-02.md`)
 
+FS-033 — Near-notch sections (f_z close to f₀) classified as pure notch — DONE 2026-10-04 — 67d931c (Q-aware notch rule + dual 2N / LPn-HPn solve ranked by snap cost; design note `dev/FS-033_near_notch_design_note.md`)
+FS-028 — Topology solver performance — DONE 2026-10-04 — df652c2, 69c34b0, 4cc7148, 00f5dec (S2-1 compile-once cell kernels, S2-2 batched LM core, S2-2b batched snapper, S2-4 step 1 Batch mode + parallel section solves + idle polling removed; analysis `dev/FS-028_solver_performance_analysis.md`. Not built: S2-3 learned seeds (deprioritised), S2-4 steps 2 (self-adjusting rescue) and 3 (SPICE-level row check) — open as new items if wanted)
+FS-036 — QA & benchmark harness (`dev/qa/`) — DONE 2026-10-04 — 1be46a1 (first full-level report `dev/qa/reports/QA_2026-10-03.md`)
+FS-015 — Topology tab Overall filter: BP values off (validate BR) — DONE 2026-10-04 — bf81544 (band-pass overall gain measured on the swept cascade)
+FS-016 — Auto-pairing review: all types, esp. BP/BR; Q < 0.5 pairs — DONE 2026-10-04 — 56fef88 (scope limited by the maintainer to unrealizable pairings: real+real stages, lowest-Q realizable absorption host, BP1LP / BP1HP default MFB, Custom H(s) pre-flight. Not addressed: "optimal" distribution criteria; seen, not fixed: `KeyError: '3LPn-atten'` with VCVS at sub-unity gain (QA 2026-10-02 §4.1), generic LP/HP pairer absorbs without a realizability test)
 ---
 
 ## 7. User-manual backlog
@@ -647,164 +529,10 @@ described in `docs/manual/user_manual.md` / `quick_start.md`. The manuals are
 updated in batches (`docs/manual/DOC_WORKFLOW.md`: `doc_drift.py`, prose,
 screenshots, `--accept`, PDF build); a batch deletes the entries it covered.
 
-- **FS-033** (near-notch sections): a section whose zero is close to, but not
-  at, f₀ is now an LPn/HPn section (before: pure notch, 2N cells). Within the
-  old 5 % window the Topology tab solves it on both the LPn/HPn cells and the
-  2N cells, shows an ℹ caption (offset, forcing error) and sorts its BOM table
-  by snap cost by default. The no-realization message names the component
-  spread a near-notch needs on VCVS / MFB and suggests AM.
-- **FS-008 + FS-029** (LTspice export and vendor model import):
-  - Resulting Response tab, block *LTspice export* before *Generate Report*:
-    Supply Vs, MC runs, a per-section table (cell, op-amp, SPICE model,
-    *Drawing* = cell template or auto-layout, DC path), warnings, the
-    loaded-vs-tool caption and *Download LTspice files (.zip)*: AC nominal and
-    AC Monte-Carlo schematics (`.asc`) and netlists (`.cir`) of the whole
-    cascade + README (spec line, expected probe values, how to run; the
-    nominal `.asc` plots V(OUT) with phase on its own).
-  - The SPICE model follows the Topology tab's op-amp automatically (its
-    `spice_model`); Ideal / Custom / parts without one use FS generic (the
-    tool's A_ol / GBWP / Ro). The Topology op-amp Edit popover has a *SPICE
-    model* field.
-  - Parts with a vendor model (TL072H, OPA1656, LMV358A, TLV9002):
-    *Export <parts> with simplified generic models* checkbox; a part whose
-    model is not imported yet is exported with FS generic anyway (warning).
-    *Vendor model files* expander: status table with product-page links, the
-    disclaimer, and per part: *Open the <part> product page*, a consent tick,
-    a file picker (the vendor's zip or model file from any folder), subckt and
-    pin-role selectboxes to confirm, *Import the <part> model*; *Re-import*
-    for a new revision. The manual should explain: download from the vendor
-    yourself, what is stored (`%LOCALAPPDATA%\FilterSynthesizer\LTspice_Library\models`:
-    `<PART>__<file>` + the generated `FS_<PART>.lib`), and that zips
-    with vendor files must not be shared.
-  - Op-amp list: TL072H, LM358B, TLV9001-4 added; TL072, LM358, NE5532
-    removed (a saved design naming one falls back to Ideal).
-  - New widget keys: `spice_vs`, `spice_mc_runs`, `spice_generic_vendor`,
-    `spice_vendor_consent_{stem}`, `spice_vendor_up_{stem}`,
-    `spice_vendor_sub_{stem}`, `spice_vendor_role_{stem}_{subckt}_{k}`,
-    `spice_vendor_inst_{stem}`, `spice_vendor_redo_{stem}`,
-    `spice_vendor_allow`, `spice_dl`; debug only (`FILTERSYNTHESIZER_DEBUG=1`)
-    `spice_opamp_{n}`.
-- **FS-005** (op-amp library): the Topology tab's per-section op-amp picker now
-  lists the JSON library (built-in parts + the user overlay
-  `%LOCALAPPDATA%\FilterSynthesizer\opamp_library_user.json`); its Edit popover
-  saves Custom as a named part, edits built-ins as overrides with revert, and
-  deletes user parts.
-- **FS-006** (Bessel / Equiripple Delay):
-  - Response radio: + Bessel, Equiripple Delay. Filter Type offers only Lowpass
-    / Bandpass for them (caption says why).
-  - Order: "Order selection" Manual / From specs (result box in the sidebar);
-    BP label "Prototype order n (BP order = 2n)"; order limits Bessel LP 1–20,
-    Equiripple LP 1–15, BP 1–10.
-  - Frequency (LP): "Specify by" Corner frequency / Group delay; τ₀ input in the
-    reciprocal of the unit (kHz → ms …) with the derived corner shown below.
-  - "Delay Specs" block: Bandpass mapping (Delay-preserving / Classic), Delay
-    ripple ±δ (Equiripple), Order criterion radio (Max group delay / Min corner
-    frequency / Flat delay up to f_d [+ ε for Bessel] / Stopband A_s at f_s).
-  - The Passband Attenuation box defines the corner for these responses too.
-  - Tab 1: "Group Delay Detail" (metrics row + zoomed τ(f) plot with the
-    tolerance band); Manual Notch Placement caption (stopband only, pole
-    scaling) and the BP "not available" box.
-  - Report: spec rows Delay spec, Bandpass mapping, Delay ripple, τ(0) / τ_nom
-    or delay at centre, flat-delay band, delay p-p, max section Q, order
-    selection.
-  - New widget keys: `widget_filter_type`, `widget_filter_type_delay`,
-    `widget_delay_order_mode`, `widget_delay_anchor`, `widget_tau0`,
-    `widget_delay_bp_map`, `widget_delay_ripple`, `widget_crit_corner`,
-    `widget_crit_delay`, `widget_crit_tau_max`, `widget_crit_f_min`,
-    `widget_crit_fd`, `widget_crit_eps`, `widget_crit_fs`.
-  - Stale screenshots: at least `02a-sidebar-type`; run `doc_drift.py` for the
-    full list.
-- **FS-021** (Equiripple Magnitude Stopband, Bessel / Equiripple Delay LP):
-  - Tab 1 Manual Notch Placement: checkbox "Equiripple Magnitude Stopband"
-    (manual order + corner anchor only; otherwise a one-line note). When on,
-    each row has an **Active** checkbox instead of Pin and a read-only solved
-    frequency; default ⌊(n − 1)/2⌋ rows active (at least 1); pins are kept
-    and come back when the mode is switched off.
-  - Readout under the rows: number of notches, humps at −A_s (max error),
-    f_s, far-stopband roll-off or flat floor, pole scale and τ(0) before → after.
-  - Report: the "Manual notches" row lists the solved notches and the pole
-    scale.
-  - New widget keys: `widget_ems`, `ems_active_{i}`.
-- **FS-001** (design-control section style):
-  - Sections whose controls change the result sit in a blue accent-bordered,
-    tinted box: Manual Notch Tuning/Placement (Tab 1); 3rd-order checkbox +
-    Auto-Pair + mnemoscheme and Remaining Gain Distribution (Biquad Pairing);
-    Convergence Settings and each section's settings + gain/Ki/Solve row
-    (Topology); Monte-Carlo tolerances (Resulting Response).
-  - The Topology Sort + BOM table sit in an amber box (picking a result); BOM
-    rows are zebra-striped.
-  - The manual could explain the colour code once. Stale screenshots: every
-    tab that has one of these sections; run `doc_drift.py` for the list.
-- **FS-002** (Response Plots overlays and compaction):
-  - The **Phase** / **Group Delay** checkboxes no longer open a separate
-    "Phase & Group Delay" plot: they overlay dashed phase (deg) and dotted
-    group delay (ms) on the Magnitude Response plot, each on its own
-    right-hand axis, with a legend. The user manual's Phase row (Tab 1 table)
-    is now wrong.
-  - Frequency Probes: Gain and Phase readouts sit beside each probe input on
-    two lines (was one line under it). No horizontal rules between Stopband
-    Edges, Frequency Probes and Manual Notch; notch rows are tighter.
-  - Stale screenshots: Tab 1 (Response Plots); run `doc_drift.py` for the list.
-- **FS-003** (Roots & Transfer Function folded into Response Plots):
-  - The app has 4 tabs; the **Roots & Transfer Function** tab is gone. Its
-    content is at the end of **Response Plots**, after Manual Notch, in a grey
-    frame headed "Roots & Transfer Function": Domain Scale (+ Pole-Zero Map
-    Units when Denormalized), a collapsed **Root Locations** expander (tables
-    and K), a collapsed **Pole-Zero Map** expander (Stretch Real Axis inside), and a
-    collapsed **Transfer Function H(s)** expander whose radio picks Expanded
-    (Isolated Gain) / Expanded (Distributed Gain) / Factored (Cascaded
-    Biquads). User manual §3.3 and the tab table (§ at L23), quick_start L74,
-    SCREENSHOTS.md L91 and `ui_inventory.json` (tab list) are now wrong; tab
-    numbers after Tab 1 shift down by one.
-  - Response Plots is visibly more compact (smaller gaps / heading and alert
-    padding, fonts unchanged).
-  - New widget key: `tf_form_roots`.
-  - Stale screenshots: Tab 1 and the former Tab 2; run `doc_drift.py`.
-- **FS-004** (Biquad Pairing compaction):
-  - No horizontal rules in the tab; tighter gaps between the units radio,
-    mnemoscheme box, Hardware Stage Parameters and the Section blocks (fonts
-    unchanged). "Frequencies expressed in …" is now body-size italic text.
-  - Stale screenshots: Biquad Pairing tab; run `doc_drift.py`.
-- **FS-007** (Custom H(s)):
-  - Response radio: + **Custom H(s)**. Its sidebar, in order: **Custom Transfer
-    Function** — Mode Complete H(s) / Lowpass prototype (default); **Scale**
-    Normalized / Absolute (complete mode only; always Normalized for
-    Tietze–Schenk); **Filter Type** — radio in prototype mode, in complete mode
-    the line "Filter Type: … (detected from H(s))" (no radio; an unrecognised
-    shape stops with an error); **Frequency Specifications** — complete: Unit +
-    "Norm. frequency f_n" (Normalized) or nothing (Absolute), plus the measured
-    edges; prototype LP/HP: Corner Frequency; prototype BP/BR: "Passband
-    definition" Corners (Lower / Upper Passband Corner) / Normalized width
-    ("Centre frequency f₀" + "Normalized width Δ = (f₂ − f₁)/f₀", derived
-    corners shown); **Gain** Normalize / As entered (default; shows "G = … V/V
-    from H(s)"); "Passband edge level α (dB below peak)" (complete) or the
-    measured prototype edge attenuation (prototype); "Stopband reference A_s
-    (dB, plot only)". No Order or Response Modifications block.
-  - Response Plots starts with a blue **Custom Transfer Function H(s)** panel:
-    Input form (Coefficients / Factored (f₀, Q) / Factored (Tietze–Schenk) /
-    Roots (σ, ω)), the form's tables (fixed rows; ＋ adds and − removes the
-    last row), n₀ (complete mode, (f₀, Q) form), K / A₀ (greyed and
-    recalculated to the Passband Gain under Normalize), Paste expanders
-    (coefficients with Descending / Ascending order; roots), "Reset to the
-    example", and diagnostics (counts, edges, entered peak gain G, detected
-    type, conditioning, |H(jω_n)| and f₋₃dB/f_n, gate errors, warnings, pairing
-    pre-flight). Errors stop the run under the panel.
-  - For Custom: no Calculated Stopband Edges readout and no Manual Notch box;
-    Roots & TF "Normalized" uses ω_n (2π·f_n); Biquad Pairing hides "Equalize DC
-    and HF gains" for an asymmetric band-reject; Topology's overall target gain
-    is the entered G.
-  - Report: rows Mode, Entry, Structure, Passband / Target edges, Gain mode,
-    Entered peak gain G, Warnings; α / A_s labels as in the sidebar; no
-    modification or manual-notch rows; file stem `Custom_<type>_n<poles>`.
-  - New widget keys: `widget_custom_mode`, `widget_custom_scale`,
-    `widget_custom_scale_ts`, `widget_custom_fn`, `widget_custom_pbdef`,
-    `widget_custom_bw`, `widget_custom_gain_mode`, `widget_custom_alpha`,
-    `widget_custom_as`, `custom_form`, `custom_n0`, `custom_K_f0q`,
-    `custom_K_roots`, `custom_A0`, `custom_paste_num`, `custom_paste_den`,
-    `custom_paste_order`, `custom_paste_poles`, `custom_paste_zeros`,
-    `custom_paste_apply`, `custom_paste_apply_roots`, `custom_reset`,
-    `custom_add_<table>`, `custom_del_<table>`, editors
-    `custom_tbl_<table>_<rev>`; non-widget `_custom_spec`, `_custom_rev`,
-    `_custom_seen`, `_custom_sig`, `_custom_base_*`, `_custom_paste_msg`; and
-    `hw_pb_gain` (now written for every design).
-  - Stale screenshots: sidebar (Response list); run `doc_drift.py`.
+*Empty.* The v1.1.0 batch (2026-10-04) covered every entry that was listed
+here — FS-001…FS-008, FS-021, FS-029, FS-033 — plus the unlisted user-visible
+parts of FS-015 (band-pass overall gain), FS-016 (3rd-order band-pass sections
+default to MFB; Q < 0.5 real+real sections), FS-028 (Batch mode, parallel
+section solves) and FS-035 (Custom H(s) leading constant K / C), in
+`docs/manual/user_manual.md` §1–§9; screenshots retaken, Quick Start rewritten
+from the new run, `doc_drift.py --accept` done (snapshot v1.1.0, no drift), both PDFs built.

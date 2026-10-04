@@ -195,11 +195,15 @@ generates them; if one is missing it warns and builds without it.
   different BOM ordering between versions, so figures 11–13 may not reproduce
   exactly. The prose treats component values as an example, never a promise.
 - **`ui_inventory.py` is a static reader.** It follows widgets called on
-  column objects (`cols[0].text_input`), keys and labels held in a variable,
-  loop variables, and `with st.sidebar:` / `with tab_x:` blocks through
-  function calls. A control built in a loop is listed once, with its key
+  column or container objects (`cols[0].text_input`, `mc_box.button`), widgets
+  wrapped in `ui_components._mem_widget(st.radio, label, key, …)`, keys held in
+  a local variable (`key = f"hw_x_{n}"`, or `"a" if c else "b"`, listed as
+  `a | b` and documented when both are), keys built by a one-line helper that
+  returns an f-string (`_oped_key(n, tag, "aol")` → `hw_oped_aol_*_*`), and
+  loop variables. A control built in a loop is listed once, with its key
   normalised to a pattern (`hw_solve_*`). What it cannot see is a value passed
   in from another function: `key=f"{key_prefix}_svg_{n}"` stays `*_svg_*`, and
   a label it cannot resolve shows as `<expr>` — describe those by their panel.
+  A new UI module must be added to `UI_FILES` in `ui_inventory.py`.
 - **Monte-Carlo is reproducible** — the seed is a control — so figure 15 is
   stable as long as the example and the seed are.

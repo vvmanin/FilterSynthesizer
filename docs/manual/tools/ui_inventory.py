@@ -41,6 +41,7 @@ UI_FILES = [
     "response_tab.py",
     "report_ui.py",
     "schematic_svg.py",
+    "spice_ui.py",
 ]
 
 # st.<name> calls that create something the user can see or operate.
@@ -183,6 +184,10 @@ def _st_widget(node):
     if (isinstance(base, ast.Attribute) and base.attr == "sidebar"
             and isinstance(base.value, ast.Name) and base.value.id == "st"):
         return name, True
+    # a widget on a column / container object: cols[0].number_input, mc_box.button
+    if name in WIDGETS and (isinstance(base, ast.Subscript)
+                            or (isinstance(base, ast.Name) and base.id != "st")):
+        return name, False
     return None
 
 
@@ -195,11 +200,28 @@ class _Scope(ast.NodeVisitor):
         self.fn = []
         self.panel = []
         self.records = []
+        self.local_keys = [{}]     # per function: NAME = "lit" / f"..." / a if c else b
+
+    def visit_Assign(self, node):
+        if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            v = node.value
+            pats = None
+            if _const_str(v) is not None or isinstance(v, ast.JoinedStr):
+                pats = [_key_pattern(v)]
+            elif isinstance(v, ast.IfExp):
+                a, b = _key_pattern(v.body), _key_pattern(v.orelse)
+                if all(isinstance(x, (ast.Constant, ast.JoinedStr)) for x in (v.body, v.orelse)):
+                    pats = [a, b]
+            if pats:
+                self.local_keys[-1][node.targets[0].id] = " | ".join(dict.fromkeys(pats))
+        self.generic_visit(node)
 
     # -- scope tracking ----------------------------------------------------
     def visit_FunctionDef(self, node):
         self.fn.append(node.name)
+        self.local_keys.append({})
         self.generic_visit(node)
+        self.local_keys.pop()
         self.fn.pop()
 
     visit_AsyncFunctionDef = visit_FunctionDef
@@ -225,7 +247,39 @@ class _Scope(ast.NodeVisitor):
         w = _st_widget(node)
         if w:
             self.records.append(self._record(node, *w))
+        elif (isinstance(node.func, ast.Name) and node.func.id == "_mem_widget"
+              and len(node.args) >= 3 and isinstance(node.args[0], ast.Attribute)
+              and node.args[0].attr in WIDGETS):
+            # ui_components._mem_widget(st.radio, label, key, default, **kw):
+            # re-shape it as the st.<widget>(label, key=..., value=default) it wraps.
+            fake = ast.Call(func=node.args[0], args=[node.args[1]],
+                            keywords=[ast.keyword(arg="key", value=node.args[2])]
+                            + ([ast.keyword(arg="value", value=node.args[3])]
+                               if len(node.args) > 3 else [])
+                            + list(node.keywords))
+            fake.lineno = node.lineno
+            self.records.append(self._record(fake, node.args[0].attr, False))
         self.generic_visit(node)
+
+    def _key(self, node):
+        """key=, resolving a local variable that holds a string or f-string."""
+        if isinstance(node, ast.Name) and node.id in self.local_keys[-1]:
+            return self.local_keys[-1][node.id]
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id in getattr(self, "helpers", {})):
+            params, js = self.helpers[node.func.id]
+            lits = {p: _const_str(a) for p, a in zip(params, node.args)}
+            out = []
+            for part in js.values:
+                if isinstance(part, ast.Constant):
+                    out.append(str(part.value))
+                elif (isinstance(part, ast.FormattedValue) and isinstance(part.value, ast.Name)
+                      and lits.get(part.value.id) is not None):
+                    out.append(lits[part.value.id])
+                else:
+                    out.append("*")
+            return "".join(out)
+        return _key_pattern(node)
 
     def _record(self, node, widget, in_sidebar):
         kw = {k.arg: k.value for k in node.keywords if k.arg}
@@ -235,7 +289,7 @@ class _Scope(ast.NodeVisitor):
             "widget": widget,
             "kind": "container" if widget in CONTAINERS else "control",
             "label": _label_of(node, widget),
-            "key": _key_pattern(kw.get("key")),
+            "key": self._key(kw.get("key")),
             "function": self.fn[-1] if self.fn else "<module>",
             "panel": " / ".join(self.panel) if self.panel else None,
             "sidebar": in_sidebar,
@@ -260,9 +314,22 @@ class _Scope(ast.NodeVisitor):
         return {k: v for k, v in rec.items() if v is not None}
 
 
+def _key_helpers(tree):
+    """Module-level `def f(a, b, c): ... return f"hw_x_{c}_{a}"` -> {f: (params, JoinedStr)},
+    so key=f(n, tag, 'aol') can be expanded to 'hw_x_aol_*'."""
+    out = {}
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef):
+            rets = [n for n in ast.walk(node) if isinstance(n, ast.Return)]
+            if len(rets) == 1 and isinstance(rets[0].value, ast.JoinedStr):
+                out[node.name] = ([a.arg for a in node.args.args], rets[0].value)
+    return out
+
+
 def scan_file(path: Path):
     tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"), filename=str(path))
     v = _Scope(path.name, _module_constants(tree))
+    v.helpers = _key_helpers(tree)
     v.visit(tree)
     return v.records
 

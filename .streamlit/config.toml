@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Viacheslav Manin
+#
+# Used by `python -m streamlit run app.py` from this folder. The packaged EXE
+# passes the same setting on the command line (launcher.py).
+
+[client]
+# "viewer": no Deploy button or developer menu items; Settings (theme) stays.
+toolbarMode = "viewer"
