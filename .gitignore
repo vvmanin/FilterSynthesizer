@@ -220,6 +220,8 @@ FilterSynthesizer-diagnostic-*.txt
 **/dist
 **/temp
 **/LTspice_Library/models
+**/dev/tools
+**/dev/*.pdf
 
 
 # derived TF caches (regenerated at runtime)
