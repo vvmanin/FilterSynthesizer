@@ -71,9 +71,18 @@ datas += [(str(ROOT / "opamp_library.json"), ".")]
 
 # LTspice library (FS-008: symbol calibration, op-amp dummies, templates).
 # Same pattern: build.bat copies it next to the exe; this is the fallback.
+# Vendor SPICE models (models/, git-ignored) are NEVER shipped: they are the
+# developer's own downloads. Only models/README.txt goes in; users put their
+# models in %LOCALAPPDATA%\FilterSynthesizer\LTspice_Library\models.
 _lt = ROOT / "LTspice_Library"
 if _lt.is_dir():
-    datas += [(str(_lt), "LTspice_Library")]
+    for _p in sorted(_lt.rglob("*")):
+        _rel = _p.relative_to(_lt)
+        if not _p.is_file():
+            continue
+        if "models" in _rel.parts[:-1] and _rel != Path("models", "README.txt"):
+            continue
+        datas.append((str(_p), str(Path("LTspice_Library", *_rel.parts[:-1]))))
 
 
 a = Analysis(

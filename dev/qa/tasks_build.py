@@ -127,6 +127,13 @@ def build_task(log_dir, timeout=2400):
     for need in ("Section_Schematic_Diagrams", "opamp_library.json", "LTspice_Library"):
         if not os.path.exists(os.path.join(DIST, need)):
             out["problems"].append(f"dist: {need} not copied next to the exe")
+    # vendor SPICE models are git-ignored and never shipped (only models/README.txt)
+    vendor = sorted(os.path.relpath(p, DIST) for p in
+                    glob.glob(os.path.join(DIST, "**", "LTspice_Library", "**", "models", "*"),
+                              recursive=True)
+                    if os.path.basename(p) != "README.txt")
+    if vendor:
+        out["problems"].append(f"dist: vendor SPICE models shipped: {vendor[:5]}")
     for pdf in ("Quick_Start.pdf", "User_Manual.pdf"):
         if not glob.glob(os.path.join(DIST, "**", pdf), recursive=True):
             out["warnings"].append(f"dist: {pdf} missing (build.bat warns; built by the maintainer)")

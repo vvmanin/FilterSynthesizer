@@ -59,6 +59,7 @@
 
 import builtins
 import inspect
+import linecache
 import os
 import threading
 from collections import OrderedDict
@@ -120,7 +121,12 @@ def _lamb(args, expr, fname):
     {"src": source renamed to `fname`, "syms": free tf_symbols it references}."""
     import sympy as sp
     f = sp.lambdify(list(args), expr, "numpy", cse=True)
-    src = inspect.getsource(f)
+    # Read lambdify's linecache entry directly, not inspect.getsource: in the
+    # frozen build PyInstaller's pyi_rth_inspect rewrites the relative
+    # '<lambdifygenerated-N>' name into a path under _MEIPASS, the linecache
+    # lookup misses and getsource raises "could not get source code". Same
+    # text either way (the generated module is just the one def).
+    src = "".join(linecache.getlines(f.__code__.co_filename)) or inspect.getsource(f)
     head = "def _lambdifygenerated("
     if head not in src:
         raise RuntimeError(f"cell_kernels: unexpected lambdify source for {fname}")
