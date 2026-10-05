@@ -153,10 +153,17 @@ first.
 | FS-031 | Group-delay equalizer: all-pass stages appended to a designed filter | P3 *(s)* | PROPOSED | plan xhigh / build high | FS-013 (hard, realization stage only), FS-006 (done) |
 | FS-032 | Magnitude correction of an existing system from measured Bode points | P3 *(s)* | PROPOSED | plan max / build xhigh (per stage) | FS-007 (done); FS-014 (hard, realization stage only); FS-031 (soft) |
 | FS-034 | SPICE row checker: simulate a section's top BOM rows with vendor models | P4 | PROPOSED | plan high / build high | FS-008 (done), FS-029 (done) |
+| FS-037 | Custom capacitor value list ("custom C row") for snapping | P1 | PROPOSED | plan high / build medium | — |
+| FS-038 | Monte Carlo: optional op-amp parameter spread | P1 | PROPOSED | medium | FS-018 (soft) |
 
 *(s)* = suggested priority, awaiting maintainer confirmation.
 
-Suggested order: the P1 track (FS-005, FS-006, FS-008, FS-029) is done; FS-007 is done (built before FS-016, whose gaps it gates). The UI polish
+P1 user requests (2026-10-05, Christopher Paul): FS-037 and FS-038 touch
+disjoint files (snapper / Topology vs `hw_plots` Monte Carlo / Response tab)
+and can go in either order; FS-037 first if the cache-signature change should
+settle before other Topology work.
+
+Suggested order: the earlier P1 track (FS-005, FS-006, FS-008, FS-029) is done; FS-007 is done (built before FS-016, whose gaps it gates). The UI polish
 track FS-001 → FS-004 is done.
 
 Non-urgent follow-ups added 2026-09-27, ranked by implementation convenience
@@ -496,6 +503,44 @@ answered against FS-031's equalizer — plan FS-031 first.
   - Suspects to check first: (1) Streamlit drops a keyed widget's state when that widget is not rendered on some run — the `run_every` fragment's app-wide rerun after `_drain_finished` may land on a run where the section widgets are skipped (early return, another tab, a spinner/pending branch), after which `setdefault` re-seeds the defaults; (2) widget keys built from values that change on the first solves (signature, `hw_gen`, op-amp list or defaults computed after a cold start), so the widget comes back under a new key; (3) a `hw_gen` bump or a reset of the `hw_*` dicts on the first completion that also clears the spec keys. A durable, non-widget mirror of the spec (as `bom_picks` does for the BOM pick) is the likely fix shape.
   - Finding 2026-10-01 (FS-028 S2-4, reproduced in a minimal Streamlit 1.55 script): a keyed widget that is not rendered for a while and is then re-created during a **fragment-only** rerun comes back at the widget's own default (0, first option) and overwrites the value still held in session state — `st.session_state[k] = st.session_state[k]` does not prevent it. This matches suspect (1). The batch-mode envelope / op-amp widgets now use `ui_components._mem_widget` (a `_mem_` mirror passed back as `value` / `index`), which survives it. The per-section family / gain / option widgets do not yet. Also since 2026-10-01 the tab polls only while solves are pending (no permanent 2 s fragment), which removes most idle reruns.
 - **Updated:** 2026-09-30
+
+### FS-037 — Custom capacitor value list ("custom C row") for snapping
+- **State:** PROPOSED
+- **Priority:** P1 (maintainer)
+- **Effort:** plan high / build medium
+- **Tiers:** C (snap candidate sets only), D (input + display)
+- **Depends on:** —
+- **Contracts:** §6 (Solution schema unchanged; the C-series choice becomes part of the cache/result signature)
+- **Files:** `topology_tab.py` (`C_SERIES_OPTIONS` ~L136, series widget, `cser` in the solve signature ~L1032), `discrete_snapper.py` (`E_SERIES_BASE` and value-grid builder), `unified_solver_v2.py` (own E-table ~L77, snap/assemble path, incl. the FS-028 batched snapper), `first_order_solver.py` (`_CAP_SERIES` ~L37), possibly `zero_manifold_solver.py`; `report_pdf.py` / `report_ui.py` / `spice_export.py` only where the series name is printed
+- **Goal:** Besides E3/E6/E12, the user can pick "Custom" and type the capacitor values they actually stock (e.g. `100p, 1n, 4.7n, 10n`); every solver snaps capacitors only to those values, exactly as it does to an E-series today.
+- **Scope:**
+  - In — a "Custom" C-series option with a value-list input (engineering suffixes p/n/u/µ, commas or spaces; parsed, sorted, de-duplicated; invalid entries reported); values used **as given, absolute** — no decade repetition (unlike an E-series row, `4.7n` does not imply `47n`); every capacitor-snapping path uses the list (2nd/3rd-order, notch, first-order, AM split capacitors C1a/C1b / C2a/C2b and parallel combinations); the list is part of the solve signature, so changing it re-solves and does not reuse stale cached results; the BOM / report / SPICE header show "Custom (n values)".
+  - Out — any change to the cell math, residuals, seeds or scoring ("should not affect under-the-hood math"); a custom resistor list (separate item if wanted); per-section lists (one list for the design).
+- **Validation:** (1) With Custom = the exact E12 values over the decades the design uses, BOMs identical to the E12 run (scratch diff over 3–4 designs: LP, BP, BR with notch, one AM, one odd-order with a 1st-order section). (2) With a short list (`100p, 1n, 4.7n, 10n`): every capacitor in every BOM row is a list member; a section that cannot be met reports it (no crash, no silent off-list value). (3) Edit the list → sections re-solve; restore it → results come back. (4) Bad input (`abc`, empty, negative) → message, previous list kept. `python verify.py` passes; `dev/qa/` run per its levels.
+- **Open questions:** Does the custom list replace the E-series or add to it (union — e.g. "E6 plus 3.3n")? Do the capacitor range / ratio limits (`ratio`, min/max C) still apply, or does the list define the range? Is a custom resistor list wanted as well? Should the list be saved with the project (FS-011)?
+- **Notes:**
+  - Requested by Christopher Paul (external user), 2026-10-05.
+  - Today the snappers build a value grid by repeating a normalized E-row over decades; the custom list needs an absolute-value grid path beside it. Three separate E-tables exist (`discrete_snapper`, `unified_solver_v2`, `first_order_solver`) — route all through one candidate-grid helper rather than patching each.
+- **Updated:** 2026-10-05
+
+### FS-038 — Monte Carlo: optional op-amp parameter spread
+- **State:** PROPOSED
+- **Priority:** P1 (maintainer)
+- **Effort:** medium
+- **Tiers:** D (`hw_plots.monte_carlo`, Response tab MC controls, report)
+- **Depends on:** FS-018 (soft — provenance fields could later supply per-part min/max)
+- **Contracts:** —
+- **Files:** `hw_plots.py` (`monte_carlo` ~L241: op-amp symbols `A_ol` / `GBWP_hz` / `Ro` are held at tolerance 0 today), `response_tab.py` (MC controls beside the R bands / C tolerance; `_eval_opamp` ~L135), `report_pdf.py` (MC parameter line ~L1002) / `report_ui.py`; optional `spice_export.py` (mirror in the LTspice MC preset)
+- **Goal:** A checkbox in the Monte Carlo controls adds a random spread of the op-amp non-ideal parameters (A_ol, GBWP, Ro) to each run, set separately from the R and C tolerances, so the MC band shows the op-amp's contribution.
+- **Scope:**
+  - In — checkbox (off by default → results identical to today); a spread per parameter (± % or min/max relative to the nominal), using the same distribution choice (gaussian n-σ / uniform) as R/C; the spread applied per op-amp per run; ideal op-amp sections unaffected (nothing to spread, noted in the UI); report records the setting.
+  - Out — new op-amp parameters (offset, slew rate, noise); temperature drift; changing the realized (nominal) response.
+- **Validation:** (1) Checkbox off → MC result bit-identical to today (same seed). (2) Checkbox on with R/C tolerances set to 0 → band = op-amp-only spread; it widens with the spread and mostly near/above GBWP-limited frequencies; zero spread → band collapses to the realized curve. (3) A high-Q section with a low-GBWP part shows a visibly wider band than with an ideal-ish part. (4) Report shows the setting.
+- **Open questions:** Spread entry: ± % symmetric, or asymmetric (datasheet min/typ — A_ol and GBWP are usually "min" specs, i.e. one-sided)? Global for all op-amps, or per op-amp type? Channels in one package correlated (same draw for a dual's two halves) or independent? Mirror it in the LTspice MC export (FS-008), or the app only?
+- **Notes:**
+  - Requested by Christopher Paul (external user), 2026-10-05.
+  - `comp_dict` already places the op-amp parameters in each section's evaluation dict, so the perturbation slots into the existing per-run loop without touching the cell math.
+- **Updated:** 2026-10-05
 
 ---
 
