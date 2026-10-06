@@ -47,6 +47,7 @@ from concurrent.futures.process import BrokenProcessPool
 from scipy.optimize import least_squares
 
 import tf_derivation_v2 as TF
+import cap_values as CV
 import cell_kernels as CK
 import batched_lm as BLM
 import zero_manifold_solver as ZM
@@ -70,33 +71,18 @@ _PRIMES = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37]
 
 
 # =====================================================================
-# Cap E-series grid (mirrors discrete_snapper philosophy)
+# Cap grid: E-series over decades, or the FS-037 custom list (cap_values)
 # =====================================================================
-_E_SERIES = {
-    "E3":  [1.0, 2.2, 4.7],
-    "E6":  [1.0, 1.5, 2.2, 3.3, 4.7, 6.8],
-    "E12": [1.0, 1.2, 1.5, 1.8, 2.2, 2.7, 3.3, 3.9, 4.7, 5.6, 6.8, 8.2],
-    "E24": [1.0,1.1,1.2,1.3,1.5,1.6,1.8,2.0,2.2,2.4,2.7,3.0,3.3,3.6,3.9,
-            4.3,4.7,5.1,5.6,6.2,6.8,7.5,8.2,9.1],
-}
-
-def cap_grid(series_str, c_min, c_max):
-    parts = [p.strip().upper() for p in series_str.split(",")]
-    base = set()
-    for p in parts:
-        if p in _E_SERIES:
-            base.update(_E_SERIES[p])
-    arr = np.array(sorted(base))
+def cap_grid(series_str, c_min, c_max, custom=None):
     # Decade multipliers in µF. Upper bound 1e1 -> base*10 reaches ~91 µF, so any
     # user C_max up to ~91 µF (e.g. 2.2 µF, 10 µF) is realizable. The window is
     # then clipped to [c_min, c_max] below, so a small C_max (e.g. the 0.01 µF
     # default) yields exactly the same grid as before -- the extra high decades
     # are filtered out, giving zero change for normal designs. (Previously the
     # top multiplier was 1e-1, hard-capping every cap at ~0.91 µF regardless of
-    # the user's C_max.)
-    mult = [10**i for i in range(-6, 2)]
-    grid = np.sort([round(v*m, 10) for m in mult for v in arr])
-    return grid[(grid >= c_min*0.99) & (grid <= c_max*1.01)]
+    # the user's C_max.) A custom list (FS-037) is used as given, no decades.
+    return CV.cap_grid(series_str, c_min, c_max, range(-6, 2), ndigits=10,
+                       custom=custom)
 
 def two_nearest(val, grid):
     idx = np.searchsorted(grid, val)
@@ -1223,7 +1209,7 @@ def harvest(p1_results, cases, cfg, max_valleys, hints_per_combo, merge_dup_hint
             chosen += _select_valleys(name, extra, eff_mv - len(legacy))
             kept[name] = chosen[:eff_mv]
 
-    cg = cap_grid(cfg["C_series"], cfg["C_min"], cfg["C_max"])
+    cg = cap_grid(cfg["C_series"], cfg["C_min"], cfg["C_max"], cfg.get("C_values"))
     combo_map = defaultdict(list)
     combo_alt = defaultdict(list)           # merge_dup_hints: after the valleys' own
     for name, valleys in kept.items():

@@ -59,6 +59,7 @@ import streamlit.components.v1 as components
 import schematic_svg as schematic                  # per-section schematic overlay
 import pairing_utils                               # classify_section / family_from_section
 import first_order_solver as fos                   # closed-form 1st-order realizer
+import cap_values as CV                            # FS-037 custom capacitor list
 import solvability_probe as solvprobe              # failure-path global feasibility probe
 import opamp_library as oplib                      # op-amp parts (JSON-backed)
 from ui_components import design_control           # FS-001 styled input boxes
@@ -132,8 +133,8 @@ SEARCH_PRESETS = {
     "Thorough": dict(ratio_starts=120, anchored_starts=240, max_valleys=20, hints_per_combo=4),
 }
 
-# Cap solver supports E6/E12/E24 today; E3 needs the one-line _E_SERIES patch.
-C_SERIES_OPTIONS = ["E3", "E6", "E12"]
+# Capacitor rows (cap_values.CAP_SERIES), or the design-wide custom list (FS-037).
+C_SERIES_OPTIONS = ["E3", "E6", "E12", CV.CUSTOM]
 # Resistor grid supports exactly these.
 R_SERIES_OPTIONS = ["E12", "E24", "E48", "E96"]
 
@@ -1031,6 +1032,57 @@ def _opamp_picker(n):
 _ENV_DEFAULTS = {"cmin": 6.8e-5, "cmax": 1e-2, "rmin": 0.3, "rmax": 2000.0,
                  "ratio": 500.0, "cser": "E12"}
 
+# FS-037: one custom capacitor list for the whole design (C series = Custom).
+CUSTOM_CAPS_KEY = "hw_cap_custom"            # text widget (+ its _mem_ mirror)
+CUSTOM_CAPS_VALS = "hw_cap_custom_vals"      # last valid parsed list, µF tuple
+CUSTOM_CAPS_DEFAULT = "100p, 220p, 470p, 1n, 2.2n, 4.7n, 10n"
+
+
+def custom_caps():
+    """The design-wide custom capacitor list (µF, ascending): the last valid
+    entry of the Custom capacitor values box, or the default list."""
+    ss = st.session_state
+    if CUSTOM_CAPS_VALS not in ss:
+        text = ss.get("_mem_" + CUSTOM_CAPS_KEY, CUSTOM_CAPS_DEFAULT)
+        ss[CUSTOM_CAPS_VALS] = (CV.parse_cap_list(text)[0]
+                                or CV.parse_cap_list(CUSTOM_CAPS_DEFAULT)[0])
+    return ss[CUSTOM_CAPS_VALS]
+
+
+def _custom_c_env():
+    """C part of the env for C series = Custom: the list itself, and the
+    solver's C box from the list (C_min/C_max do not apply to it). Shows the
+    range in place of the hidden C_min/C_max inputs."""
+    vals = custom_caps()
+    st.caption(f"**C range from the custom list:** {CV.format_cap(vals[0])} … "
+               f"{CV.format_cap(vals[-1])} ({len(vals)} values). "
+               "Edit it under *Custom capacitor values* at the top of the tab.")
+    return dict(C_min=vals[0], C_max=vals[-1], C_values=vals)
+
+
+def _custom_caps_box():
+    """Top-of-tab input for the custom capacitor list (FS-037). Parsed on every
+    run; an invalid entry is reported and the previous valid list stays in use."""
+    with design_control("hw_capcustom"):
+        with st.expander("Custom capacitor values — used by sections whose C series "
+                         "is *Custom*", expanded=False):
+            text = _mem_widget(st.text_input, "Capacitor values", CUSTOM_CAPS_KEY,
+                               CUSTOM_CAPS_DEFAULT,
+                               help="The capacitor values you stock, e.g. "
+                                    "`100p, 1n, 4.7n, 10n` (p / n / u suffix, optional F; "
+                                    "`4n7` = 4.7 nF; commas or spaces). Used exactly as "
+                                    "given: 4.7n does not imply 47n. Every capacitor of a "
+                                    "Custom section is one of these values (two in "
+                                    "parallel where a cell splits a capacitor); C_min / "
+                                    "C_max do not apply — the range is the list's.")
+            vals, errors = CV.parse_cap_list(text)
+            if errors:
+                st.error(f"{errors[0]} — still using the previous list.")
+            else:
+                st.session_state[CUSTOM_CAPS_VALS] = vals
+            vals = custom_caps()
+            st.caption(f"In use ({len(vals)} values): {CV.format_cap_list(vals)}")
+
 
 def _rser_inputs(tag):
     """Resistor E-series checkboxes (keys hw_rser_{tag}_<series>); E48 if none."""
@@ -1055,10 +1107,7 @@ def _envelope_inputs(tag):
     st.markdown("**Component envelope**")
     e = st.columns(3)
     with e[0]:
-        c_min = _mem_widget(st.number_input, "C_min (µF)", f"hw_cmin_{tag}", D["cmin"],
-                            format="%.2e")
-        c_max = _mem_widget(st.number_input, "C_max (µF)", f"hw_cmax_{tag}", D["cmax"],
-                            format="%.2e")
+        c_slot = st.empty()          # C_min/C_max, or the custom-list range (filled below)
     with e[1]:
         r_min_k = _mem_widget(st.number_input, "R_min (kΩ)", f"hw_rmin_{tag}", D["rmin"],
                               format="%.4f")
@@ -1081,13 +1130,19 @@ def _envelope_inputs(tag):
     c_series = _mem_widget(st.radio, "C series", f"hw_cser_{tag}", D["cser"],
                            options=C_SERIES_OPTIONS, horizontal=True,
                            label_visibility="collapsed")
-    if c_series == "E3":
-        st.caption("⚠ E3 must be added to `unified_solver_v2._E_SERIES`, "
-                   "else the cap grid is empty.")
+    with c_slot.container():
+        if c_series == CV.CUSTOM:
+            c_env = _custom_c_env()
+        else:
+            c_env = dict(
+                C_min=_mem_widget(st.number_input, "C_min (µF)", f"hw_cmin_{tag}", D["cmin"],
+                                  format="%.2e"),
+                C_max=_mem_widget(st.number_input, "C_max (µF)", f"hw_cmax_{tag}", D["cmax"],
+                                  format="%.2e"))
 
     r_selected = _rser_inputs(tag)
 
-    return dict(C_min=c_min, C_max=c_max,
+    return dict(c_env,
                 R_min=r_min_k * 1e-3, R_max=r_max_k * 1e-3,   # kΩ -> MΩ (internal units)
                 MAX_R_RATIO=max_ratio, C_series=c_series, R_series=", ".join(r_selected))
 
@@ -1338,7 +1393,9 @@ def _render_no_realization(cfg, topos, dc_gain):
         if lim_r and need_r > lim_r * 1.02:
             bits.append(f"a resistor ratio ≈{need_r:.0f}× (your Max R ratio is {lim_r:.0f}×)")
         if lim_c and need_c > lim_c * 1.02:
-            bits.append(f"a capacitor ratio ≈{need_c:.0f}× (your C_max/C_min is {lim_c:.0f}×)")
+            _lim = ("your custom capacitor list spans" if cfg.get("C_series") == CV.CUSTOM
+                    else "your C_max/C_min is")
+            bits.append(f"a capacitor ratio ≈{need_c:.0f}× ({_lim} {lim_c:.0f}×)")
         if bits:
             # at least one spread genuinely exceeds the envelope -> widen it.
             st.warning("A realizable design exists, but not inside your envelope — it needs "
@@ -1574,7 +1631,8 @@ _FO_R_LO_MOHM, _FO_R_HI_MOHM = 1e-4, 10.0          # 100 Ω .. 10 MΩ
 def _first_order_settings(sec, shared=None):
     """Settings UI for a 1st-order section: op-amp + C_max + cap/resistor series.
     No topology-family radio (meaningless at order 1) and no R/C-min envelope —
-    the solver realizes the pole at the 3 nearest E-series caps at/below C_max.
+    the solver realizes the pole at the 3 nearest E-series caps at/below C_max,
+    or at every value of the custom list (FS-037; C_max does not apply then).
     `shared` (Batch mode): the (env core, opamp) pair; only its C_max and E-series
     are used — the R range stays the fixed 1st-order one."""
     n = sec["stage_num"]
@@ -1584,25 +1642,35 @@ def _first_order_settings(sec, shared=None):
                    "(Batch mode).")
         env = dict(C_max=senv["C_max"], C_series=senv["C_series"], R_series=senv["R_series"],
                    R_min=_FO_R_LO_MOHM, R_max=_FO_R_HI_MOHM, cap_mode="nearest_lower", n_caps=3)
+        if senv["C_series"] == CV.CUSTOM:        # FS-037: every list value is a candidate
+            env.update(C_values=senv["C_values"], n_caps=len(senv["C_values"]))
         return env, opamp
     with st.expander(f"⚙ Section {n} — component settings", expanded=False):
         opamp = _opamp_picker(n)
 
         st.markdown("**Component envelope**")
-        c_max = _mem_widget(st.number_input, "C_max (µF)", f"hw_cmax_{n}",
-                            _ENV_DEFAULTS["cmax"], format="%.2e",
-                            help="Upper capacitor bound. The solver realizes the pole "
-                                 "at the 3 nearest E-series cap values at or below this.")
+        c_slot = st.empty()          # C_max, or the custom-list range (filled below)
 
         st.markdown("**Capacitor E-series** (single)")
         c_series = _mem_widget(st.radio, "C series", f"hw_cser_{n}", _ENV_DEFAULTS["cser"],
                                options=C_SERIES_OPTIONS, horizontal=True,
                                label_visibility="collapsed")
+        with c_slot.container():
+            if c_series == CV.CUSTOM:
+                vals = _custom_c_env()["C_values"]
+                c_env = dict(C_max=vals[-1], C_values=vals, n_caps=len(vals))
+            else:
+                c_env = dict(C_max=_mem_widget(
+                    st.number_input, "C_max (µF)", f"hw_cmax_{n}",
+                    _ENV_DEFAULTS["cmax"], format="%.2e",
+                    help="Upper capacitor bound. The solver realizes the pole "
+                         "at the 3 nearest E-series cap values at or below this."),
+                    n_caps=3)
 
         r_selected = _rser_inputs(n)
 
-    env = dict(C_max=c_max, C_series=c_series, R_series=", ".join(r_selected),
-               R_min=_FO_R_LO_MOHM, R_max=_FO_R_HI_MOHM, cap_mode="nearest_lower", n_caps=3)
+    env = dict(c_env, C_series=c_series, R_series=", ".join(r_selected),
+               R_min=_FO_R_LO_MOHM, R_max=_FO_R_HI_MOHM, cap_mode="nearest_lower")
     return env, opamp
 
 
@@ -2586,6 +2654,7 @@ def _topology_body():
                            "section's own values are kept while Batch mode is on.")
     stages = [s["stage_num"] for s in sections]
     shared, solve_all, status_box = None, False, None
+    _custom_caps_box()
     if batch:
         _seed_shared(stages)
         shared = _shared_settings()

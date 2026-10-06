@@ -24,7 +24,8 @@ import hashlib
 import streamlit as st
 
 import schematic_svg as schematic
-from topology_tab import opamp_label, settings_tag, _gain_label_for
+from topology_tab import opamp_label, settings_tag, _gain_label_for, custom_caps
+import cap_values as CV
 from _version import __version__, APP_NAME
 
 # ---------------------------------------------------------------------
@@ -92,6 +93,16 @@ def _section_env(n, first_order=False):
     r_sel = [s for s in _R_SERIES if st.session_state.get(f"hw_rser_{n}_{s}")]
     rmin_k = None if first_order else st.session_state.get(f"hw_rmin_{n}")
     rmax_k = None if first_order else st.session_state.get(f"hw_rmax_{n}")
+    if st.session_state.get(f"hw_cser_{n}") == CV.CUSTOM:
+        # FS-037: the capacitors come from the design-wide list; its span is the C range
+        vals = custom_caps()
+        return dict(
+            C_min=vals[0], C_max=vals[-1], C_values=vals,
+            R_min=(rmin_k * 1e-3) if rmin_k else None,
+            R_max=(rmax_k * 1e-3) if rmax_k else None,
+            C_series=f"Custom ({len(vals)} values)",
+            R_series=", ".join(r_sel) if r_sel else "—",
+        )
     return dict(
         C_min=None if first_order else st.session_state.get(f"hw_cmin_{n}"),
         C_max=st.session_state.get(f"hw_cmax_{n}"),

@@ -153,7 +153,7 @@ first.
 | FS-031 | Group-delay equalizer: all-pass stages appended to a designed filter | P3 *(s)* | PROPOSED | plan xhigh / build high | FS-013 (hard, realization stage only), FS-006 (done) |
 | FS-032 | Magnitude correction of an existing system from measured Bode points | P3 *(s)* | PROPOSED | plan max / build xhigh (per stage) | FS-007 (done); FS-014 (hard, realization stage only); FS-031 (soft) |
 | FS-034 | SPICE row checker: simulate a section's top BOM rows with vendor models | P4 | PROPOSED | plan high / build high | FS-008 (done), FS-029 (done) |
-| FS-037 | Custom capacitor value list ("custom C row") for snapping | P1 | PROPOSED | plan high / build medium | — |
+| FS-037 | Custom capacitor value list ("custom C row") for snapping | P1 | VALIDATING | plan high / build medium | — |
 | FS-038 | Monte Carlo: optional op-amp parameter spread + layered band | P1 | PROPOSED | analysis high / build medium | FS-018 (soft) |
 
 *(s)* = suggested priority, awaiting maintainer confirmation.
@@ -232,7 +232,9 @@ answered against FS-031's equalizer — plan FS-031 first.
 - **Scope:** In — versioned JSON format; sidebar + in-tab controls + per-section solutions + op-amp/series choices; load restores state and skips re-solving; graceful handling of older/newer format versions. Out — symbolic caches (regenerated), UI-only state like expander open/closed.
 - **Validation:** Save → restart app → load: every control identical, solved sections show the same BOM without re-solving, Resulting Response and MC match; loading a file with a missing/extra key warns but does not crash; works in the bundled exe.
 - **Open questions:** Include the Monte Carlo results themselves, or only settings? File extension?
-- **Updated:** 2026-09-26
+- **Notes:**
+  - FS-037 (2026-10-06): save the design-wide custom capacitor list too — the text `hw_cap_custom` (its `_mem_` mirror) and the parsed `hw_cap_custom_vals`.
+- **Updated:** 2026-10-06
 
 ### FS-012 — AI integration (external API/MCP or built-in assistant)
 - **State:** PROPOSED
@@ -505,23 +507,25 @@ answered against FS-031's equalizer — plan FS-031 first.
 - **Updated:** 2026-09-30
 
 ### FS-037 — Custom capacitor value list ("custom C row") for snapping
-- **State:** PROPOSED
+- **State:** VALIDATING
 - **Priority:** P1 (maintainer)
 - **Effort:** plan high / build medium
 - **Tiers:** C (snap candidate sets only), D (input + display)
 - **Depends on:** —
-- **Contracts:** §6 (Solution schema unchanged; the C-series choice becomes part of the cache/result signature)
-- **Files:** `topology_tab.py` (`C_SERIES_OPTIONS` ~L136, series widget, `cser` in the solve signature ~L1032), `discrete_snapper.py` (`E_SERIES_BASE` and value-grid builder), `unified_solver_v2.py` (own E-table ~L77, snap/assemble path, incl. the FS-028 batched snapper), `first_order_solver.py` (`_CAP_SERIES` ~L37), possibly `zero_manifold_solver.py`; `report_pdf.py` / `report_ui.py` / `spice_export.py` only where the series name is printed
+- **Contracts:** §6 (Solution schema unchanged; the custom list rides in `env`/`cfg` as `C_values`, so it is part of the solve signature)
+- **Files:** new `cap_values.py` (one capacitor-grid helper + list parser); `unified_solver_v2.py` (`cap_grid`), `zero_manifold_solver.py` (`_eseries_grid`), `first_order_solver.py` (`build_cap_grid` / `nearest_lower_caps`) routed through it; `topology_tab.py` (`C_SERIES_OPTIONS`, `custom_caps` / `_custom_caps_box`, `_envelope_inputs`, `_first_order_settings`); `report_ui.py` / `report_pdf.py` (C rows); check `dev/fs037/check_custom_caps.py`
 - **Goal:** Besides E3/E6/E12, the user can pick "Custom" and type the capacitor values they actually stock (e.g. `100p, 1n, 4.7n, 10n`); every solver snaps capacitors only to those values, exactly as it does to an E-series today.
 - **Scope:**
-  - In — a "Custom" C-series option with a value-list input (engineering suffixes p/n/u/µ, commas or spaces; parsed, sorted, de-duplicated; invalid entries reported); values used **as given, absolute** — no decade repetition (unlike an E-series row, `4.7n` does not imply `47n`); every capacitor-snapping path uses the list (2nd/3rd-order, notch, first-order, AM split capacitors C1a/C1b / C2a/C2b and parallel combinations); the list is part of the solve signature, so changing it re-solves and does not reuse stale cached results; the BOM / report / SPICE header show "Custom (n values)".
-  - Out — any change to the cell math, residuals, seeds or scoring ("should not affect under-the-hood math"); a custom resistor list (separate item if wanted); per-section lists (one list for the design).
+  - In — a "Custom" C-series option; one design-wide value-list box at the top of the Topology tab (suffixes p/n/u/µ with optional F, RKM `4n7`, commas/semicolons/spaces; parsed, sorted, de-duplicated; invalid entries reported and the previous list kept; ≥ 2 values spanning ≥ 1.5×); values used **as given, absolute** — no decade repetition; the list **replaces** the E-series; C_min/C_max are hidden for a Custom section and the solver box is the list's span (`C_min = min`, `C_max = max`); every capacitor-snapping path uses the list (2nd/3rd-order, notch, AM C1a/C1b split, zero-manifold C2a/C2b, first-order — realized at every list value); the list is part of the solve signature; report shows "Custom (n values)", the range "(custom list)" and the values.
+  - Out — any change to the cell math, residuals, seeds or scoring; extra snap seeds for sparse lists (follow-up if short lists prove poor); a custom resistor list; per-section lists; saving the list (FS-011).
 - **Validation:** (1) With Custom = the exact E12 values over the decades the design uses, BOMs identical to the E12 run (scratch diff over 3–4 designs: LP, BP, BR with notch, one AM, one odd-order with a 1st-order section). (2) With a short list (`100p, 1n, 4.7n, 10n`): every capacitor in every BOM row is a list member; a section that cannot be met reports it (no crash, no silent off-list value). (3) Edit the list → sections re-solve; restore it → results come back. (4) Bad input (`abc`, empty, negative) → message, previous list kept. `python verify.py` passes; `dev/qa/` run per its levels.
-- **Open questions:** Does the custom list replace the E-series or add to it (union — e.g. "E6 plus 3.3n")? Do the capacitor range / ratio limits (`ratio`, min/max C) still apply, or does the list define the range? Is a custom resistor list wanted as well? Should the list be saved with the project (FS-011)?
+- **Open questions:** — (resolved 2026-10-06, maintainer: replace, not union; C_min/C_max do not apply — hidden, range from the list; one box at the top of the tab; no extra snap seeds; no custom R list; no save until FS-011)
 - **Notes:**
   - Requested by Christopher Paul (external user), 2026-10-05.
-  - Today the snappers build a value grid by repeating a normalized E-row over decades; the custom list needs an absolute-value grid path beside it. Three separate E-tables exist (`discrete_snapper`, `unified_solver_v2`, `first_order_solver`) — route all through one candidate-grid helper rather than patching each.
-- **Updated:** 2026-10-05
+  - 2026-10-06 built. `dev/fs037/check_custom_caps.py` passes: E-series grids bit-identical to the old builders in all four places; Custom = E12-in-window gives identical BOMs on LP2-VCVS, BP2-MFB, LPn3-VCVS, LPn2-VCVS (parallel C2), N2-AM (C1 split), HP2-MFB, and the 1st-order E12 rows are a subset of the Custom rows; with `100p, 1n, 4.7n, 10n` every capacitor and split leg is on-list (the two LPn sections find no realization — sparse list, no crash). App checked in the browser: manual + Batch Custom, list edit re-solves / restore hits the cache, bad input keeps the previous list, 1st-order section, report generates. Pending: maintainer test, commit.
+  - 2026-10-06 sparse-list scale search measured and **not added** (`dev/fs037/measure_scale_search.py`): 40 sections × 4 short lists (`100p, 1n, 4.7n, 10n`; `1n, 2.2n, 4.7n, 10n`; `1n, 10n, 100n`; a 10-value stock list), Balanced. Always adding the snap-optimal scale, or the 3 best "one cap lands exactly on a list value" scales, rescued **0 of 37** no-BOM runs (it only adds rows where BOMs already exist). Of the 37: 15 fail with E12 in the default envelope too (cell/envelope limits: 2LPn-unity on the elliptic section, the HPn-MFB set); 8 fail with E12 over the same narrower window (the list's range, not its sparsity); 14 are genuinely the sparse list — all notch cells (3LPn-unity, 2N-MFB, AM `-C1s`, 2LPn zero-manifold), whose zero is fixed by a capacitor RATIO that RC scaling cannot change. A remedy would have to widen the ratios a list offers (e.g. parallel pairs on more capacitors), not the scale — separate item if wanted.
+  - Side effect: `zero_manifold_solver` had no E3 row (an empty grid for the 2LPn parallel-C2 cells under E3); the shared helper fixes it, and the stale "E3 must be added" caption is gone.
+- **Updated:** 2026-10-06
 
 ### FS-038 — Monte Carlo: optional op-amp parameter spread + layered band
 - **State:** PROPOSED

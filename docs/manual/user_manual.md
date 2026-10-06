@@ -79,8 +79,8 @@ table in Tab 3. Everything outside these boxes only displays.
 | Lowpass prototype | A normalized low-pass whose passband edge is at ω = 1 rad/s. The app maps it to the chosen filter type and frequencies. Custom H(s) can take one directly, or a complete H(s) that is already the final filter. |
 | Cell | A named circuit that realizes a section, e.g. `3LP-gained` or `2BP-MFB-QE`. The name encodes order, response and variant (§7.3). |
 | BOM (candidate) | One complete set of component values for a section. A solve returns many, ranked. |
-| Envelope | The limits a BOM must respect: C_min…C_max, R_min…R_max, Max R ratio, and the E-series. |
-| Snapping | Resistors are solved as continuous values, then moved to values of your resistor E-series. Capacitors are taken from their E-series from the start and are never snapped. |
+| Envelope | The limits a BOM must respect: C_min…C_max, R_min…R_max, Max R ratio, and the E-series (or your custom capacitor list). |
+| Snapping | Resistors are solved as continuous values, then moved to values of your resistor E-series. Capacitors are taken from their E-series (or your custom capacitor list) from the start and are never snapped. |
 | Sens (sensitivity score) | How strongly the section's transfer-function coefficients move when a component drifts by 1 %. Lower is better. A ranking figure, not a predicted tolerance — Monte-Carlo in Tab 4 is that. |
 | Snap cost | How far the snapped parts leave the section from its target: a weighted sum of the fractional errors in gain, pole frequency, Q and notch depth. 0 is perfect, lower is better. Like Sens, it ranks; it is not a percentage. |
 | Design vs realized | Design is the mathematical target (blue curves). Realized is what the snapped parts do with the chosen op-amp model (red curves). |
@@ -467,7 +467,15 @@ the candidates table.
 
 At the top of the tab, above **Convergence Settings**, the **Batch mode**
 switch decides whether each section has its own op-amp and component envelope
-(off, the default) or all sections share one (on).
+(off, the default) or all sections share one (on). Below it, **Custom
+capacitor values** holds the one capacitor list the design uses for every
+section whose capacitor series is **Custom**.
+
+### Custom capacitor values
+
+| Control | Key | Default | What it does |
+|---|---|---|---|
+| Capacitor values | `hw_cap_custom` | 100p, 220p, 470p, 1n, 2.2n, 4.7n, 10n | The capacitor values you stock. Type them with a p / n / u (or µ) suffix and an optional F — `100p`, `4.7n`, `4.7 nF`, `4n7`, `1u` — separated by commas, semicolons or spaces. They are sorted and duplicates dropped; the caption shows the list in use. Values are used **exactly as given**: unlike an E-series, `4.7n` does not also give 47n or 470p. A section on **Custom** uses only these values for every capacitor (two of them in parallel where a cell splits a capacitor), and C_min / C_max do not apply to it — the list's smallest and largest values are its capacitor range. Changing the list re-solves those sections; setting it back brings the earlier results back. Needs at least two values spanning at least 1.5×; an invalid entry is reported and the previous list stays in use. |
 
 ### Batch mode
 
@@ -527,10 +535,10 @@ same keys ending in the shared tag instead of the section number.
 | Topology family | `hw_fam_*` | VCVS (Sallen-Key); MFB for a 3rd-order band-pass | VCVS (Sallen-Key), MFB (Friend) or AM (Ackerberg–Mossberg). §4 helps choose. A 3rd-order band-pass section has cells only in MFB, so it starts on MFB; a later choice of yours stays. |
 | Op-amp model | `hw_opamp_choice_*` | Ideal (no op-amp limits) | **Ideal**, a library part, or **Custom…** — see *The op-amp library* below. With a real part the solver corrects for it and checks the BOM against its non-ideal model (§5). Under the picker a caption gives the part's A_ol, GBWP, Ro and origin (built-in, built-in · edited, or user part). |
 | A_ol (V/V), GBWP (Hz), Ro (Ω) | `hw_aol_*`, `hw_gbwp_*`, `hw_ro_*` | 1e5, 1e6, 1200 | **Custom…** only: open-loop gain, gain-bandwidth product, output resistance. |
-| C_min, C_max (µF) | `hw_cmin_*`, `hw_cmax_*` | 6.80e-05, 1.00e-02 | Capacitor window: 68 pF to 10 nF. |
+| C_min, C_max (µF) | `hw_cmin_*`, `hw_cmax_*` | 6.80e-05, 1.00e-02 | Capacitor window: 68 pF to 10 nF. Hidden when the capacitor series is **Custom**: a caption shows the custom list's range instead, and your values come back when you switch to an E-series. |
 | R_min, R_max (kΩ) | `hw_rmin_*`, `hw_rmax_*` | 0.3000, 2000.0 | Resistor window: 300 Ω to 2 MΩ. |
 | Max R ratio | `hw_ratio_*` | 500 | Largest over smallest resistor in one BOM. A wider spread is rejected. An MFB band-pass alone needs about 4·Q², so 500 allows Q up to about 11. |
-| Capacitor E-series | `hw_cser_*` | E12 | E3, E6 or E12 — one. Capacitor values come from this series directly. E3 is not usable yet (§6.3). |
+| Capacitor E-series | `hw_cser_*` | E12 | E3, E6, E12 or **Custom** — one. Capacitor values come from this series directly; **Custom** takes them from the *Custom capacitor values* list at the top of the tab. |
 | Resistor E-series | `hw_rser_*_*` | E48 | E12, E24, E48, E96 — any combination. Resistors are snapped to the union. With none ticked, E48 is used. |
 | Equalize R, C values | `hw_ameq_*` | on | AM only. The handbook balanced design: R5 = R6 = R7 = R8 and C2 = C3. Untick to free R5/R6 and C2/C3 for a closer E-series fit; R7 = R8 stays matched. |
 | Gained MFB | `hw_mfbgain_*` | off | MFB, 2nd-order high-pass-notch sections: solve the unity/gained realization instead of the attenuating one. Its HF gain lives in a narrow band, so **Custom HF gain** is switched on and pre-filled with the band's middle. |
@@ -574,9 +582,11 @@ were replaced by TL072H, LM358B and TLV9001-4 in 1.1.0 — falls back to Ideal.
 A real pole that is not absorbed becomes a 1st-order section. Its expander is
 shorter, **⚙ Section N — component settings**: the op-amp, **C_max** (the pole
 is realized at the three E-series capacitor values nearest below it), and the
-two E-series. The resistor range is fixed at 100 Ω–10 MΩ. It needs no family
-and no Solve button: it is solved in closed form as soon as it appears. In
-Batch mode it takes the op-amp, C_max and E-series from the shared box.
+two E-series. With the capacitor series on **Custom**, C_max is hidden and the
+pole is realized at every value of the custom list instead. The resistor range
+is fixed at 100 Ω–10 MΩ. It needs no family and no Solve button: it is solved
+in closed form as soon as it appears. In Batch mode it takes the op-amp, C_max
+and E-series from the shared box.
 
 ![A 1st-order section: realization, gain, and the cell it selects.](img/54-first-order-section.png)
 
@@ -916,7 +926,7 @@ Yellow warnings under the diagnostics do not stop the design:
 | ⏳ … section (family …) — solver not yet available; gated to avoid mis-solving on a mismatched cell. | No solver exists for this kind of section yet. | Re-pair so the section becomes a supported kind — e.g. untick absorption. |
 | Section N is a 3rd-order band-pass … Switch this section to MFB (Friend) … | VCVS and AM cannot place the third pole of a band-pass. Solve is greyed. Such a section starts on MFB; the message appears when you switch it away. | Family → MFB, or give the real pole its own section. |
 | No R series selected — defaulting to E48. | No resistor series ticked. | Tick at least one. |
-| ⚠ E3 must be added to `unified_solver_v2._E_SERIES`, else the cap grid is empty. | E3 capacitors are not enabled in the solver yet. | Use E6 or E12. |
+| not a capacitor value: … (use a p / n / u suffix …) — still using the previous list. Also: enter at least 2 different values; the values must span at least 1.5×. | The *Custom capacitor values* entry cannot be used. The sections keep the last valid list. | Fix the entry as the message says. |
 | ⚙️ Solving… (other sections and tabs stay responsive) | Normal. | Keep working elsewhere. |
 | ⏳ Queued — waiting for a free core (other sections and tabs stay responsive) | More sections are solving than there are free cores (§1). | Wait; it starts when a core is free. |
 | ℹ Near-notch section: f_z is …% from f₀ … Solved on both … and the pure-notch …; the BOMs are ranked together by snap cost. | Informational (§3.4). | — |
@@ -1030,7 +1040,7 @@ Importing a vendor model (§9.3):
 
 | Series | Values per decade | Usual tolerance class | Offered for |
 |---|---|---|---|
-| E3 | 3 | wider than ±20 % | capacitors (not usable yet) |
+| E3 | 3 | wider than ±20 % | capacitors |
 | E6 | 6 | ±20 % | capacitors |
 | E12 | 12 | ±10 % | capacitors, resistors |
 | E24 | 24 | ±5 % | resistors |

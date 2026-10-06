@@ -44,6 +44,7 @@ from itertools import product as iproduct
 from scipy.optimize import least_squares
 
 import tf_derivation_v2 as TF
+import cap_values as CV
 
 
 # cells this path applies to (zero-manifold AND C2 present).
@@ -61,21 +62,10 @@ PARALLEL_C2_CELLS = {"2LPn-gained", "2LPn-unity", "2LPn-atten"}
 # =====================================================================
 # E-series + parallel-pair C2 granularity
 # =====================================================================
-def _eseries_grid(series_str, c_min, c_max):
-    E = {
-        "E6":  [1.0, 1.5, 2.2, 3.3, 4.7, 6.8],
-        "E12": [1.0, 1.2, 1.5, 1.8, 2.2, 2.7, 3.3, 3.9, 4.7, 5.6, 6.8, 8.2],
-        "E24": [1.0,1.1,1.2,1.3,1.5,1.6,1.8,2.0,2.2,2.4,2.7,3.0,3.3,3.6,
-                3.9,4.3,4.7,5.1,5.6,6.2,6.8,7.5,8.2,9.1],
-    }
-    base = set()
-    for p in [x.strip().upper() for x in series_str.split(",")]:
-        if p in E:
-            base.update(E[p])
-    arr = np.array(sorted(base))
-    mult = [10**i for i in range(-6, 0)]
-    grid = np.sort([round(v*m, 12) for m in mult for v in arr])
-    return grid[(grid >= c_min*0.99) & (grid <= c_max*1.01)]
+def _eseries_grid(series_str, c_min, c_max, custom=None):
+    """Cap grid (µF) for the parallel-C2 path: E-series over decades 1e-6..1e-1,
+    or the FS-037 custom list as given (cap_values)."""
+    return CV.cap_grid(series_str, c_min, c_max, range(-6, 0), custom=custom)
 
 
 def _parallel_c2_values(grid, c_min, c_max):
@@ -210,7 +200,7 @@ def build_candidates(case, valleys, cfg, max_c2_cands=4):
     to their two nearest E-series values. cap_map always contains every cap
     in the cell's layout."""
     import unified_solver_v2 as S
-    grid = _eseries_grid(cfg["C_series"], cfg["C_min"], cfg["C_max"])
+    grid = _eseries_grid(cfg["C_series"], cfg["C_min"], cfg["C_max"], cfg.get("C_values"))
     c2_items = _parallel_c2_values(grid, cfg["C_min"], cfg["C_max"])
     lay = S.cell_layout(case)
     cap_names = lay["cap_names"]

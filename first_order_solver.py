@@ -30,17 +30,11 @@ from itertools import product
 
 import cells_first_order as fo
 from tf_derivation_v2 import make_response_func
-from discrete_snapper import (E_SERIES_BASE, build_merged_resistor_grid,
-                              get_two_nearest)
+from discrete_snapper import build_merged_resistor_grid, get_two_nearest
 from scoring import metrics_for
+import cap_values as CV
 
-# Capacitor E-series (E3/E6 not in discrete_snapper.E_SERIES_BASE -> add here).
-_CAP_SERIES = {
-    "E3":  [1.0, 2.2, 4.7],
-    "E6":  [1.0, 1.5, 2.2, 3.3, 4.7, 6.8],
-    "E12": E_SERIES_BASE["E12"],
-    "E24": E_SERIES_BASE["E24"],
-}
+_CAP_DECADES = range(-7, 3)                              # uF decades
 
 GAIN_UNITY_TOL = 0.02        # |G-1| within this -> 'unity' mode (matches topology_tab)
 
@@ -48,35 +42,22 @@ GAIN_UNITY_TOL = 0.02        # |G-1| within this -> 'unity' mode (matches topolo
 R3R4_SERIES_LO_MOHM, R3R4_SERIES_HI_MOHM = 0.005, 0.050   # 5 kOhm .. 50 kOhm
 
 
-def build_cap_grid(series_str, c_min, c_max):
-    """E-series cap grid (uF) within [c_min, c_max]. Mirrors
+def build_cap_grid(series_str, c_min, c_max, custom=None):
+    """E-series cap grid (uF) within [c_min, c_max] (E12 if no series is
+    known), or the FS-037 custom list as given. Mirrors
     discrete_snapper.build_merged_resistor_grid for resistors."""
-    parts = [p.strip().upper() for p in series_str.split(",")]
-    base = set()
-    for p in parts:
-        base.update(_CAP_SERIES.get(p, E_SERIES_BASE.get(p, [])))
-    if not base:
-        base.update(_CAP_SERIES["E12"])
-    base = np.array(sorted(base))
-    mult = [10**i for i in range(-7, 3)]                 # uF decades
-    grid = np.sort([round(v*m, 12) for m in mult for v in base])
-    return grid[(grid >= c_min*0.99) & (grid <= c_max*1.01)]
+    return CV.cap_grid(series_str, c_min, c_max, _CAP_DECADES, custom=custom,
+                       fallback="E12")
 
 
-def nearest_lower_caps(series_str, c_max, n=3):
+def nearest_lower_caps(series_str, c_max, n=3, custom=None):
     """The n largest E-series cap values (uF) at or below c_max (i.e. the n
     values closest to C_max from below). The 1st-order tab makes the cap the
     design DOF, so the solutions list is realized at these n standard caps under
-    the C_max bound. Returns ascending; fewer than n if the series runs out."""
-    parts = [p.strip().upper() for p in series_str.split(",")]
-    base = set()
-    for p in parts:
-        base.update(_CAP_SERIES.get(p, E_SERIES_BASE.get(p, [])))
-    if not base:
-        base.update(_CAP_SERIES["E12"])
-    base = np.array(sorted(base))
-    mult = [10**i for i in range(-7, 3)]
-    grid = np.sort([round(v*m, 12) for m in mult for v in base])
+    the C_max bound. Returns ascending; fewer than n if the series runs out.
+    With a custom list (FS-037) the candidates are the list values."""
+    grid = CV.cap_grid(series_str, None, c_max, _CAP_DECADES, custom=custom,
+                       fallback="E12")
     below = grid[grid <= c_max * (1 + 1e-9)]
     if below.size == 0:
         return np.array([])
@@ -224,9 +205,10 @@ def synthesize_first_order(cfg, opamp=None, topology=None, dc_gain=None,
     r_grid = build_merged_resistor_grid(cfg["R_series"], cfg["R_min"], cfg["R_max"])
     if cfg.get("cap_mode", "nearest_lower") == "nearest_lower":
         cap_grid = nearest_lower_caps(cfg["C_series"], cfg["C_max"],
-                                      int(cfg.get("n_caps", 3)))
+                                      int(cfg.get("n_caps", 3)), cfg.get("C_values"))
     else:
-        cap_grid = build_cap_grid(cfg["C_series"], cfg.get("C_min", 0.0), cfg["C_max"])
+        cap_grid = build_cap_grid(cfg["C_series"], cfg.get("C_min", 0.0), cfg["C_max"],
+                                  cfg.get("C_values"))
     if r_grid.size == 0 or cap_grid.size == 0:
         return {"snapped": [], "continuous": [], "cases": cases,
                 "mode": "nonideal" if op else "ideal"}

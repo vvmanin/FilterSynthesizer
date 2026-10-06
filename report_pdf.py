@@ -1267,7 +1267,8 @@ def build_report(ctx, opts=None):
                 "survive only if the Topology tab stored the paired continuous "
                 "row (bom_picks_cont). Re-pick the BOM row, or check patch 2 in "
                 "REPORT_INTEGRATION.md. Capacitors never have an ideal twin — "
-                "the solver emits them already on the E-series grid.",
+                "the solver emits them already on the capacitor grid (E-series or "
+                "custom list).",
                 S["cap"]))
 
         env = sec.get("env") or {}
@@ -1282,13 +1283,17 @@ def build_report(ctx, opts=None):
                             CONTENT_W, S, cols=2))
 
         F.append(Paragraph("Solver constraints", S["h3"]))
-        F.append(spec_table([("R series", env.get("R_series", "—")),
-                             ("C series", env.get("C_series", "—")),
-                             ("R range", f"{_fmt_res(env.get('R_min'))}Ω … "
-                                         f"{_fmt_res(env.get('R_max'))}Ω"),
-                             ("C range", f"{_fmt_cap(env.get('C_min'))}F … "
-                                         f"{_fmt_cap(env.get('C_max'))}F")],
-                            CONTENT_W, S, cols=2))
+        c_vals = env.get("C_values")          # FS-037 custom capacitor list
+        c_rows = [("R series", env.get("R_series", "—")),
+                  ("C series", env.get("C_series", "—")),
+                  ("R range", f"{_fmt_res(env.get('R_min'))}Ω … "
+                              f"{_fmt_res(env.get('R_max'))}Ω"),
+                  ("C range", f"{_fmt_cap(env.get('C_min'))}F … "
+                              f"{_fmt_cap(env.get('C_max'))}F"
+                              + (" (custom list)" if c_vals else ""))]
+        if c_vals:
+            c_rows.append(("C values", ", ".join(f"{_fmt_cap(v)}F" for v in c_vals), True))
+        F.append(spec_table(c_rows, CONTENT_W, S, cols=2))
 
         if opts.get("metrics"):
             m = sec.get("metrics") or {}
