@@ -154,7 +154,7 @@ first.
 | FS-032 | Magnitude correction of an existing system from measured Bode points | P3 *(s)* | PROPOSED | plan max / build xhigh (per stage) | FS-007 (done); FS-014 (hard, realization stage only); FS-031 (soft) |
 | FS-034 | SPICE row checker: simulate a section's top BOM rows with vendor models | P4 | PROPOSED | plan high / build high | FS-008 (done), FS-029 (done) |
 | FS-037 | Custom capacitor value list ("custom C row") for snapping | P1 | PROPOSED | plan high / build medium | — |
-| FS-038 | Monte Carlo: optional op-amp parameter spread | P1 | PROPOSED | medium | FS-018 (soft) |
+| FS-038 | Monte Carlo: optional op-amp parameter spread + layered band | P1 | PROPOSED | analysis high / build medium | FS-018 (soft) |
 
 *(s)* = suggested priority, awaiting maintainer confirmation.
 
@@ -523,24 +523,26 @@ answered against FS-031's equalizer — plan FS-031 first.
   - Today the snappers build a value grid by repeating a normalized E-row over decades; the custom list needs an absolute-value grid path beside it. Three separate E-tables exist (`discrete_snapper`, `unified_solver_v2`, `first_order_solver`) — route all through one candidate-grid helper rather than patching each.
 - **Updated:** 2026-10-05
 
-### FS-038 — Monte Carlo: optional op-amp parameter spread
+### FS-038 — Monte Carlo: optional op-amp parameter spread + layered band
 - **State:** PROPOSED
 - **Priority:** P1 (maintainer)
-- **Effort:** medium
-- **Tiers:** D (`hw_plots.monte_carlo`, Response tab MC controls, report)
-- **Depends on:** FS-018 (soft — provenance fields could later supply per-part min/max)
+- **Effort:** analysis high / build medium
+- **Tiers:** D (`hw_plots.monte_carlo` + `bode_figure`, Response tab MC controls, report)
+- **Depends on:** FS-018 (soft — provenance fields could later supply per-part min/max instead of one global range)
 - **Contracts:** —
-- **Files:** `hw_plots.py` (`monte_carlo` ~L241: op-amp symbols `A_ol` / `GBWP_hz` / `Ro` are held at tolerance 0 today), `response_tab.py` (MC controls beside the R bands / C tolerance; `_eval_opamp` ~L135), `report_pdf.py` (MC parameter line ~L1002) / `report_ui.py`; optional `spice_export.py` (mirror in the LTspice MC preset)
-- **Goal:** A checkbox in the Monte Carlo controls adds a random spread of the op-amp non-ideal parameters (A_ol, GBWP, Ro) to each run, set separately from the R and C tolerances, so the MC band shows the op-amp's contribution.
+- **Files:** Stage 1 — new `dev/FS-038_opamp_spread_note.md` (+ `dev/fs038/` scratch scripts). Stage 2 — `hw_plots.py` (`monte_carlo` ~L241: op-amp symbols `A_ol` / `GBWP_hz` / `Ro` held at tolerance 0 today; `bode_figure` ~L319 band drawing, `_C_BAND`), `response_tab.py` (MC controls beside the R bands / C tolerance; `_eval_opamp` ~L135), `report_pdf.py` (MC parameter line ~L1002, MC band in the Bode plot) / `report_ui.py`; optional `spice_export.py` (mirror in the LTspice MC preset)
+- **Goal:** An optional checkbox **"Distort op-amp parameters"** in the Monte Carlo controls spreads the op-amp non-ideal parameters (A_ol, GBWP, Ro) in every run, set separately from the R and C tolerances. The plot keeps today's passive-tolerance band and adds, in a darker tone on both sides of it, the extra band width the op-amp spread causes.
 - **Scope:**
-  - In — checkbox (off by default → results identical to today); a spread per parameter (± % or min/max relative to the nominal), using the same distribution choice (gaussian n-σ / uniform) as R/C; the spread applied per op-amp per run; ideal op-amp sections unaffected (nothing to spread, noted in the UI); report records the setting.
-  - Out — new op-amp parameters (offset, slew rate, noise); temperature drift; changing the realized (nominal) response.
-- **Validation:** (1) Checkbox off → MC result bit-identical to today (same seed). (2) Checkbox on with R/C tolerances set to 0 → band = op-amp-only spread; it widens with the spread and mostly near/above GBWP-limited frequencies; zero spread → band collapses to the realized curve. (3) A high-Q section with a low-GBWP part shows a visibly wider band than with an ideal-ish part. (4) Report shows the setting.
-- **Open questions:** Spread entry: ± % symmetric, or asymmetric (datasheet min/typ — A_ol and GBWP are usually "min" specs, i.e. one-sided)? Global for all op-amps, or per op-amp type? Channels in one package correlated (same draw for a dual's two halves) or independent? Mirror it in the LTspice MC export (FS-008), or the app only?
+  - Stage 1 (reasoning, analysis-only — §1 exception): is it reasonable and what range. (a) Which parameters matter per cell family (GBWP dominates where f₀·Q approaches GBWP; A_ol mostly through DC/low-f gain of gained cells; Ro through MFB/AM output loading) — sensitivity of the shipped cells to each, measured with the existing H functions. (b) Spread model: the proposed default 0.5×–2× of nominal — check against datasheet min/typ/max data for the shipped library parts (GBWP typically ~±20–50 % over process and temperature; A_ol min often 3–10× below typ; Ro rarely specified) and propose per-parameter defaults (possibly tighter for GBWP, wider/one-sided for A_ol); distribution — log-uniform or log-normal (a ×0.5–×2 range is symmetric in log, not in linear %). (c) Correlation: one draw per package (dual halves together) vs per op-amp vs per section. (d) Display method (below) and its run count. Deliverable: the note with a recommendation and screenshots/plots on 3–4 designs; maintainer decides before Stage 2.
+  - Stage 2 (build): checkbox off by default → results identical to today; spread inputs per parameter (default per Stage 1); spread applied per Stage 1's correlation rule; ideal-op-amp sections unaffected (UI says so); layered display — inner band = passives only (today's colour), outer darker bands = passives + op-amp, drawn only where they extend beyond the inner band; legend entries for both; report: settings line + the same layered band.
+  - Out — new op-amp parameters (offset, slew rate, noise); temperature drift; changing the nominal realized response or the BOM solve.
+- **Validation:** (1) Checkbox off → MC result and plot bit-identical to today (same seed). (2) R/C tolerances 0, checkbox on → inner band collapses to the realized curve, outer band = op-amp-only spread; spread range → 1×–1× collapses the outer band too. (3) Both on → outer band encloses the inner band at every frequency (common random numbers, see Notes). (4) A high-Q section with a low-GBWP part shows a visibly wider outer band than the same design with a high-GBWP part. (5) Report shows the setting and both bands; dark and light themes legible.
+- **Open questions:** Per-parameter ranges or one common factor? Global for all op-amps, or per op-amp type in the design? Mirror in the LTspice MC export (FS-008), or the app only? Is a run-count increase acceptable (two band computations)?
 - **Notes:**
-  - Requested by Christopher Paul (external user), 2026-10-05.
+  - Requested by Christopher Paul (external user), 2026-10-05; refined 2026-10-06 (checkbox name, 0.5×–2× default to be reasoned, layered darker band, reasoning first).
   - `comp_dict` already places the op-amp parameters in each section's evaluation dict, so the perturbation slots into the existing per-run loop without touching the cell math.
-- **Updated:** 2026-10-05
+  - Layered band: compute both bands from the **same R/C draws per run** (common random numbers: one pass gives passive-only and passive+op-amp responses per run), so the difference is the op-amp contribution and not sampling noise; clip the outer band to the inner where percentile noise would put it inside. Cost ≈ 2× the current MC evaluation.
+- **Updated:** 2026-10-06
 
 ---
 
@@ -559,12 +561,12 @@ FS-007 — Custom filter design (coefficients or poles/zeros) — DONE 2026-09-2
 FS-008 — LTspice export with Monte Carlo presets — DONE 2026-09-30 — f7c83f6 (`spice_cells` / `spice_asc` / `spice_opamps` / `spice_export` / `spice_ui`, `LTspice_Library/` with 26 cell templates; design note `dev/FS-008_ltspice_export_design_note.md`; checks `dev/fs008/check_spice_export.py`; open items — the two-TI-model helper collision and the last round's LTspice checks — moved to FS-029; the rule for new cells lives in `CLAUDE.md`)
 FS-029 — Vendor op-amp model import (guided download, per-part wrapper) — DONE 2026-09-30 — maintainer's commit (`spice_opamps` model_candidates / install_wrapped / localize_model / repair_imports, FS_<PART>.lib wrapper isolates vendor helper subckts; per-part FS generic fallback; checks `dev/fs008/check_spice_export.py` 13, LTspice test `dev/fs029/make_wrapper_test.py`; LTspice 26: two TI parts run)
 FS-035 — UI polish batch (Saal C leading constant, BOM caption, schematics expander) — DONE 2026-10-02 — 71ed779 (`dev/UI_POLISH_2026-10-02.md`)
-
 FS-033 — Near-notch sections (f_z close to f₀) classified as pure notch — DONE 2026-10-04 — 67d931c (Q-aware notch rule + dual 2N / LPn-HPn solve ranked by snap cost; design note `dev/FS-033_near_notch_design_note.md`)
 FS-028 — Topology solver performance — DONE 2026-10-04 — df652c2, 69c34b0, 4cc7148, 00f5dec (S2-1 compile-once cell kernels, S2-2 batched LM core, S2-2b batched snapper, S2-4 step 1 Batch mode + parallel section solves + idle polling removed; analysis `dev/FS-028_solver_performance_analysis.md`. Not built: S2-3 learned seeds (deprioritised), S2-4 steps 2 (self-adjusting rescue) and 3 (SPICE-level row check) — open as new items if wanted)
 FS-036 — QA & benchmark harness (`dev/qa/`) — DONE 2026-10-04 — 1be46a1 (first full-level report `dev/qa/reports/QA_2026-10-03.md`)
 FS-015 — Topology tab Overall filter: BP values off (validate BR) — DONE 2026-10-04 — bf81544 (band-pass overall gain measured on the swept cascade)
 FS-016 — Auto-pairing review: all types, esp. BP/BR; Q < 0.5 pairs — DONE 2026-10-04 — 56fef88 (scope limited by the maintainer to unrealizable pairings: real+real stages, lowest-Q realizable absorption host, BP1LP / BP1HP default MFB, Custom H(s) pre-flight. Not addressed: "optimal" distribution criteria; seen, not fixed: `KeyError: '3LPn-atten'` with VCVS at sub-unity gain (QA 2026-10-02 §4.1), generic LP/HP pairer absorbs without a realizability test)
+
 ---
 
 ## 7. User-manual backlog
